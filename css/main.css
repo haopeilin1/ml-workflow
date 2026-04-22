@@ -1,0 +1,70 @@
+/* ===== 基础滚动条隐藏 ===== */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ===== 卡片过渡 ===== */
+.mode-card { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+
+/* ===== 光标闪烁 ===== */
+@keyframes blink { 50% { opacity: 0; } }
+.cursor { display: inline-block; width: 8px; height: 18px; background: #8CB4FF; margin-left: 4px; animation: blink 1s infinite; vertical-align: middle; }
+
+/* ===== 淡入动画 ===== */
+.animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ===== 按钮过渡 ===== */
+.btn-transition { transition: all 0.25s ease-in-out; }
+.btn-hidden { opacity: 0; transform: scale(0.8) rotate(45deg); pointer-events: none; }
+
+/* ===== 旋转加载 ===== */
+@keyframes spin { to { transform: rotate(360deg); } }
+.animate-spin-slow { animation: spin 1.5s linear infinite; }
+
+/* ===== 打字机加载点 ===== */
+.typing-dot { animation: typing 1.4s infinite ease-in-out both; }
+.typing-dot:nth-child(1) { animation-delay: -0.32s; }
+.typing-dot:nth-child(2) { animation-delay: -0.16s; }
+@keyframes typing { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
+/* ===== 数据画像卡片背景 ===== */
+.profile-card { background: linear-gradient(135deg, #f0f7ff 0%, #ffffff 100%); }
+
+/* ===== 槽位徽章 ===== */
+.slot-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.slot-badge.target { background: #dbeafe; color: #1e40af; }
+.slot-badge.task { background: #dcfce7; color: #166534; }
+.slot-badge.metric { background: #fef3c7; color: #92400e; }
+.slot-badge.constraints { background: #fee2e2; color: #991b1b; }
+
+/* ===== 选项按钮 ===== */
+.option-btn { transition: all 0.2s; border: 1.5px solid #e5e7eb; }
+.option-btn:hover { border-color: #8CB4FF; background: #f0f7ff; }
+.option-btn.selected { border-color: #8CB4FF; background: #dbeafe; color: #1e40af; }
+
+/* ===== 模式按钮禁用 ===== */
+.mode-btn-disabled { opacity: 0.45; pointer-events: none; filter: grayscale(0.6); }
+
+/* ===== Agent 头像 ===== */
+.agent-avatar { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #8CB4FF, #60a5fa); display: flex; align-items: center; justify-content: center; color: white; font-size: 14px; flex-shrink: 0; }
+
+/* ===== 阶段指示器 ===== */
+.stage-indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: #6b7280; }
+.stage-indicator .dot { width: 6px; height: 6px; border-radius: 50%; background: #d1d5db; }
+.stage-indicator.active .dot { background: #8CB4FF; box-shadow: 0 0 0 3px rgba(140,180,255,0.3); }
+.stage-indicator.done .dot { background: #22c55e; }
+
+/* ===== 字段标签 ===== */
+.column-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; font-size: 11px; background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
+.column-tag.suggested { background: #dbeafe; color: #1e40af; border-color: #8CB4FF; }
+.column-tag.target { background: #dcfce7; color: #166534; border-color: #86efac; }
+
+/* ===== 文件上传区 ===== */
+.file-drop-zone { transition: all 0.2s; border: 2px dashed transparent; }
+.file-drop-zone.drag-over { border-color: #8CB4FF; background: #f0f7ff; }
+
+/* ===== 多文件列表 ===== */
+.file-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 8px; font-size: 12px; background: #f3f4f6; border: 1px solid #e5e7eb; }
+.file-chip.active { background: #dbeafe; border-color: #8CB4FF; color: #1e40af; }
+.file-chip .remove { opacity: 0; transition: opacity 0.15s; }
+.file-chip:hover .remove { opacity: 1; }
