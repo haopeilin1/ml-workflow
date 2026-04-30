@@ -140,33 +140,35 @@ const FastUI = {
             this._renderCodePanel();
         }
 
-        // 自动切换到代码标签页
-        if (typeof switchTab === 'function') {
+        // 自动切换到代码标签页（仅在非 debug 时，避免修复过程中频繁跳转）
+        if (typeof switchTab === 'function' && type !== 'debug') {
             switchTab('code');
         }
 
-        // 左侧添加代码生成摘要，同时移除之前的编码阶段状态卡片（避免重复显示"正在修复..."和"修复后的代码"）
+        // 移除编码阶段的动态状态卡片，避免与后续状态卡片重复
         const sysContainer = document.getElementById('system-messages');
         const existingPhaseCard = document.getElementById('fast-phase-card');
         if (existingPhaseCard) existingPhaseCard.remove();
 
-        const { round } = meta;
-        let label = 'Pipeline 代码已生成';
-        if (type === 'debug') label = `第 ${round} 次修复后的代码`;
-        if (type === 'optimize') label = `第 ${round} 轮优化后的代码`;
-        if (type === 'user_feedback') label = '根据您的反馈调整后的代码';
+        // 仅在非 debug 时左侧显示代码生成摘要（修复代码不显示，避免刷屏）
+        if (type !== 'debug') {
+            const { round } = meta;
+            let label = 'Pipeline 代码已生成';
+            if (type === 'optimize') label = `第 ${round} 轮优化后的代码`;
+            if (type === 'user_feedback') label = '根据您的反馈调整后的代码';
 
-        const html = `
-            <div class="self-start bg-blue-50/50 border border-blue-100 rounded-2xl p-3 text-gray-600 text-xs max-w-[90%] shadow-sm mt-2 animate-fade-in">
-                <div class="flex items-center gap-2">
-                    <i class="ph-fill ph-check-circle text-blue-500"></i>
-                    <span>${label}</span>
-                    <span class="text-gray-400">(${code.split('\n').length} 行)</span>
+            const html = `
+                <div class="self-start bg-blue-50/50 border border-blue-100 rounded-2xl p-3 text-gray-600 text-xs max-w-[90%] shadow-sm mt-2 animate-fade-in">
+                    <div class="flex items-center gap-2">
+                        <i class="ph-fill ph-check-circle text-blue-500"></i>
+                        <span>${label}</span>
+                        <span class="text-gray-400">(${code.split('\n').length} 行)</span>
+                    </div>
                 </div>
-            </div>
-        `;
-        sysContainer.insertAdjacentHTML('beforeend', html);
-        Renderer.scrollToBottom();
+            `;
+            sysContainer.insertAdjacentHTML('beforeend', html);
+            Renderer.scrollToBottom();
+        }
     },
 
     _renderCodePanel() {
@@ -238,6 +240,92 @@ const FastUI = {
                 }
             });
         }, 10);
+    },
+
+    showDebugStart(round) {
+        const sysContainer = document.getElementById('system-messages');
+        const html = `
+            <div class="self-start bg-amber-50/50 border border-amber-100 rounded-2xl p-3 text-gray-600 text-xs max-w-[90%] shadow-sm mt-2 animate-fade-in">
+                <div class="flex items-center gap-2">
+                    <i class="ph-fill ph-wrench text-amber-500"></i>
+                    <span>第 ${round} 次代码修复</span>
+                </div>
+            </div>
+        `;
+        sysContainer.insertAdjacentHTML('beforeend', html);
+        Renderer.scrollToBottom();
+    },
+
+    // 根据任务类型和实际存在的指标字段，生成左侧结果卡片要显示的指标项
+    _getResultMetricItems(metrics, taskType) {
+        const fmt = (v) => {
+            if (v === null || v === undefined) return 'N/A';
+            const n = Number(v);
+            if (isNaN(n)) return String(v);
+            if (Math.abs(n) >= 10000) return n.toFixed(2);
+            if (Math.abs(n) >= 1) return n.toFixed(4).replace(/\.?0+$/, '');
+            return n.toFixed(4);
+        };
+        const items = [];
+        if (taskType === 'regression') {
+            if (metrics?.val_rmse !== null && metrics?.val_rmse !== undefined) {
+                items.push({ value: fmt(metrics.val_rmse), raw: metrics.val_rmse, label: '验证集 RMSE', color: 'text-blue-600' });
+            }
+            if (metrics?.train_score !== null && metrics?.train_score !== undefined) {
+                items.push({ value: fmt(metrics.train_score), raw: metrics.train_score, label: '训练集 Score', color: 'text-purple-600' });
+            }
+        } else {
+            if (metrics?.val_auc !== null && metrics?.val_auc !== undefined) {
+                items.push({ value: fmt(metrics.val_auc), raw: metrics.val_auc, label: '验证集 AUC', color: 'text-blue-600' });
+            }
+            if (metrics?.val_accuracy !== null && metrics?.val_accuracy !== undefined) {
+                items.push({ value: fmt(metrics.val_accuracy), raw: metrics.val_accuracy, label: '准确率', color: 'text-green-600' });
+            }
+        }
+        if (metrics?.overfit_ratio !== null && metrics?.overfit_ratio !== undefined) {
+            const color = metrics.overfit_ratio > 1.05 ? 'text-red-500' : 'text-green-600';
+            items.push({ value: fmt(metrics.overfit_ratio), raw: metrics.overfit_ratio, label: '过拟合比', color });
+        }
+        return items;
+    },
+
+    // 根据任务类型和实际存在的指标字段，生成右侧结果面板要显示的指标项
+    _getPanelMetricItems(metrics, taskType) {
+        const fmtMetric = (v) => {
+            if (v === null || v === undefined || v === '') return '--';
+            const n = Number(v);
+            if (isNaN(n)) return String(v);
+            if (Math.abs(n) >= 10000) return n.toExponential(2);
+            if (Math.abs(n) >= 1) return n.toFixed(4).replace(/\.?0+$/, '');
+            return n.toFixed(4);
+        };
+        const items = [];
+        if (taskType === 'regression') {
+            if (metrics?.val_rmse !== null && metrics?.val_rmse !== undefined) {
+                items.push({ value: fmtMetric(metrics.val_rmse), raw: metrics.val_rmse, label: '验证集 RMSE', color: 'text-blue-400' });
+            }
+            if (metrics?.val_score !== null && metrics?.val_score !== undefined) {
+                items.push({ value: fmtMetric(metrics.val_score), raw: metrics.val_score, label: '验证集 Score', color: 'text-cyan-400' });
+            }
+            if (metrics?.train_score !== null && metrics?.train_score !== undefined) {
+                items.push({ value: fmtMetric(metrics.train_score), raw: metrics.train_score, label: '训练集 Score', color: 'text-purple-400' });
+            }
+        } else {
+            if (metrics?.val_auc !== null && metrics?.val_auc !== undefined) {
+                items.push({ value: fmtMetric(metrics.val_auc), raw: metrics.val_auc, label: '验证集 AUC', color: 'text-blue-400' });
+            }
+            if (metrics?.val_accuracy !== null && metrics?.val_accuracy !== undefined) {
+                items.push({ value: fmtMetric(metrics.val_accuracy), raw: metrics.val_accuracy, label: '准确率', color: 'text-green-400' });
+            }
+            if (metrics?.train_auc !== null && metrics?.train_auc !== undefined) {
+                items.push({ value: fmtMetric(metrics.train_auc), raw: metrics.train_auc, label: '训练集 AUC', color: 'text-purple-400' });
+            }
+        }
+        if (metrics?.overfit_ratio !== null && metrics?.overfit_ratio !== undefined) {
+            const color = metrics.overfit_severe ? 'text-red-400' : 'text-green-400';
+            items.push({ value: fmtMetric(metrics.overfit_ratio), raw: metrics.overfit_ratio, label: '过拟合比', color });
+        }
+        return items;
     },
 
     _toggleCodeBlock(containerId) {
@@ -351,22 +439,24 @@ const FastUI = {
                     <i class="ph-fill ph-trophy text-yellow-500"></i> 模型训练完成
                 </div>
                 ${reportHtml}
-                <div class="bg-gray-50 rounded-xl p-3 mb-3">
-                    <div class="grid grid-cols-3 gap-2 text-center">
-                        <div>
-                            <div class="text-lg font-bold text-blue-600 truncate" title="${metrics?.val_auc || 'N/A'}">${fmt(metrics?.val_auc)}</div>
-                            <div class="text-xs text-gray-400">验证集 AUC</div>
+                ${(() => {
+                    const taskType = FastEngine.state.taskConfig?.extracted_slots?.task_type || 'classification';
+                    const items = this._getResultMetricItems(metrics, taskType);
+                    if (items.length === 0) return '';
+                    const cols = items.length === 1 ? 'grid-cols-1' : items.length === 2 ? 'grid-cols-2' : 'grid-cols-3';
+                    return `
+                        <div class="bg-gray-50 rounded-xl p-3 mb-3">
+                            <div class="grid ${cols} gap-2 text-center">
+                                ${items.map(item => `
+                                    <div>
+                                        <div class="text-lg font-bold ${item.color} truncate" title="${item.raw}">${item.value}</div>
+                                        <div class="text-xs text-gray-400">${item.label}</div>
+                                    </div>
+                                `).join('')}
+                            </div>
                         </div>
-                        <div>
-                            <div class="text-lg font-bold text-green-600 truncate" title="${metrics?.val_accuracy || 'N/A'}">${fmt(metrics?.val_accuracy)}</div>
-                            <div class="text-xs text-gray-400">准确率</div>
-                        </div>
-                        <div>
-                            <div class="text-lg font-bold ${(metrics?.overfit_ratio > 1.05) ? 'text-red-500' : 'text-green-600'} truncate" title="${metrics?.overfit_ratio || 'N/A'}">${fmt(metrics?.overfit_ratio)}</div>
-                            <div class="text-xs text-gray-400">过拟合比</div>
-                        </div>
-                    </div>
-                </div>
+                    `;
+                })()}
                 <div class="flex gap-2" id="fast-feedback-buttons">
                     <button onclick="FastUI.onSatisfied()" class="flex-1 py-2.5 bg-green-500 hover:bg-green-600 text-white rounded-xl text-sm font-medium transition-all active:scale-[0.98] flex items-center justify-center gap-1.5">
                         <i class="ph-fill ph-check"></i> 满意，生成产物
@@ -496,27 +586,20 @@ const FastUI = {
             return n.toFixed(4);
         };
 
-        // 指标卡片
-        const metricCards = `
-            <div class="grid grid-cols-4 gap-3 mb-4">
-                <div class="bg-gray-800 rounded-xl p-3 text-center">
-                    <div class="text-xl font-bold text-blue-400 truncate" title="${metrics?.val_auc || '--'}">${fmtMetric(metrics?.val_auc)}</div>
-                    <div class="text-xs text-gray-500 mt-1">验证集 AUC</div>
-                </div>
-                <div class="bg-gray-800 rounded-xl p-3 text-center">
-                    <div class="text-xl font-bold text-green-400 truncate" title="${metrics?.val_accuracy || '--'}">${fmtMetric(metrics?.val_accuracy)}</div>
-                    <div class="text-xs text-gray-500 mt-1">准确率</div>
-                </div>
-                <div class="bg-gray-800 rounded-xl p-3 text-center">
-                    <div class="text-xl font-bold ${metrics?.overfit_severe ? 'text-red-400' : 'text-green-400'} truncate" title="${metrics?.overfit_ratio || '--'}">${fmtMetric(metrics?.overfit_ratio)}</div>
-                    <div class="text-xs text-gray-500 mt-1">过拟合比</div>
-                </div>
-                <div class="bg-gray-800 rounded-xl p-3 text-center">
-                    <div class="text-xl font-bold text-purple-400 truncate" title="${metrics?.train_auc || '--'}">${fmtMetric(metrics?.train_auc)}</div>
-                    <div class="text-xs text-gray-500 mt-1">训练集 AUC</div>
-                </div>
+        // 指标卡片（根据任务类型动态渲染）
+        const taskType = FastEngine.state.taskConfig?.extracted_slots?.task_type || 'classification';
+        const panelItems = this._getPanelMetricItems(metrics, taskType);
+        const panelGridCols = panelItems.length <= 2 ? `grid-cols-${Math.max(panelItems.length, 1)}` : panelItems.length === 3 ? 'grid-cols-3' : 'grid-cols-4';
+        const metricCards = panelItems.length > 0 ? `
+            <div class="grid ${panelGridCols} gap-3 mb-4">
+                ${panelItems.map(item => `
+                    <div class="bg-gray-800 rounded-xl p-3 text-center">
+                        <div class="text-xl font-bold ${item.color} truncate" title="${item.raw}">${item.value}</div>
+                        <div class="text-xs text-gray-500 mt-1">${item.label}</div>
+                    </div>
+                `).join('')}
             </div>
-        `;
+        ` : '<div class="text-xs text-gray-500 mb-4">暂无指标数据</div>';
 
         display.innerHTML = `
             <div class="mb-4">
@@ -632,6 +715,24 @@ const FastUI = {
         this.onFailed(msg);
     },
 
+    // ========== 重新生成产物（针对简化产物或超时情况） ==========
+    onRegenerateArtifacts() {
+        const sysContainer = document.getElementById('system-messages');
+        const loadingHtml = `
+            <div id="fast-artifact-loading" class="self-start bg-amber-50 border border-amber-200 rounded-2xl p-4 text-gray-700 text-sm max-w-[90%] leading-relaxed shadow-md mt-3 animate-fade-in">
+                <div class="font-bold mb-2 text-amber-900 flex items-center gap-2">
+                    <div class="w-4 h-4 border-2 border-amber-200 border-t-amber-500 rounded-full animate-spin"></div>
+                    正在重新生成产物...
+                </div>
+                <p class="text-xs text-gray-600">已延长 LLM 超时时间至 10 分钟，正在重新调用 LLM 生成完整产物，请稍候。</p>
+            </div>
+        `;
+        sysContainer.insertAdjacentHTML('beforeend', loadingHtml);
+        Renderer.scrollToBottom();
+
+        FastEngine.handleUserFeedback('satisfied', '');
+    },
+
     showFeedbackInput() {
         const el = document.getElementById('fast-feedback-input');
         if (el) el.classList.remove('hidden');
@@ -674,6 +775,9 @@ const FastUI = {
                         <i class="ph-fill ph-download-simple"></i> 下载文件
                     </button>
                     ${reportBtn}
+                    <button onclick="FastUI.onRegenerateArtifacts()" class="px-4 py-2 bg-white border border-amber-200 rounded-xl text-xs text-amber-700 hover:bg-amber-50 transition-all">
+                        <i class="ph-fill ph-arrow-counter-clockwise"></i> 重新生成产物
+                    </button>
                 </div>
             </div>
         `;

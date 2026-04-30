@@ -53,3 +53,10 @@ Thumbs.db
 
 # VS Code Local History
 .history/
+frontend.log
+backend/mlworkflow/
+backend/venv/
+backend/uploads/
+backend/outputs/
+__pycache__/
+*.pyc

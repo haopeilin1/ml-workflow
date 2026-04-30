@@ -166,7 +166,8 @@ class PlanCodingAgent(BaseAgent):
         self,
         task_config: TaskConfig,
         best_code: str,
-        has_test_set: bool = False
+        has_test_set: bool = False,
+        error_message: str = ""
     ) -> CodeOutput:
         """
         生成产物代码
@@ -175,11 +176,22 @@ class PlanCodingAgent(BaseAgent):
             task_config: 任务配置
             best_code: 最佳代码（作为参考逻辑）
             has_test_set: 是否有测试集
+            error_message: 如果传入，则基于错误信息修复产物代码
             
         Returns:
             CodeOutput: 产物生成代码
         """
         slots = task_config.extracted_slots
+        
+        fix_instruction = ""
+        if error_message:
+            fix_instruction = f"""
+【重要：上一次执行的报错信息】:
+```
+{error_message}
+```
+请根据上述报错修复代码，确保所有依赖库均已导入且正确使用，然后重新生成完整的产物代码。
+"""
         
         user_prompt = f"""【任务配置】:
 - 任务类型: {slots.task_type or 'unknown'}
@@ -191,6 +203,7 @@ class PlanCodingAgent(BaseAgent):
 ```python
 {best_code}
 ```
+{fix_instruction}
 
 请生成产物代码，要求：
 1. 重新训练最终模型（train.csv）

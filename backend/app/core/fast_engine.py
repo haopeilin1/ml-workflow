@@ -267,47 +267,94 @@ class FastEngine:
             llm_thread = threading.Thread(target=_call_llm_worker)
             llm_thread.daemon = True
             llm_thread.start()
-            llm_thread.join(timeout=300)  # 最多等待 300 秒
+            llm_thread.join(timeout=600)  # 最多等待 600 秒（10分钟）
             
             if llm_thread.is_alive():
-                logger.error("[FastEngine] LLM 生成产物代码超时（300秒）")
+                logger.error("[FastEngine] LLM 生成产物代码超时（600秒）")
                 self._append_log("[WARN] LLM 生成产物代码超时，将使用简化产物")
-                self._generate_fallback_artifacts(tc)
+                self._generate_fallback_artifacts(tc, reason="timeout")
                 return
             
             if llm_error[0]:
                 logger.error(f"[FastEngine] LLM 生成产物代码失败: {llm_error[0]}")
                 self._append_log(f"[WARN] LLM 生成产物代码失败: {llm_error[0]}")
-                self._generate_fallback_artifacts(tc)
+                self._generate_fallback_artifacts(tc, reason="error")
                 return
             
             code_output = llm_result[0]
             self._append_log(f"[Plan & Coding Agent] 产物代码生成完成, 长度={len(code_output.code)}")
             logger.info(f"[FastEngine] 产物代码生成完成, 长度={len(code_output.code)}")
             
-            # 2. 沙箱执行产物代码（允许文件写入）
+            # 2. 沙箱执行产物代码（允许文件写入），失败时自动修复最多5次
             data_dir = self.datasets["train"].parent if self.datasets else settings.OUTPUT_DIR / self.task_id / "data"
             artifact_dir = settings.OUTPUT_DIR / self.task_id / "artifacts"
             artifact_dir.mkdir(parents=True, exist_ok=True)
             
-            self._append_log("[FastEngine] 正在沙箱中执行产物代码（允许文件写入）...")
-            logger.info(f"[FastEngine] 开始沙箱执行产物代码, data_dir={data_dir}")
+            debug_round = 0
+            max_debug_rounds = 5
             
-            result = self.sandbox.execute(
-                code=code_output.code,
-                data_dir=data_dir,
-                task_type=tc.extracted_slots.task_type or "binary_classification",
-                artifact_mode=True,
-                artifact_output_dir=artifact_dir
-            )
-            
-            if not result.success:
-                logger.warning(f"[FastEngine] 产物生成失败: {result.error_message}")
-                self._append_log(f"[WARN] 产物生成失败: {result.error_message}")
-                self._append_log(f"[WARN] stdout: {result.stdout[:500]}")
-                self._append_log(f"[WARN] stderr: {result.stderr[:500]}")
-                self._generate_fallback_artifacts(tc)
-                return
+            while True:
+                self._append_log("[FastEngine] 正在沙箱中执行产物代码（允许文件写入）...")
+                logger.info(f"[FastEngine] 开始沙箱执行产物代码, data_dir={data_dir}")
+                
+                result = self.sandbox.execute(
+                    code=code_output.code,
+                    data_dir=data_dir,
+                    task_type=tc.extracted_slots.task_type or "binary_classification",
+                    artifact_mode=True,
+                    artifact_output_dir=artifact_dir
+                )
+                
+                if result.success:
+                    break
+                
+                debug_round += 1
+                if debug_round > max_debug_rounds:
+                    logger.warning(f"[FastEngine] 产物代码调试达到上限({max_debug_rounds})，降级为简化产物")
+                    self._append_log(f"[WARN] 产物代码调试达到上限，降级为简化产物")
+                    self._generate_fallback_artifacts(tc, reason="debug_max")
+                    return
+                
+                # 自动修复产物代码
+                error_detail = result.error_message or result.stderr or "Unknown error"
+                logger.info(f"[FastEngine] 产物代码执行失败，第 {debug_round} 次自动修复...")
+                self._append_log(f"[WARN] 产物代码执行失败: {error_detail[:200]}")
+                self._append_log(f"[FastEngine] 正在第 {debug_round} 次修复产物代码...")
+                
+                fix_result = [None]
+                fix_error = [None]
+                
+                def _call_fix_worker():
+                    try:
+                        fix_result[0] = self.plan_coding_agent.generate_artifacts(
+                            task_config=tc,
+                            best_code=best_code,
+                            has_test_set=self.state.has_test_set,
+                            error_message=error_detail
+                        )
+                    except Exception as e:
+                        fix_error[0] = e
+                
+                fix_thread = threading.Thread(target=_call_fix_worker)
+                fix_thread.daemon = True
+                fix_thread.start()
+                fix_thread.join(timeout=120)  # 每次修复最多等待 120 秒
+                
+                if fix_thread.is_alive():
+                    logger.error(f"[FastEngine] 产物代码第 {debug_round} 次修复超时")
+                    self._append_log(f"[WARN] 产物代码修复超时，将使用简化产物")
+                    self._generate_fallback_artifacts(tc, reason="fix_timeout")
+                    return
+                
+                if fix_error[0]:
+                    logger.error(f"[FastEngine] 产物代码修复失败: {fix_error[0]}")
+                    self._append_log(f"[WARN] 产物代码修复失败: {fix_error[0]}")
+                    self._generate_fallback_artifacts(tc, reason="fix_error")
+                    return
+                
+                code_output = fix_result[0]
+                self._append_log(f"[Plan & Coding Agent] 产物代码修复完成, 长度={len(code_output.code)}")
+                logger.info(f"[FastEngine] 产物代码修复完成, 长度={len(code_output.code)}")
             
             self._append_log("[FastEngine] 产物代码执行成功，正在解析产物...")
             logger.info(f"[FastEngine] 产物代码执行成功, stdout长度={len(result.stdout)}")
@@ -419,7 +466,7 @@ class FastEngine:
             self._set_phase(FastTaskPhase.COMPLETED)
             self._append_log("[FastEngine] 任务已完成")
     
-    def _generate_fallback_artifacts(self, tc: TaskConfig):
+    def _generate_fallback_artifacts(self, tc: TaskConfig, reason: str = "timeout"):
         """
         生成简化产物（当 LLM 调用失败或超时时使用）
         
@@ -435,6 +482,29 @@ class FastEngine:
             
             metrics = self.state.metrics
             evaluation = self.state.evaluation
+            task_type = tc.extracted_slots.task_type or 'unknown'
+            
+            # 根据任务类型生成对应的指标 HTML
+            if task_type == 'regression':
+                primary_metrics_html = f"""<div class="metric">
+    <div class="metric-label">验证集 RMSE</div>
+    <div class="metric-value">{getattr(metrics, 'val_rmse', 'N/A') if metrics else 'N/A'}</div>
+</div>
+<div class="metric">
+    <div class="metric-label">训练集 Score</div>
+    <div class="metric-value">{getattr(metrics, 'train_score', 'N/A') if metrics else 'N/A'}</div>
+</div>"""
+            else:
+                primary_metrics_html = f"""<div class="metric">
+    <div class="metric-label">验证集 AUC</div>
+    <div class="metric-value">{getattr(metrics, 'val_auc', 'N/A') if metrics else 'N/A'}</div>
+</div>
+<div class="metric">
+    <div class="metric-label">验证集准确率</div>
+    <div class="metric-value">{getattr(metrics, 'val_accuracy', 'N/A') if metrics else 'N/A'}</div>
+</div>"""
+            
+            reason_text = "LLM 调用超时（600秒）" if reason == "timeout" else "LLM 调用失败"
             
             # 生成简化 HTML 报告
             html_content = f"""<!DOCTYPE html>
@@ -454,20 +524,13 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
 <h1>🤖 模型评估报告</h1>
 <div class="metric">
     <div class="metric-label">任务类型</div>
-    <div class="metric-value">{tc.extracted_slots.task_type or 'unknown'}</div>
+    <div class="metric-value">{task_type}</div>
 </div>
 <div class="metric">
     <div class="metric-label">目标列</div>
     <div class="metric-value">{tc.extracted_slots.target_column or 'unknown'}</div>
 </div>
-<div class="metric">
-    <div class="metric-label">验证集 AUC</div>
-    <div class="metric-value">{getattr(metrics, 'val_auc', 'N/A') if metrics else 'N/A'}</div>
-</div>
-<div class="metric">
-    <div class="metric-label">验证集准确率</div>
-    <div class="metric-value">{getattr(metrics, 'val_accuracy', 'N/A') if metrics else 'N/A'}</div>
-</div>
+{primary_metrics_html}
 <div class="metric">
     <div class="metric-label">过拟合比</div>
     <div class="metric-value {'warning' if metrics and getattr(metrics, 'overfit_ratio', 0) and getattr(metrics, 'overfit_ratio', 0) > 1.05 else ''}">{getattr(metrics, 'overfit_ratio', 'N/A') if metrics else 'N/A'}</div>
@@ -476,7 +539,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
     <div class="metric-label">评估得分</div>
     <div class="metric-value">{getattr(evaluation, 'score', 'N/A') if evaluation else 'N/A'}/100</div>
 </div>
-<p style="color: #999; margin-top: 30px;">注：由于 LLM 服务暂时不可用，本报告为简化版本。如需完整产物（测试集预测、特征重要性图、模型文件），请稍后重试。</p>
+<p style="color: #999; margin-top: 30px;">注：由于 {reason_text}，本报告为简化版本。如需完整产物（测试集预测、特征重要性图、模型文件），请稍后重试。</p>
 </body>
 </html>"""
             
@@ -718,16 +781,20 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
         """
         # 累积所有历史错误信息，防止 LLM 修复了上一个错误又引入上上次的错误
         debug_history = []
+        # 记录本次进入 debug 的起始轮次，局部计数从 1 开始显示
+        start_debug_round = self.state.debug_round
         
         while self.state.debug_round < settings.FAST_MAX_DEBUG_ROUNDS:
             self.state.debug_round += 1
+            # 局部轮次：每次进入 _debug_loop 都从 1 开始计数，避免 optimize 后显示错乱
+            local_round = self.state.debug_round - start_debug_round
             
             # 记录本次错误
             current_error = result.error_message or result.stderr or "未知错误"
-            debug_history.append(f"第 {self.state.debug_round} 次执行错误:\n{current_error}")
+            debug_history.append(f"第 {local_round} 次执行错误:\n{current_error}")
             
             logger.warning(
-                f"[FastEngine] 代码执行失败，开始第 {self.state.debug_round} 次自动修复"
+                f"[FastEngine] 代码执行失败，开始第 {local_round} 次自动修复"
             )
             
             self._set_phase(FastTaskPhase.CODING)
@@ -744,7 +811,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             # Debug 修复的代码不更新 best_code（未经评估的代码不参与评分比较）
             self.state.code = code_output.code
             self.state.code_history.append({
-                "round": self.state.debug_round,
+                "round": local_round,
                 "code": code_output.code,
                 "type": "debug"
             })
@@ -753,7 +820,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             task_manager.update_task(self.task_id, code=code_output.code)
             
             # 记录 LLM 原始响应到日志
-            self._append_log(f"[Plan & Coding Agent] 第 {self.state.debug_round} 次 Debug 修复")
+            self._append_log(f"[Plan & Coding Agent] 第 {local_round} 次 Debug 修复")
             if code_output.raw_response:
                 self._append_log(code_output.raw_response)
             
@@ -771,11 +838,11 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                 # 修复成功
                 self.state.execution_output = result.stdout
                 self.state.metrics = result.metrics
-                logger.info(f"[FastEngine] 第 {self.state.debug_round} 次修复成功")
+                logger.info(f"[FastEngine] 第 {local_round} 次修复成功")
                 return True
             
             # 继续下一轮 debug
-            logger.warning(f"[FastEngine] 第 {self.state.debug_round} 次修复仍失败")
+            logger.warning(f"[FastEngine] 第 {local_round} 次修复仍失败")
         
         # 5次都失败
         error_msg = (

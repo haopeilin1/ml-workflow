@@ -5,7 +5,7 @@
 
 const FastEngine = {
     // ========== 配置 ==========
-    API_BASE: 'http://localhost:8000',
+    API_BASE: 'http://localhost:8002',
     POLL_INTERVAL: 1500,
 
     // ========== 状态 ==========
@@ -184,6 +184,8 @@ const FastEngine = {
             });
         }
 
+        // debug 开始时的提示已移至 setPhase 动态卡片统一展示，此处不再重复输出
+
         // 阶段变更时才更新 UI（避免频繁重绘）
         // 对于 completed 阶段，如果产物数据从无到有也要触发渲染，
         // 因为产物可能是在 phase 已变为 completed 之后才写入的。
@@ -267,12 +269,14 @@ const FastEngine = {
             case 'coding':
                 FastUI.setPhase('coding', {
                     message: this.state.debugRound > 0
-                        ? `代码运行出错，正在第 ${this.state.debugRound} 次修复...`
+                        ? '正在修复代码...'
                         : '正在生成完整的 Pipeline 代码...',
                     isDebug: this.state.debugRound > 0,
                     error: this.state.executionError
                 });
-                if (status.code) {
+                // 避免与 _onStatusUpdate 中的 code 变化检测重复调用 showCode
+                if (status.code && status.code !== this.state._lastSeenCode) {
+                    this.state._lastSeenCode = status.code;
                     FastUI.showCode(status.code, {
                         round: this.state.debugRound || this.state.optimizeRound || 0,
                         type: this.state.debugRound > 0 ? 'debug' : (this.state.optimizeRound > 0 ? 'optimize' : 'init')
@@ -465,6 +469,7 @@ const FastEngine = {
             bestCode: null,
             _lastSeenCode: null,
             _lastFeedbackType: null,
+            _lastNotifiedDebugRound: 0,
             artifacts: null
         };
     },
