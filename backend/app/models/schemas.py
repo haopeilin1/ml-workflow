@@ -53,6 +53,7 @@ class ExtractedSlots(BaseModel):
     task_type: Optional[TaskType] = None
     eval_metric: Optional[str] = None
     feature_constraints: List[str] = Field(default_factory=list)
+    user_modeling_suggestions: Optional[str] = None  # 用户在建模描述中附带的建模建议/偏好
 
 
 class LLMConfig(BaseModel):
@@ -63,6 +64,7 @@ class LLMConfig(BaseModel):
     model: str = "gpt-4o-mini"
     temperature: float = 0.3
     max_tokens: int = 4096
+    extra_body: Optional[Dict[str, Any]] = None  # 传递给 API 的额外参数（如 enable_thinking）
 
 
 class TaskConfig(BaseModel):
@@ -89,6 +91,14 @@ class ExecutionMetrics(BaseModel):
     overfit_severe: bool = False
 
 
+class DimensionScore(BaseModel):
+    """评估维度评分"""
+    name: str
+    score: float  # 0-100
+    weight: float  # 权重，如 0.30
+    reason: str
+
+
 class EvaluationResult(BaseModel):
     """评估Agent输出"""
     evaluation_analysis: str
@@ -96,7 +106,17 @@ class EvaluationResult(BaseModel):
     suggestions_for_coding_agent: Optional[str] = None
     report_to_user: Optional[str] = None
     raw_response: Optional[str] = None  # LLM 原始完整响应
-    score: Optional[float] = None  # 综合评分 0-100
+    score: Optional[float] = None  # 综合评分 0-100（加权总分）
+    dimension_scores: List[DimensionScore] = Field(default_factory=list)  # 各维度评分
+
+
+class LLMUsageInfo(BaseModel):
+    """单次 LLM 调用的 Token 消耗信息"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    provider: str = ""
+    model: str = ""
 
 
 class ArtifactFile(BaseModel):
@@ -114,6 +134,7 @@ class ArtifactInfo(BaseModel):
     test_predictions: Optional[List[Dict[str, Any]]] = None
     feature_importance: Optional[List[Dict[str, Any]]] = None
     report_path: Optional[str] = None
+    notes: Optional[str] = None  # 产物生成说明（如跳过哪些报告）
 
 
 class FastTaskState(BaseModel):

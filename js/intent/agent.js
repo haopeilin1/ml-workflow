@@ -33,7 +33,12 @@ const IntentAgent = {
      */
     async _callRealLLM({ dataProfile, dialogueHistory, userInput }) {
         const config = AppState.llmConfig;
-        const provider = config.provider || 'openai';
+        // 如果启用了独立配置且配置了意图识别 Agent，使用独立配置
+        let agentConfig = config;
+        if (config.useSeparateConfigs && config.intent) {
+            agentConfig = { ...config, ...config.intent };
+        }
+        const provider = agentConfig.provider || 'openai';
         const systemPrompt = this._buildSystemPrompt();
 
         // 构建对话历史
@@ -53,11 +58,11 @@ const IntentAgent = {
 
         if (provider === 'ollama') {
             // Ollama 原生格式
-            response = await fetch(`${config.baseUrl}/api/chat`, {
+            response = await fetch(`${agentConfig.baseUrl}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    model: config.model,
+                    model: agentConfig.model,
                     messages: messages,
                     stream: false,
                     options: { temperature: 0.3 }
@@ -74,13 +79,13 @@ const IntentAgent = {
         } else {
             // OpenAI 兼容格式（云端 + local-openai）
             const headers = { 'Content-Type': 'application/json' };
-            if (config.apiKey) headers['Authorization'] = `Bearer ${config.apiKey}`;
+            if (agentConfig.apiKey) headers['Authorization'] = `Bearer ${agentConfig.apiKey}`;
 
-            response = await fetch(`${config.baseUrl}/chat/completions`, {
+            response = await fetch(`${agentConfig.baseUrl}/chat/completions`, {
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify({
-                    model: config.model,
+                    model: agentConfig.model,
                     messages: messages,
                     temperature: 0.3,
                     max_tokens: 1500
@@ -143,6 +148,7 @@ Objective
 2. task_type (推断获取): 任务类型（二分类/多分类/回归）。如果没有明确说，请根据目标列的数据特征自动推断。
 3. eval_metric (推断获取): 核心评估偏好。如果用户提到"宁可抓错不能放过"等业务倾向，请映射为 Recall 等指标；否则赋予系统默认值(分类默认AUC/回归默认RMSE)。
 4. feature_constraints (可选获取): 特征排除。用户明确说"不要用到XX信息"、"排除XX列"时才记录。
+5. user_modeling_suggestions (可选获取): 用户的建模建议或偏好。如果用户在描述中提到了具体的建模方法、算法偏好、特征工程思路、评估侧重等（如"请用XGBoost"、"重点关注召回率"、"不要归一化"、"先做个EDA看看分布"等），请将其完整提取并记录。注意：这只是用户的"建议"，不是必须遵守的强制约束。后续规划Agent会参考这些建议，但有权根据数据和任务特点进行取舍。
 
 Rules & Constraints (非常重要)
 1. 【禁止技术黑话】：绝对不要询问算法偏好（如XGBoost还是随机森林）、超参数、缺失值填充方式、测试集切分比例等技术细节。
@@ -159,7 +165,8 @@ Output Format (Strict JSON)
     "target_column": "列名" 或 null,
     "task_type": "binary_classification" / "multiclass_classification" / "regression" 或 null,
     "eval_metric": "AUC" / "F1" / "Recall" / "Precision" / "RMSE" / "R2" 或 null,
-    "feature_constraints": ["要排除的列名1", "要排除的列名2"] 或 []
+    "feature_constraints": ["要排除的列名1", "要排除的列名2"] 或 [],
+    "user_modeling_suggestions": "用户提到的建模建议原文" 或 null
   },
   "is_ready_to_build": true 或 false,
   "reply_to_user": "你要回复给用户的话。语气自然亲和，人话表达，切忌啰嗦。"
@@ -321,13 +328,17 @@ Output Format (Strict JSON)
             }
         }
 
+        // 从用户输入中提取建模建议
+        const userModelingSuggestions = Utils.extractModelingSuggestions(userInput);
+
         return {
             thought_process: thought,
             extracted_slots: {
                 target_column: targetConfirmed,
                 task_type: taskType,
                 eval_metric: evalMetric,
-                feature_constraints: allConstraints
+                feature_constraints: allConstraints,
+                user_modeling_suggestions: userModelingSuggestions
             },
             is_ready_to_build: isReady,
             reply_to_user: reply

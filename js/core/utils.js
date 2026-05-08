@@ -72,6 +72,52 @@ const Utils = {
     },
 
     /**
+     * 从用户输入中提取建模建议/偏好
+     * 识别用户提到的算法、方法、评估侧重、预处理要求等
+     */
+    extractModelingSuggestions(userInput) {
+        if (!userInput) return null;
+        const input = userInput.trim();
+        // 建模建议关键词模式
+        const suggestionPatterns = [
+            // 算法/模型偏好
+            /(?:请?用|使用|采用|尝试|试试|推荐|建议).{0,20}(?:XGBoost|LightGBM|Random Forest|随机森林|梯度提升|GBDT|SVM|神经网络|深度学习|逻辑回归|线性回归|决策树|KNN|贝叶斯|聚类|KMeans)/i,
+            // 评估侧重
+            /(?:重点关注|侧重|优先|看重|重视|尽量).{0,15}(?:召回率|Recall|精确率|Precision|准确率|Accuracy|F1|AUC|RMSE|R2|误差|损失)/i,
+            /(?:宁可|宁愿|不能|避免).{0,20}(?:漏掉|放过|误杀|错杀|假阴性|假阳性)/i,
+            // 预处理方法
+            /(?:不要|不用|跳过|忽略).{0,10}(?:归一化|标准化|缩放|Scaling|Normalization)/i,
+            /(?:需要|要|做|进行).{0,10}(?:归一化|标准化|缩放|Scaling|Normalization|PCA|降维|特征选择|编码|OneHot|独热)/i,
+            // 特征工程
+            /(?:创建|构造|生成|增加|添加).{0,15}(?:特征|变量|交互项|多项式|交叉)/i,
+            /(?:做|进行|先).{0,10}(?:EDA|探索性分析|分布分析|相关性分析|可视化)/i,
+            // 数据清洗
+            /(?:删除|去掉|移除).{0,10}(?:缺失值|异常值|离群点|重复)/i,
+            /(?:填充|补全|插补).{0,10}(?:缺失值|缺失)/i,
+            // 训练/验证策略
+            /(?:交叉验证|K折|分层采样|Stratified|时间序列划分|留出法)/i,
+            // 其他建模偏好
+            /(?:正则化|L1|L2|早停|Early Stopping| Bagging|Boosting|集成|Ensemble)/i,
+            /(?:调参|调优|网格搜索|Grid Search|随机搜索|贝叶斯优化)/i,
+            /(?:类别不平衡|不平衡|过采样|欠采样|SMOTE)/i
+        ];
+        const matches = [];
+        for (const pattern of suggestionPatterns) {
+            const match = input.match(pattern);
+            if (match) {
+                // 扩展匹配上下文，取前后各15个字符
+                const start = Math.max(0, match.index - 15);
+                const end = Math.min(input.length, match.index + match[0].length + 15);
+                matches.push(input.substring(start, end).trim());
+            }
+        }
+        if (matches.length === 0) return null;
+        // 去重并合并
+        const unique = [...new Set(matches)];
+        return unique.join('；');
+    },
+
+    /**
      * 从用户输入中提取被排除的列名
      */
     extractConstraints(userInput, allColumns) {

@@ -285,9 +285,9 @@ class SandboxExecutor:
                 error_message=f"执行异常: {str(e)}"
             )
         finally:
-            # 产物模式下保留产物，否则清理临时目录
-            if not artifact_mode:
-                self._cleanup(work_dir)
+            # 清理沙箱临时工作目录
+            # 产物模式下产物已复制到 artifact_output_dir，work_dir 仍可安全删除
+            self._cleanup(work_dir)
     
     def _adapt_paths(self, code: str) -> str:
         r"""

@@ -98,9 +98,13 @@ class DataSplitter:
         # --- 处理测试集（始终隔离）---
         if test_files:
             test_path = self._resolve_path(test_files[0]["path"])
-            test_df = self._read_file(test_path)
-            logger.info(f"[DataSplitter] 加载测试集（仅用于最终预测）: {test_path}, shape={test_df.shape}")
-            result["test"] = self._save_df(test_df, task_output_dir / "test.csv")
+            if test_path.exists():
+                test_df = self._read_file(test_path)
+                logger.info(f"[DataSplitter] 加载测试集（仅用于最终预测）: {test_path}, shape={test_df.shape}")
+                result["test"] = self._save_df(test_df, task_output_dir / "test.csv")
+            else:
+                logger.info(f"[DataSplitter] 测试集文件不存在（可能已被隔离）: {test_path}")
+                result["test"] = None
         else:
             result["test"] = None
             logger.info("[DataSplitter] 未找到测试集")
@@ -166,8 +170,14 @@ class DataSplitter:
     def _resolve_path(self, path_str: str) -> Path:
         """解析文件路径（支持相对路径和绝对路径）"""
         path = Path(path_str)
+        # 如果路径已存在（相对或绝对），直接使用
+        if path.exists():
+            return path
+        # 否则回退到 uploads 目录（兼容前端上传场景）
         if not path.is_absolute():
-            path = self.upload_dir / path.name
+            fallback = self.upload_dir / path.name
+            if fallback.exists():
+                return fallback
         return path
     
     def get_sandbox_paths(self, task_id: str) -> Dict[str, str]:

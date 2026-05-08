@@ -5,7 +5,7 @@
 
 const FastEngine = {
     // ========== 配置 ==========
-    API_BASE: 'http://localhost:8002',
+    API_BASE: 'http://localhost:8000',
     POLL_INTERVAL: 1500,
 
     // ========== 状态 ==========

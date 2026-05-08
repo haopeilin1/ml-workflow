@@ -27,7 +27,8 @@ const AppState = {
         target_column: null,
         task_type: null,
         eval_metric: null,
-        feature_constraints: []
+        feature_constraints: [],
+        user_modeling_suggestions: null
     },
 
     // 是否可开始建模
@@ -45,10 +46,29 @@ const AppState = {
     // LLM 配置
     llmConfig: {
         enabled: false,
-        provider: localStorage.getItem('mlworkflow_provider') || 'openai', // openai | ollama | local-openai
+        provider: localStorage.getItem('mlworkflow_provider') || 'openai',
         apiKey: localStorage.getItem('mlworkflow_api_key') || '',
         baseUrl: localStorage.getItem('mlworkflow_base_url') || 'https://api.openai.com/v1',
-        model: localStorage.getItem('mlworkflow_model') || 'gpt-4o-mini'
+        model: localStorage.getItem('mlworkflow_model') || 'gpt-4o-mini',
+        useSeparateConfigs: localStorage.getItem('mlworkflow_separate') === 'true',
+        intent: {
+            provider: localStorage.getItem('mlworkflow_intent_provider') || 'openai',
+            apiKey: localStorage.getItem('mlworkflow_intent_api_key') || '',
+            baseUrl: localStorage.getItem('mlworkflow_intent_base_url') || 'https://api.openai.com/v1',
+            model: localStorage.getItem('mlworkflow_intent_model') || 'gpt-4o-mini'
+        },
+        planCoding: {
+            provider: localStorage.getItem('mlworkflow_plan_provider') || 'openai',
+            apiKey: localStorage.getItem('mlworkflow_plan_api_key') || '',
+            baseUrl: localStorage.getItem('mlworkflow_plan_base_url') || 'https://api.openai.com/v1',
+            model: localStorage.getItem('mlworkflow_plan_model') || 'gpt-4o-mini'
+        },
+        evaluation: {
+            provider: localStorage.getItem('mlworkflow_eval_provider') || 'openai',
+            apiKey: localStorage.getItem('mlworkflow_eval_api_key') || '',
+            baseUrl: localStorage.getItem('mlworkflow_eval_base_url') || 'https://api.openai.com/v1',
+            model: localStorage.getItem('mlworkflow_eval_model') || 'gpt-4o-mini'
+        }
     },
 
     // 重置状态（用于重新开始）
@@ -60,7 +80,7 @@ const AppState = {
         this.dataProfile = null;
         this.dialogueHistory = [];
         this.clarificationRound = 0;
-        this.extractedSlots = { target_column: null, task_type: null, eval_metric: null, feature_constraints: [] };
+        this.extractedSlots = { target_column: null, task_type: null, eval_metric: null, feature_constraints: [], user_modeling_suggestions: null };
         this.isReadyToBuild = false;
         this.taskConfirmed = false;
         this.currentProcess = null;
@@ -74,7 +94,8 @@ const AppState = {
                 target_column: this.extractedSlots.target_column,
                 task_type: this.extractedSlots.task_type,
                 eval_metric: this.extractedSlots.eval_metric,
-                feature_constraints: this.extractedSlots.feature_constraints || []
+                feature_constraints: this.extractedSlots.feature_constraints || [],
+                user_modeling_suggestions: this.extractedSlots.user_modeling_suggestions
             },
             uploaded_files: this.uploadedFiles.map(f => ({
                 name: f.name,
@@ -91,7 +112,25 @@ const AppState = {
                 model: this.llmConfig.model,
                 temperature: 0.3,
                 max_tokens: 4096
-            }
+            },
+            agent_llm_configs: this.llmConfig.useSeparateConfigs ? {
+                plan_coding: this.llmConfig.planCoding ? {
+                    provider: this.llmConfig.planCoding.provider,
+                    base_url: this.llmConfig.planCoding.baseUrl,
+                    api_key: this.llmConfig.planCoding.apiKey,
+                    model: this.llmConfig.planCoding.model,
+                    temperature: 0.3,
+                    max_tokens: 4096
+                } : undefined,
+                evaluation: this.llmConfig.evaluation ? {
+                    provider: this.llmConfig.evaluation.provider,
+                    base_url: this.llmConfig.evaluation.baseUrl,
+                    api_key: this.llmConfig.evaluation.apiKey,
+                    model: this.llmConfig.evaluation.model,
+                    temperature: 0.3,
+                    max_tokens: 4096
+                } : undefined
+            } : undefined
         };
     }
 };

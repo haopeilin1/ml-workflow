@@ -75,6 +75,15 @@ class FastEngine:
         
         # 数据集路径（由 _prepare_data 填充）
         self.datasets: Optional[dict] = None
+        
+        # 各阶段耗时记录（供评测系统使用）
+        self.timings: Dict[str, float] = {
+            "code_generation_seconds": 0.0,
+            "sandbox_execution_seconds": 0.0,
+            "evaluation_seconds": 0.0,
+            "artifact_generation_seconds": 0.0,
+        }
+        self._timing_stack: List[tuple] = []  # 嵌套计时栈
     
     def _build_llm_client(self, llm_config: Optional[LLMConfig]):
         """根据配置构建 LLM 客户端"""
@@ -86,7 +95,8 @@ class FastEngine:
                 api_key=llm_config.api_key,
                 model=llm_config.model,
                 temperature=llm_config.temperature,
-                max_tokens=llm_config.max_tokens
+                max_tokens=llm_config.max_tokens,
+                extra_body=llm_config.extra_body
             )
         return LLMClient.from_settings()
     
@@ -239,6 +249,7 @@ class FastEngine:
         确保前端能收到终态信号。若发生严重异常，外层 _handle_feedback_pipeline
         会将其覆盖为 FAILED。
         """
+        self._start_timing("artifact_generation_seconds")
         try:
             best_code = self.state.best_code or self.state.code
             if not best_code:
@@ -247,7 +258,47 @@ class FastEngine:
                 self._generate_fallback_artifacts(tc)
                 return
             
-            # 1. 生成产物代码（带线程级超时，防止 LLM 调用无限挂起）
+            # 确定 data_dir
+            data_dir = self.datasets["train"].parent if self.datasets else settings.OUTPUT_DIR / self.task_id / "data"
+            artifact_dir = settings.OUTPUT_DIR / self.task_id / "artifacts"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            
+            # ========== 【新增】Step 0: 单独生成 predict.py ==========
+            self._append_log("[Plan & Coding Agent] 正在单独生成配套预测脚本 predict.py...")
+            logger.info(f"[FastEngine] 开始生成 predict.py")
+            
+            predict_result = [None]
+            predict_error = [None]
+            
+            def _call_predict_worker():
+                try:
+                    predict_result[0] = self.plan_coding_agent.generate_predict_script(
+                        task_config=tc,
+                        best_code=best_code,
+                        data_dir=str(data_dir)
+                    )
+                except Exception as e:
+                    predict_error[0] = e
+            
+            predict_thread = threading.Thread(target=_call_predict_worker)
+            predict_thread.daemon = True
+            predict_thread.start()
+            predict_thread.join(timeout=120)  # 最多等待 120 秒
+            
+            if predict_thread.is_alive():
+                logger.warning("[FastEngine] predict.py 生成超时，将跳过")
+                self._append_log("[WARN] predict.py 生成超时，跳过")
+            elif predict_error[0]:
+                logger.warning(f"[FastEngine] predict.py 生成失败: {predict_error[0]}")
+                self._append_log(f"[WARN] predict.py 生成失败: {predict_error[0]}")
+            elif predict_result[0] and predict_result[0].code:
+                # 保存 predict.py 到 artifact_dir
+                predict_py_path = artifact_dir / "predict.py"
+                predict_py_path.write_text(predict_result[0].code, encoding='utf-8')
+                self._append_log(f"[Plan & Coding Agent] predict.py 生成完成, 长度={len(predict_result[0].code)}")
+                logger.info(f"[FastEngine] predict.py 已保存到 {predict_py_path}")
+            
+            # 1. 生成其他产物代码（带线程级超时，防止 LLM 调用无限挂起）
             self._append_log("[Plan & Coding Agent] 正在调用 LLM 生成产物代码...")
             logger.info(f"[FastEngine] 开始生成产物代码, best_code长度={len(best_code)}")
             
@@ -259,7 +310,8 @@ class FastEngine:
                     llm_result[0] = self.plan_coding_agent.generate_artifacts(
                         task_config=tc,
                         best_code=best_code,
-                        has_test_set=self.state.has_test_set
+                        has_test_set=self.state.has_test_set,
+                        data_dir=str(data_dir)
                     )
                 except Exception as e:
                     llm_error[0] = e
@@ -330,7 +382,8 @@ class FastEngine:
                             task_config=tc,
                             best_code=best_code,
                             has_test_set=self.state.has_test_set,
-                            error_message=error_detail
+                            error_message=error_detail,
+                            data_dir=str(data_dir)
                         )
                     except Exception as e:
                         fix_error[0] = e
@@ -411,16 +464,22 @@ class FastEngine:
                 try:
                     import pandas as pd
                     df = pd.read_csv(test_pred_path)
-                    # 取前 20 条作为预览
-                    preview = df.head(20)
+                    # 取前 50 条作为预览
+                    preview = df.head(50)
                     predictions = []
                     for idx, row in preview.iterrows():
                         pred_dict = {"id": idx}
-                        # 尝试找到预测列
+                        # 尝试找到预测列（可能是概率值 0~1，也可能是 0/1 标签）
                         if 'prediction' in row:
-                            pred_dict["pred"] = row['prediction']
-                        # 尝试找到概率列
-                        prob_cols = [c for c in df.columns if 'prob' in c.lower() or 'proba' in c.lower() or 'score' in c.lower()]
+                            raw_pred = float(row['prediction'])
+                            # 如果是概率值（0~1 之间），四舍五入为 0/1
+                            if 0 <= raw_pred <= 1:
+                                pred_dict["pred"] = round(raw_pred)
+                                pred_dict["prob"] = round(raw_pred, 4)
+                            else:
+                                pred_dict["pred"] = int(raw_pred)
+                        # 如果存在独立的概率列（proba/prob/score），也一并读取
+                        prob_cols = [c for c in df.columns if c.lower() != 'prediction' and ('prob' in c.lower() or 'proba' in c.lower() or 'score' in c.lower())]
                         if prob_cols:
                             pred_dict["prob"] = round(float(row[prob_cols[0]]), 4)
                         predictions.append(pred_dict)
@@ -428,16 +487,25 @@ class FastEngine:
                 except Exception as e:
                     logger.warning(f"[FastEngine] 读取测试集预测失败: {e}")
             
-            # 5. 读取特征重要性
+            # 5. 读取特征重要性（过滤掉目标列，防止数据泄露）
             fi_path = artifact_dir / "feature_importance.csv"
             if fi_path.exists():
                 try:
                     import pandas as pd
                     fi_df = pd.read_csv(fi_path)
+                    target_col = tc.extracted_slots.target_column
+                    # 归一化目标列名用于匹配（忽略空格/下划线差异）
+                    def _norm_name(n):
+                        return str(n).lower().replace('_', ' ').replace('-', ' ').strip()
+                    norm_target = _norm_name(target_col) if target_col else ''
                     fi_list = []
                     for _, row in fi_df.iterrows():
+                        name = str(row.get('name', row.iloc[0]))
+                        # 过滤掉目标列（支持空格/下划线/横线差异）
+                        if norm_target and _norm_name(name) == norm_target:
+                            continue
                         fi_list.append({
-                            "name": str(row.get('name', row.iloc[0])),
+                            "name": name,
                             "importance": round(float(row.get('importance', row.iloc[1])), 4)
                         })
                     artifacts.feature_importance = fi_list
@@ -447,12 +515,29 @@ class FastEngine:
             # 6. 报告路径
             report_path = artifact_dir / "report.html"
             if report_path.exists():
-                artifacts.report_path = str(report_path)
+                artifacts.report_path = f"/artifacts/{self.task_id}/artifacts/report.html"
+            
+            # 6.5 生成产物说明 notes：检查是否有产物被跳过
+            expected_files = {
+                'report.html': '可视化评估报告',
+                'feature_importance.png': '特征重要性可视化图',
+                'feature_importance.csv': '特征重要性数据',
+                'test_predictions.csv': '测试集预测结果',
+                'model.pkl': '模型文件',
+                'pipeline.py': 'Pipeline 代码',
+                'predict.py': '配套预测脚本'
+            }
+            actual_names = {f.name for f in files}
+            missing = [desc for name, desc in expected_files.items() if name not in actual_names]
+            if missing:
+                artifacts.notes = f"本次产物生成已跳过以下项目（数据集较大或生成超时）：{', '.join(missing)}。核心模型与指标已就绪。"
             
             # 7. 更新状态
             task_manager.update_task(self.task_id, artifacts=artifacts)
             self._append_log("[FastEngine] 产物生成完成")
             self._append_log(f"产物文件: {[f.name for f in files]}")
+            if artifacts.notes:
+                self._append_log(f"[NOTE] {artifacts.notes}")
             
             logger.info(f"[FastEngine] 产物生成完成: {len(files)} 个文件")
             
@@ -461,6 +546,7 @@ class FastEngine:
             self._append_log(f"[WARN] 产物生成异常: {str(e)}")
             self._generate_fallback_artifacts(tc)
         finally:
+            self._end_timing("artifact_generation_seconds")
             # 确保产物阶段结束后标记为 COMPLETED；若后续外层捕获到严重异常，
             # 会被覆盖为 FAILED，因此这里先设为 COMPLETED 是安全的。
             self._set_phase(FastTaskPhase.COMPLETED)
@@ -504,7 +590,15 @@ class FastEngine:
     <div class="metric-value">{getattr(metrics, 'val_accuracy', 'N/A') if metrics else 'N/A'}</div>
 </div>"""
             
-            reason_text = "LLM 调用超时（600秒）" if reason == "timeout" else "LLM 调用失败"
+            reason_map = {
+                "timeout": "LLM 调用超时（600秒）",
+                "fix_timeout": "产物代码修复超时",
+                "fix_error": "产物代码修复失败",
+                "debug_max": "产物代码调试达到上限",
+                "error": "LLM 调用失败"
+            }
+            reason_text = reason_map.get(reason, "LLM 调用失败")
+            notes = f"由于 {reason_text}，以下产物被跳过：特征重要性图、测试集预测、完整评估报告、模型文件。已降级为简化产物。"
             
             # 生成简化 HTML 报告
             html_content = f"""<!DOCTYPE html>
@@ -518,10 +612,14 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
 .metric-value {{ color: #333; font-size: 24px; font-weight: bold; }}
 .warning {{ color: #ff9800; }}
 .error {{ color: #f44336; }}
+.notice {{ background: #fff3cd; border-left: 4px solid #ff9800; padding: 12px 16px; margin: 15px 0; color: #856404; }}
 </style>
 </head>
 <body>
 <h1>🤖 模型评估报告</h1>
+<div class="notice">
+    <strong>📋 产物说明：</strong>{notes}
+</div>
 <div class="metric">
     <div class="metric-label">任务类型</div>
     <div class="metric-value">{task_type}</div>
@@ -539,7 +637,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
     <div class="metric-label">评估得分</div>
     <div class="metric-value">{getattr(evaluation, 'score', 'N/A') if evaluation else 'N/A'}/100</div>
 </div>
-<p style="color: #999; margin-top: 30px;">注：由于 {reason_text}，本报告为简化版本。如需完整产物（测试集预测、特征重要性图、模型文件），请稍后重试。</p>
+<p style="color: #999; margin-top: 30px;">注：由于 {reason_text}，本报告为简化版本。如需完整产物，请稍后重试。</p>
 </body>
 </html>"""
             
@@ -569,7 +667,8 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             
             artifacts = ArtifactInfo(
                 files=files,
-                report_path=str(report_path)
+                report_path=str(report_path),
+                notes=notes
             )
             
             task_manager.update_task(self.task_id, artifacts=artifacts)
@@ -606,6 +705,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
     def _generate_init_code(self, tc: TaskConfig):
         """生成初始基线代码"""
         self._set_phase(FastTaskPhase.CODING)
+        self._start_timing("code_generation_seconds")
         
         code_output = self.plan_coding_agent.generate(
             task_config=tc,
@@ -613,6 +713,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             context_payload="",
             previous_code=""
         )
+        self._end_timing("code_generation_seconds")
         
         self.state.plan = code_output.plan
         self.state.code = code_output.code
@@ -652,14 +753,22 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             self._set_phase(FastTaskPhase.RUNNING)
             
             data_dir = self.datasets["train"].parent if self.datasets else settings.OUTPUT_DIR / self.task_id / "data"
+            
+            # 执行前备份已有的 best_model.pkl（防止后续轮次覆盖更优模型）
+            self._backup_best_model(data_dir)
+            
+            self._start_timing("sandbox_execution_seconds")
             result = self.sandbox.execute(
                 code=self.state.code,
                 data_dir=data_dir,
                 task_type=tc.extracted_slots.task_type or "binary_classification"
             )
+            self._end_timing("sandbox_execution_seconds")
             
             # 执行失败 → Debug 闭环
             if not result.success:
+                # 执行失败时恢复旧模型（防止Debug过程中产生错误的模型文件覆盖最优模型）
+                self._restore_best_model_backup(data_dir)
                 if not self._debug_loop(result, tc):
                     return  # Debug 3次都失败，任务结束
                 continue  # Debug 成功，重新执行
@@ -677,13 +786,17 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             
             self._set_phase(FastTaskPhase.EVALUATING)
             
+            self._start_timing("evaluation_seconds")
             evaluation = self.evaluation_agent.evaluate(
                 task_target=f"{tc.extracted_slots.task_type.value} - target={tc.extracted_slots.target_column}",
                 metrics=result.metrics,
                 optimize_round=self.state.optimize_round,
                 max_optimize_rounds=settings.FAST_MAX_OPTIMIZE_ROUNDS,
-                execution_output=result.stdout
+                execution_output=result.stdout,
+                user_modeling_suggestions=tc.extracted_slots.user_modeling_suggestions,
+                eval_metric=tc.extracted_slots.eval_metric
             )
+            self._end_timing("evaluation_seconds")
             self.state.evaluation = evaluation
             
             # 记录 Evaluation Agent 原始响应到日志
@@ -708,6 +821,12 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                     best_evaluation=self.state.best_evaluation
                 )
                 logger.info(f"[FastEngine] 发现更优代码，score={current_score}，已更新 best_code")
+                # 本轮是更优模型，保留新保存的 best_model.pkl（无需恢复）
+            else:
+                # 本轮得分不优于历史最佳，恢复之前备份的最优模型
+                restored = self._restore_best_model_backup(data_dir)
+                if restored:
+                    logger.info(f"[FastEngine] 本轮得分({current_score})未超过最佳({self.state.best_score or 0})，已恢复之前保存的最优模型")
             
             # --- 决策分支 ---
             if evaluation.decision == DecisionType.AUTO_OPTIMIZE:
@@ -802,12 +921,14 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             # 将所有历史错误信息合并传给 LLM
             all_errors = "\n\n".join(debug_history)
             
+            self._start_timing("code_generation_seconds")
             code_output = self.plan_coding_agent.generate(
                 task_config=tc,
                 run_state="DEBUG",
                 context_payload=all_errors,
                 previous_code=(self.state.best_code or self.state.code)
             )
+            self._end_timing("code_generation_seconds")
             # Debug 修复的代码不更新 best_code（未经评估的代码不参与评分比较）
             self.state.code = code_output.code
             self.state.code_history.append({
@@ -861,6 +982,55 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
         self.state.phase = phase
         task_manager.update_task(self.task_id, phase=phase)
         logger.info(f"[FastEngine] 任务 {self.task_id} 阶段切换: {phase.value}")
+    
+    def _start_timing(self, key: str):
+        """开始计时某个阶段"""
+        self._timing_stack.append((key, time.time()))
+    
+    def _end_timing(self, key: str):
+        """结束计时某个阶段"""
+        if self._timing_stack and self._timing_stack[-1][0] == key:
+            _, start = self._timing_stack.pop()
+            elapsed = time.time() - start
+            self.timings[key] = self.timings.get(key, 0.0) + elapsed
+            logger.debug(f"[FastEngine] 计时 {key}: +{elapsed:.2f}s, 累计={self.timings[key]:.2f}s")
+        else:
+            logger.warning(f"[FastEngine] 计时栈不匹配: 期望 {key}, 实际 {self._timing_stack[-1][0] if self._timing_stack else 'empty'}")
+    
+    def _backup_best_model(self, data_dir) -> bool:
+        """
+        备份 data_dir 下的 best_model.pkl，防止后续轮次覆盖更优模型。
+        返回是否成功创建了备份。
+        """
+        model_path = Path(data_dir) / "best_model.pkl"
+        backup_path = Path(data_dir) / "best_model.pkl.bak"
+        if model_path.exists():
+            try:
+                shutil.copy2(model_path, backup_path)
+                logger.info(f"[FastEngine] 已备份最优模型: {model_path} -> {backup_path}")
+                return True
+            except Exception as e:
+                logger.warning(f"[FastEngine] 备份模型失败: {e}")
+                return False
+        return False
+    
+    def _restore_best_model_backup(self, data_dir) -> bool:
+        """
+        从备份恢复 best_model.pkl。
+        当本轮得分不优于历史最佳时调用，确保 best_model.pkl 始终对应最优模型。
+        返回是否成功恢复。
+        """
+        model_path = Path(data_dir) / "best_model.pkl"
+        backup_path = Path(data_dir) / "best_model.pkl.bak"
+        if backup_path.exists():
+            try:
+                shutil.copy2(backup_path, model_path)
+                logger.info(f"[FastEngine] 已恢复最优模型备份: {backup_path} -> {model_path}")
+                return True
+            except Exception as e:
+                logger.warning(f"[FastEngine] 恢复模型备份失败: {e}")
+                return False
+        return False
 
 
 # ========== 全局引擎管理 ==========

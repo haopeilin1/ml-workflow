@@ -57,8 +57,39 @@ const App = {
         document.getElementById('llm-model').value = saved.model;
         document.getElementById('llm-enabled').checked = saved.enabled;
         document.getElementById('llm-provider').value = saved.provider;
+        document.getElementById('llm-separate-configs').checked = saved.useSeparateConfigs;
         this.updateProviderUI(saved.provider);
         this.updateLLMStatusDot();
+        this.toggleSeparateConfigs();
+        // 加载独立配置
+        if (saved.intent) {
+            document.getElementById('intent-provider').value = saved.intent.provider;
+            document.getElementById('intent-base-url').value = saved.intent.baseUrl;
+            document.getElementById('intent-api-key').value = saved.intent.apiKey;
+            document.getElementById('intent-model').value = saved.intent.model;
+        }
+        if (saved.planCoding) {
+            document.getElementById('plan-provider').value = saved.planCoding.provider;
+            document.getElementById('plan-base-url').value = saved.planCoding.baseUrl;
+            document.getElementById('plan-api-key').value = saved.planCoding.apiKey;
+            document.getElementById('plan-model').value = saved.planCoding.model;
+        }
+        if (saved.evaluation) {
+            document.getElementById('eval-provider').value = saved.evaluation.provider;
+            document.getElementById('eval-base-url').value = saved.evaluation.baseUrl;
+            document.getElementById('eval-api-key').value = saved.evaluation.apiKey;
+            document.getElementById('eval-model').value = saved.evaluation.model;
+        }
+    },
+
+    toggleSeparateConfigs() {
+        const checked = document.getElementById('llm-separate-configs').checked;
+        const panel = document.getElementById('separate-configs-panel');
+        if (checked) {
+            panel.classList.remove('hidden');
+        } else {
+            panel.classList.add('hidden');
+        }
     },
 
     onProviderChange() {
@@ -134,18 +165,52 @@ const App = {
         const baseUrl = document.getElementById('llm-base-url').value.trim();
         const model = document.getElementById('llm-model').value.trim();
         const enabled = document.getElementById('llm-enabled').checked;
+        const useSeparateConfigs = document.getElementById('llm-separate-configs').checked;
 
-        AppState.llmConfig = { enabled, provider, apiKey, baseUrl, model };
+        const intent = {
+            provider: document.getElementById('intent-provider').value,
+            baseUrl: document.getElementById('intent-base-url').value.trim(),
+            apiKey: document.getElementById('intent-api-key').value.trim(),
+            model: document.getElementById('intent-model').value.trim()
+        };
+        const planCoding = {
+            provider: document.getElementById('plan-provider').value,
+            baseUrl: document.getElementById('plan-base-url').value.trim(),
+            apiKey: document.getElementById('plan-api-key').value.trim(),
+            model: document.getElementById('plan-model').value.trim()
+        };
+        const evaluation = {
+            provider: document.getElementById('eval-provider').value,
+            baseUrl: document.getElementById('eval-base-url').value.trim(),
+            apiKey: document.getElementById('eval-api-key').value.trim(),
+            model: document.getElementById('eval-model').value.trim()
+        };
+
+        AppState.llmConfig = { enabled, provider, apiKey, baseUrl, model, useSeparateConfigs, intent, planCoding, evaluation };
         localStorage.setItem('mlworkflow_provider', provider);
         localStorage.setItem('mlworkflow_api_key', apiKey);
         localStorage.setItem('mlworkflow_base_url', baseUrl);
         localStorage.setItem('mlworkflow_model', model);
+        localStorage.setItem('mlworkflow_separate', useSeparateConfigs);
+        localStorage.setItem('mlworkflow_intent_provider', intent.provider);
+        localStorage.setItem('mlworkflow_intent_api_key', intent.apiKey);
+        localStorage.setItem('mlworkflow_intent_base_url', intent.baseUrl);
+        localStorage.setItem('mlworkflow_intent_model', intent.model);
+        localStorage.setItem('mlworkflow_plan_provider', planCoding.provider);
+        localStorage.setItem('mlworkflow_plan_api_key', planCoding.apiKey);
+        localStorage.setItem('mlworkflow_plan_base_url', planCoding.baseUrl);
+        localStorage.setItem('mlworkflow_plan_model', planCoding.model);
+        localStorage.setItem('mlworkflow_eval_provider', evaluation.provider);
+        localStorage.setItem('mlworkflow_eval_api_key', evaluation.apiKey);
+        localStorage.setItem('mlworkflow_eval_base_url', evaluation.baseUrl);
+        localStorage.setItem('mlworkflow_eval_model', evaluation.model);
 
         this.updateLLMStatusDot();
         this.closeLLMConfig();
 
         const providerName = { 'openai': '云端 API', 'local-openai': '本地 OpenAI', 'ollama': 'Ollama' }[provider];
-        Terminal.info(`LLM 配置已保存：${providerName} ${enabled ? '（已启用）' : '（已禁用）'}`);
+        const modeText = useSeparateConfigs ? '（独立配置）' : '（统一配置）';
+        Terminal.info(`LLM 配置已保存：${providerName} ${enabled ? '（已启用）' : '（已禁用）'}${modeText}`);
     },
 
     async testLLMConfig() {
@@ -434,6 +499,88 @@ const App = {
             // 开始数据画像
             IntentFlow.startDataProfiling();
         }, 300);
+    },
+
+    // ===================== 返回欢迎页 =====================
+    returnToWelcome() {
+        try {
+            console.log('[App] returnToWelcome called');
+            // 1. 停止任何运行中的引擎
+            if (AppState.phase === 'fast_mode' && window.FastEngine) {
+                FastEngine.stop();
+            } else if (AppState.phase === 'depth_mode' && window.DepthEngine) {
+                DepthEngine.stop();
+            } else if (window.IntentFlow) {
+                IntentFlow.stop();
+            }
+
+            // 2. 重置全局状态
+            AppState.reset();
+            if (window.FastEngine) {
+                FastEngine._resetState();
+            }
+
+            // 3. 清空左侧对话区
+            Renderer.clearSystemMessages();
+            const userMessages = document.getElementById('user-messages');
+            if (userMessages) userMessages.innerHTML = '';
+
+            // 4. 重置右侧标签页与面板
+            switchTab('terminal');
+            if (window.FastUI) {
+                FastUI._codeHistory = [];
+                FastUI._resetResultsPanel();
+            }
+            const codeEmpty = document.getElementById('code-empty-state');
+            const codeContent = document.getElementById('code-content-state');
+            if (codeEmpty) codeEmpty.classList.remove('hidden');
+            if (codeContent) { codeContent.classList.add('hidden'); codeContent.innerHTML = ''; }
+
+            const filesEmpty = document.getElementById('files-empty-state');
+            const filesContent = document.getElementById('files-content-state');
+            if (filesEmpty) filesEmpty.classList.remove('hidden');
+            if (filesContent) { filesContent.classList.add('hidden'); filesContent.innerHTML = ''; }
+
+            // 5. 重置终端
+            if (window.Terminal) {
+                Terminal.init();
+            }
+
+            // 6. 重置文件上传 UI
+            const fileBadge = document.getElementById('file-badge');
+            const fileList = document.getElementById('file-list');
+            const mainInput = document.getElementById('main-input');
+            const fileName = document.getElementById('file-name');
+            const fileSize = document.getElementById('file-size');
+            if (fileBadge) fileBadge.classList.add('hidden');
+            if (fileList) fileList.innerHTML = '';
+            if (mainInput) mainInput.value = '';
+            if (fileName) fileName.textContent = '--';
+            if (fileSize) fileSize.textContent = '--';
+
+            // 7. 重置阶段指示器
+            ['stage-profile', 'stage-intent', 'stage-confirm', 'stage-mode'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.classList.remove('active', 'done');
+            });
+
+            // 8. 切换回欢迎页（使用 style.display 确保可靠）
+            const s2 = document.getElementById('screen-2');
+            const s1 = document.getElementById('screen-1');
+            if (s2) {
+                s2.classList.add('opacity-0', 'pointer-events-none');
+                s2.classList.remove('opacity-100');
+                s2.style.display = 'none';
+            }
+            if (s1) {
+                s1.classList.remove('opacity-0', 'pointer-events-none');
+                s1.style.display = 'flex';
+            }
+            console.log('[App] returnToWelcome done');
+        } catch (e) {
+            console.error('[App] returnToWelcome error:', e);
+            alert('返回失败: ' + e.message);
+        }
     }
 };
 

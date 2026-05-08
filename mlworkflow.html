@@ -97,9 +97,14 @@
         
         <!-- 左侧栏：对话与历史 -->
         <div class="w-1/3 flex flex-col h-full relative">
-            <!-- 顶部栏：阶段指示器 + 设置 -->
+            <!-- 顶部栏：返回 + 阶段指示器 + 设置 -->
             <div class="flex items-center justify-between px-1 py-2 mb-1 border-b border-gray-100">
                 <div class="flex items-center gap-3">
+                    <button onclick="App.returnToWelcome()" class="flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors text-xs font-medium" title="返回首页">
+                        <i class="ph-fill ph-arrow-left"></i>
+                        <span>返回</span>
+                    </button>
+                    <div class="w-px h-4 bg-gray-200"></div>
                     <div class="stage-indicator" id="stage-profile"><div class="dot"></div>数据画像</div>
                     <div class="stage-indicator" id="stage-intent"><div class="dot"></div>意图识别</div>
                     <div class="stage-indicator" id="stage-confirm"><div class="dot"></div>任务确认</div>
@@ -251,6 +256,74 @@
                     <div class="flex items-start gap-2">
                         <i class="ph-fill ph-info text-gray-400 mt-0.5"></i>
                         <div id="provider-hint-text">支持 OpenAI、Azure、Moonshot 等所有兼容 OpenAI 格式的云端 API。</div>
+                    </div>
+                </div>
+
+                <!-- 独立配置开关 -->
+                <div class="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100">
+                    <div class="flex items-center gap-2">
+                        <i class="ph-fill ph-sliders-horizontal text-gray-500"></i>
+                        <span class="text-sm font-medium text-gray-700">按 Agent 独立配置 LLM</span>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="llm-separate-configs" class="sr-only peer" onchange="App.toggleSeparateConfigs()">
+                        <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                </div>
+
+                <!-- 独立配置区域（默认折叠） -->
+                <div id="separate-configs-panel" class="hidden space-y-4">
+                    <div class="text-xs text-gray-400 font-medium">为不同阶段的 Agent 指定独立的 LLM 配置（留空则使用全局配置）</div>
+                    
+                    <!-- 意图识别 Agent -->
+                    <div class="border border-gray-200 rounded-xl p-3 space-y-2">
+                        <div class="flex items-center gap-2 text-sm font-medium text-gray-700">
+                            <i class="ph-fill ph-brain text-purple-500"></i> 意图识别 Agent
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <select id="intent-provider" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none">
+                                <option value="openai">云端 API</option>
+                                <option value="local-openai">本地 OpenAI</option>
+                                <option value="ollama">Ollama</option>
+                            </select>
+                            <input type="text" id="intent-model" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="模型名">
+                        </div>
+                        <input type="text" id="intent-base-url" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="Base URL">
+                        <input type="password" id="intent-api-key" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="API Key">
+                    </div>
+                    
+                    <!-- 规划&Coding Agent -->
+                    <div class="border border-gray-200 rounded-xl p-3 space-y-2">
+                        <div class="flex items-center gap-2 text-sm font-medium text-gray-700">
+                            <i class="ph-fill ph-code text-blue-500"></i> 规划&Coding Agent
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <select id="plan-provider" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none">
+                                <option value="openai">云端 API</option>
+                                <option value="local-openai">本地 OpenAI</option>
+                                <option value="ollama">Ollama</option>
+                            </select>
+                            <input type="text" id="plan-model" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="模型名">
+                        </div>
+                        <input type="text" id="plan-base-url" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="Base URL">
+                        <input type="password" id="plan-api-key" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="API Key">
+                    </div>
+                    
+                    <!-- 评估 Agent -->
+                    <div class="border border-gray-200 rounded-xl p-3 space-y-2">
+                        <div class="flex items-center gap-2 text-sm font-medium text-gray-700">
+                            <i class="ph-fill ph-chart-bar text-green-500"></i> 评估 Agent
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <select id="eval-provider" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none">
+                                <option value="openai">云端 API</option>
+                                <option value="local-openai">本地 OpenAI</option>
+                                <option value="ollama">Ollama</option>
+                            </select>
+                            <input type="text" id="eval-model" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="模型名">
+                        </div>
+                        <input type="text" id="eval-base-url" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="Base URL">
+                        <input type="password" id="eval-api-key" class="w-full px-2 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs" placeholder="API Key">
                     </div>
                 </div>
             </div>

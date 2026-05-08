@@ -489,8 +489,8 @@ const FastUI = {
         sysContainer.insertAdjacentHTML('beforeend', html);
         Renderer.scrollToBottom();
 
-        // 2. 右侧：自动切换到结果标签页
-        this._renderResultsPanel(data);
+        // 2. 右侧：在用户确认满意前保持空白，不显示任何结果
+        this._resetResultsPanel();
     },
 
     // ========== 重置右侧结果面板为空白状态 ==========
@@ -552,24 +552,37 @@ const FastUI = {
         // 测试集预测表格
         let predictionTableHtml = '';
         if (testPredictions && testPredictions.length > 0) {
-            const rows = testPredictions.map(p => `
-                <tr class="border-b border-gray-800">
-                    <td class="py-1.5 text-gray-400">${p.id}</td>
-                    <td class="py-1.5 text-blue-400 font-mono">${p.prob.toFixed(4)}</td>
-                    <td class="py-1.5">
-                        <span class="px-2 py-0.5 rounded text-xs ${p.pred === 1 ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-700 text-gray-400'}">
-                            ${p.pred === 1 ? '正类' : '负类'}
-                        </span>
-                    </td>
-                </tr>
-            `).join('');
+            // 判断是否有概率列，有则显示概率+预测，无则只显示预测值（回归）
+            const hasProb = testPredictions[0].prob !== undefined;
+            const hasPred = testPredictions[0].pred !== undefined;
+            const hasValue = testPredictions[0].value !== undefined;
+            const rows = testPredictions.map(p => {
+                let probCell = '';
+                if (hasProb) {
+                    const probVal = typeof p.prob === 'number' ? p.prob.toFixed(4) : (p.prob || '--');
+                    probCell = `<td class="py-1.5 text-blue-400 font-mono">${probVal}</td>`;
+                }
+                let predCell = '';
+                if (hasPred) {
+                    const predVal = Number(p.pred);
+                    predCell = `<td class="py-1.5"><span class="px-2 py-0.5 rounded text-xs ${predVal === 1 ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-700 text-gray-400'}">${predVal === 1 ? '正类' : '负类'}</span></td>`;
+                } else if (hasValue) {
+                    const val = typeof p.value === 'number' ? p.value.toFixed(4) : (p.value || '--');
+                    predCell = `<td class="py-1.5 text-gray-300 font-mono">${val}</td>`;
+                } else {
+                    predCell = `<td class="py-1.5 text-gray-500">--</td>`;
+                }
+                return `<tr class="border-b border-gray-800"><td class="py-1.5 text-gray-400">${p.id}</td>${probCell}${predCell}</tr>`;
+            }).join('');
+            const headers = [`<th class="text-left py-1">ID</th>`];
+            if (hasProb) headers.push(`<th class="text-left py-1">概率</th>`);
+            if (hasPred) headers.push(`<th class="text-left py-1">预测</th>`);
+            else if (hasValue) headers.push(`<th class="text-left py-1">预测值</th>`);
             predictionTableHtml = `
                 <div class="bg-gray-800 rounded-xl p-4 mb-4">
-                    <div class="text-sm font-medium text-gray-200 mb-3">测试集预测预览（前10条）</div>
+                    <div class="text-sm font-medium text-gray-200 mb-3">测试集预测预览（前 ${testPredictions.length} 条）</div>
                     <table class="w-full text-xs">
-                        <thead><tr class="text-gray-500 border-b border-gray-700">
-                            <th class="text-left py-1">ID</th><th class="text-left py-1">概率</th><th class="text-left py-1">预测</th>
-                        </tr></thead>
+                        <thead><tr class="text-gray-500 border-b border-gray-700">${headers.join('')}</tr></thead>
                         <tbody>${rows}</tbody>
                     </table>
                 </div>
@@ -627,13 +640,15 @@ const FastUI = {
             model: 'ph-cube',
             code: 'ph-file-code',
             data: 'ph-table',
-            report: 'ph-file-html'
+            report: 'ph-file-html',
+            image: 'ph-image'
         };
         const fileTypeColors = {
             model: 'text-purple-400',
             code: 'text-blue-400',
             data: 'text-green-400',
-            report: 'text-orange-400'
+            report: 'text-orange-400',
+            image: 'text-pink-400'
         };
 
         const apiBase = window.FastEngine?.API_BASE || '';
@@ -658,10 +673,41 @@ const FastUI = {
         `;
         }).join('');
 
+        // 生成下载全部按钮的点击处理函数
+        const downloadAllHandler = `FastUI._downloadAllFiles(${JSON.stringify(files.map(f => ({url: apiBase + f.path, name: f.name}))).replace(/"/g, '&quot;')})`;
+
         display.innerHTML = `
-            <div class="text-xs text-gray-400 font-medium mb-3">生成文件列表</div>
+            <div class="flex items-center justify-between mb-3">
+                <div class="text-xs text-gray-400 font-medium">生成文件列表</div>
+                <button onclick="${downloadAllHandler}" class="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-xs font-medium transition-all flex items-center gap-1.5">
+                    <i class="ph-fill ph-download-simple"></i> 下载全部
+                </button>
+            </div>
             <div class="space-y-2">${fileRows}</div>
         `;
+    },
+
+    // ========== 一键下载全部文件 ==========
+    async _downloadAllFiles(fileList) {
+        for (const {url, name} of fileList) {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const blob = await response.blob();
+                const blobUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(blobUrl);
+                // 间隔 200ms 避免浏览器阻塞
+                await new Promise(r => setTimeout(r, 200));
+            } catch (err) {
+                console.error('[FastUI] 下载失败:', err);
+            }
+        }
     },
 
     // ========== 用户交互：满意 ==========
@@ -724,7 +770,7 @@ const FastUI = {
                     <div class="w-4 h-4 border-2 border-amber-200 border-t-amber-500 rounded-full animate-spin"></div>
                     正在重新生成产物...
                 </div>
-                <p class="text-xs text-gray-600">已延长 LLM 超时时间至 10 分钟，正在重新调用 LLM 生成完整产物，请稍候。</p>
+                <p class="text-xs text-gray-600">正在重新调用 LLM 生成完整产物，请稍候。</p>
             </div>
         `;
         sysContainer.insertAdjacentHTML('beforeend', loadingHtml);
@@ -875,7 +921,7 @@ const FastUI = {
             // 只在 presenting 或 completed 阶段才渲染预测结果，避免运行中显示过期/mock数据
             const phase = FastEngine.state.phase;
             const artifacts = FastEngine.state.artifacts;
-            if ((phase === 'presenting' || phase === 'completed') && FastEngine.state.metrics) {
+            if (phase === 'completed' && FastEngine.state.metrics) {
                 this._renderResultsPanel({
                     metrics: FastEngine.state.metrics,
                     featureImportance: artifacts?.feature_importance || [],
