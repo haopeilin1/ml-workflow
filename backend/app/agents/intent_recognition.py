@@ -182,6 +182,11 @@ class IntentRecognitionAgent(BaseAgent):
 
             task_type = self._map_task_type(task_type_str)
 
+            # 规则校正 complexity：防止 LLM（尤其是小模型）判定过于保守
+            complexity = self._correct_complexity(
+                columns, row_count, col_count, target_column, task_type, complexity, is_time_series
+            )
+
             logger.info(
                 f"[IntentRecognition] 识别结果: target={target_column}, "
                 f"type={task_type.value}, metric={eval_metric}, complexity={complexity}, ts={is_time_series}"
@@ -197,6 +202,71 @@ class IntentRecognitionAgent(BaseAgent):
         except Exception as e:
             logger.error(f"[IntentRecognition] LLM 识别失败: {e}，使用规则 fallback")
             return self._rule_based_recognition(columns, task_description)
+
+    def _correct_complexity(
+        self,
+        columns: List[Dict],
+        row_count: int,
+        col_count: int,
+        target_column: str,
+        task_type: TaskType,
+        complexity: str,
+        is_time_series: bool
+    ) -> str:
+        """
+        基于数据画像规则校正 complexity，防止 LLM（尤其是 7b 小模型）判定过于保守。
+        只要满足任一 complex 信号，强制升级为 complex。
+        """
+        if complexity == "complex":
+            return "complex"
+
+        # 规则1: 时序任务（已有时间列或 is_time_series=True）
+        if is_time_series:
+            logger.info(f"[IntentRecognition] 规则校正: 时序任务强制 complex")
+            return "complex"
+
+        # 规则2: 多分类任务
+        if task_type == TaskType.MULTICLASS_CLASSIFICATION:
+            logger.info(f"[IntentRecognition] 规则校正: 多分类任务强制 complex")
+            return "complex"
+
+        # 规则3: 极度不平衡二分类（最大类占比 > 95%）
+        if task_type == TaskType.BINARY_CLASSIFICATION and row_count > 0:
+            for c in columns:
+                if c.get("name") == target_column:
+                    most_common_freq = c.get("mostCommonFreq", 0)
+                    if most_common_freq > 0:
+                        imbalance_ratio = most_common_freq / row_count
+                        if imbalance_ratio > 0.95:
+                            logger.info(
+                                f"[IntentRecognition] 规则校正: 极度不平衡"
+                                f"(最大类占比{imbalance_ratio:.1%})强制 complex"
+                            )
+                            return "complex"
+                    # 备用：通过 uniqueCount 推断
+                    unique_count = c.get("uniqueCount", 0)
+                    if unique_count == 2:
+                        # 二分类但没有 mostCommonFreq，用通用规则
+                        pass
+                    break
+
+        # 规则4: 严重缺失值（任意列缺失率 > 20%）
+        if row_count > 0:
+            for c in columns:
+                missing_count = c.get("missingCount", 0)
+                if missing_count / row_count > 0.20:
+                    logger.info(
+                        f"[IntentRecognition] 规则校正: 列 '{c['name']}' "
+                        f"缺失率{missing_count/row_count:.1%}强制 complex"
+                    )
+                    return "complex"
+
+        # 规则5: 高维稀疏（列数 > 50）
+        if col_count > 50:
+            logger.info(f"[IntentRecognition] 规则校正: 高维数据({col_count}列)强制 complex")
+            return "complex"
+
+        return complexity
 
     def _parse_json(self, content: str) -> dict:
         """从 LLM 输出中提取 JSON"""
