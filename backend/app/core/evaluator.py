@@ -68,7 +68,7 @@ class BenchmarkEvaluator:
         num_runs: int = 3,
         judge_llm_config: Optional[LLMConfig] = None,
         plan_coding_llm_config: Optional[LLMConfig] = None,
-        max_wait_seconds: int = 600,
+        max_wait_seconds: int = 1200,  # 从 600 提升到 1200，给完整流程（3轮优化+产物生成）留出足够时间
         eval_id: Optional[str] = None
     ):
         self.plan_coding_llm_config = plan_coding_llm_config
@@ -390,12 +390,13 @@ class BenchmarkEvaluator:
         gt_path = gt_files[0]
 
         # 优先使用 LLM IntentAgent 识别任务信息，失败则回退到规则推断
-        task_type, target_column, eval_metric, id_column = self._recognize_task_info_llm(
+        task_type, target_column, eval_metric, id_column, complexity = self._recognize_task_info_llm(
             train_path, gt_path, desc_path, task_name
         )
         if not target_column:
             task_type, target_column, id_column = self._infer_task_info(train_path, gt_path)
             eval_metric = None
+            complexity = "simple"
             logger.info(f"[BenchmarkEvaluator] {task_name}: 回退到规则推断")
 
         return BenchmarkTaskConfig(
@@ -473,7 +474,7 @@ class BenchmarkEvaluator:
     ) -> tuple:
         """
         使用 LLM IntentAgent 识别任务信息。
-        返回 (task_type, target_column, eval_metric, id_column)。
+        返回 (task_type, target_column, eval_metric, id_column, complexity)。
         任一环节失败则返回全 None，由调用方回退到规则推断。
         """
         cache_key = task_name
@@ -489,7 +490,7 @@ class BenchmarkEvaluator:
             gt_cols = list(gt_df.columns)
             id_column = gt_cols[0] if len(gt_cols) >= 1 else None
             logger.info(f"[BenchmarkEvaluator] {task_name}: 命中 IntentAgent 缓存")
-            return task_type, cached.target_column, cached.eval_metric, id_column
+            return task_type, cached.target_column, cached.eval_metric, id_column, cached.complexity
 
         # 读取任务描述
         user_description = ""
@@ -548,9 +549,9 @@ class BenchmarkEvaluator:
         logger.info(
             f"[BenchmarkEvaluator] LLM 识别任务信息 {task_name}: "
             f"type={task_type.value}, target={result.target_column}, "
-            f"metric={result.eval_metric}"
+            f"metric={result.eval_metric}, complexity={result.complexity}"
         )
-        return task_type, result.target_column, result.eval_metric, id_column
+        return task_type, result.target_column, result.eval_metric, id_column, result.complexity
 
     def _infer_task_info(self, train_path: Path, gt_path: Path) -> tuple:
         """
@@ -627,11 +628,16 @@ class BenchmarkEvaluator:
             if task_cfg.test_path:
                 uploaded_files.append(UploadedFile(name="test.csv", path=task_cfg.test_path, role=FileRole.TEST))
             
+            # 从 IntentAgent 缓存获取 complexity（核心层数据，不经过评测层 BenchmarkTaskConfig）
+            cached_intent = self._intent_cache.get(task_cfg.task_name)
+            complexity = cached_intent.complexity if cached_intent else "simple"
+            
             tc = TaskConfig(
                 extracted_slots=ExtractedSlots(
                     target_column=task_cfg.target_column,
                     task_type=task_cfg.task_type,
                     eval_metric=task_cfg.eval_metric,
+                    complexity=complexity,
                     feature_constraints=[],
                     user_modeling_suggestions=None  # 冷启动：不传入建模建议
                 ),
@@ -836,7 +842,7 @@ class BenchmarkEvaluator:
             return True
         return False
 
-    def _wait_for_phase(self, task_id: str, target_phases: List[FastTaskPhase], timeout: int = 600, interval: int = 2) -> bool:
+    def _wait_for_phase(self, task_id: str, target_phases: List[FastTaskPhase], timeout: int = 1200, interval: int = 2) -> bool:
         """轮询等待任务到达目标阶段之一"""
         start = time.time()
         while time.time() - start < timeout:

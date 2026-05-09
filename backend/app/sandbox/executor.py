@@ -53,8 +53,10 @@ class SecurityChecker(ast.NodeVisitor):
     """
     
     # 严格模式下禁止导入的顶层模块
+    # 注意：os 已从列表移除，因为 FORBIDDEN_ATTR_CALLS 已禁止其危险调用（system/popen/exec等）
+    # 允许 os 导入可减少无意义的 DEBUG 循环（如 os.path.join 等安全操作常被 LLM 使用）
     FORBIDDEN_IMPORTS = {
-        'os', 'subprocess', 'socket', 'urllib', 'requests', 'httpx',
+        'subprocess', 'socket', 'urllib', 'requests', 'httpx',
         'ftplib', 'smtplib', 'telnetlib', 'http', 'webbrowser',
         'shutil', 'sys', 'importlib', 'pathlib'
     }

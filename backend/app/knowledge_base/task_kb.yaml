@@ -1,0 +1,48 @@
+# ML Workflow 任务类型知识库
+# 由 Intent Agent 根据 complexity 判定动态加载
+# 具体内容待填充，当前仅搭建框架
+
+version: "1.0"
+
+task_types:
+  time_series_regression:
+    triggers:
+      - task_type: "regression"
+      - data_profile_hint: "列名含 year/month/day/hour/season/weekday 或存在 datetime 类型列"
+    common_failure: "时间特征未 Pipeline 化，预测时特征列不匹配"
+    must_do: []
+    avoid: []
+
+  multiclass_classification:
+    triggers:
+      - task_type: "multiclass_classification"
+    common_failure: "F1-macro 极低，多分类表现极差"
+    must_do: []
+    avoid: []
+
+  binary_classification_imbalanced:
+    triggers:
+      - task_type: "binary_classification"
+      - data_profile_hint: "最大类占比 > 90% 或正例比例 < 10%"
+    common_failure: "未处理类别不平衡，测试集 AUC 暴跌；严重过拟合"
+    must_do: []
+    avoid: []
+
+  standard_regression:
+    triggers:
+      - task_type: "regression"
+      - exclude_if: "已匹配 time_series_regression"
+    common_failure: "预测时特征列缺失或数量不匹配"
+    must_do: []
+    avoid: []
+
+  binary_classification_standard:
+    triggers:
+      - task_type: "binary_classification"
+      - exclude_if: "已匹配 binary_classification_imbalanced"
+    common_failure: "模型整体弱，AUC 接近随机"
+    must_do: []
+    avoid: []
+
+general:
+  antipatterns: []

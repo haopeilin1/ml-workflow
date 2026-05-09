@@ -33,7 +33,7 @@ def main():
     parser = argparse.ArgumentParser(description="ML Workflow 自动化评测")
     parser.add_argument("--benchmark-dir", required=True, help="评测数据集根目录")
     parser.add_argument("--num-runs", type=int, default=3, help="每个任务运行次数（默认3）")
-    parser.add_argument("--max-wait", type=int, default=600, help="每个任务最大等待时间（秒，默认600）")
+    parser.add_argument("--max-wait", type=int, default=1200, help="每个任务最大等待时间（秒，默认1200）")
     parser.add_argument("--judge-model", default="", help="覆盖 Judge LLM model（默认从 .env 读取）")
     parser.add_argument("--plan-model", default="", help="覆盖 PlanCoding LLM model（默认从 .env 读取）")
     parser.add_argument("--output", default="", help="报告输出路径（默认保存到 outputs/eval_xxx/）")

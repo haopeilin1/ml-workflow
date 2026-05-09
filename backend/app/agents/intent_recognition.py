@@ -17,13 +17,14 @@ logger = logging.getLogger(__name__)
 
 class IntentResult:
     """意图识别结果"""
-    def __init__(self, target_column: str, task_type: TaskType, eval_metric: Optional[str] = None):
+    def __init__(self, target_column: str, task_type: TaskType, eval_metric: Optional[str] = None, complexity: str = "simple"):
         self.target_column = target_column
         self.task_type = task_type
         self.eval_metric = eval_metric
+        self.complexity = complexity  # "simple" 或 "complex"
 
     def __repr__(self):
-        return f"IntentResult(target={self.target_column}, type={self.task_type.value}, metric={self.eval_metric})"
+        return f"IntentResult(target={self.target_column}, type={self.task_type.value}, metric={self.eval_metric}, complexity={self.complexity})"
 
 
 class IntentRecognitionAgent(BaseAgent):
@@ -81,12 +82,23 @@ class IntentRecognitionAgent(BaseAgent):
      * 回归 + 关注预测误差大小（如房价预测、保费预测） → RMSE / MAE
      * 回归 + 关注拟合程度（如物理量预测） → R²
 
+4. complexity（复杂度判定）
+   - 请同时判定该任务是"simple"还是"complex"
+   - complex 信号（满足任一即判定为 complex）：
+     * 存在时间相关列（year/month/day/hour/season/week/datetime 等）
+     * 多分类任务（3个及以上类别）
+     * 类别极度不平衡（最大类占比 > 90% 或最小类 < 5%）
+     * 缺失值严重（任意列缺失率 > 20%）
+     * 高维稀疏特征（列数 > 50 且大量零值）
+   - 无上述信号则判定为 simple
+
 【输出格式】
 严格输出 JSON，不要任何额外文字：
 {
   "target_column": "列名",
   "task_type": "binary_classification / multiclass_classification / regression",
-  "eval_metric": "用户指定的评估指标名称（如AUC/F1/Log Loss/RMSE等，开放取值不限列表）"
+  "eval_metric": "用户指定的评估指标名称（如AUC/F1/Log Loss/RMSE等，开放取值不限列表）",
+  "complexity": "simple / complex"
 }"""
 
     def recognize(
@@ -125,12 +137,14 @@ class IntentRecognitionAgent(BaseAgent):
 2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
 3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
 4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
 
 请严格输出 JSON：
 {{
   "target_column": "列名",
   "task_type": "binary_classification/multiclass_classification/regression",
-  "eval_metric": "用户指定的评估指标名称（开放取值）"
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex"
 }}"""
 
         try:
@@ -140,6 +154,10 @@ class IntentRecognitionAgent(BaseAgent):
             target_column = result.get("target_column", "")
             task_type_str = result.get("task_type", "binary_classification")
             eval_metric = result.get("eval_metric")
+            complexity = result.get("complexity", "simple")
+            # 合法性校验
+            if complexity not in ("simple", "complex"):
+                complexity = "simple"
 
             # 验证 target_column 是否在 columns 中
             valid_cols = [c["name"] for c in columns]
@@ -154,12 +172,13 @@ class IntentRecognitionAgent(BaseAgent):
 
             logger.info(
                 f"[IntentRecognition] 识别结果: target={target_column}, "
-                f"type={task_type.value}, metric={eval_metric}"
+                f"type={task_type.value}, metric={eval_metric}, complexity={complexity}"
             )
             return IntentResult(
                 target_column=target_column,
                 task_type=task_type,
-                eval_metric=eval_metric
+                eval_metric=eval_metric,
+                complexity=complexity
             )
 
         except Exception as e:
@@ -236,12 +255,14 @@ class IntentRecognitionAgent(BaseAgent):
                 return IntentResult(
                     target_column=target_column,
                     task_type=task_type,
-                    eval_metric=eval_metric
+                    eval_metric=eval_metric,
+                    complexity="simple"
                 )
 
         # 默认 fallback
         return IntentResult(
             target_column=target_column,
             task_type=TaskType.BINARY_CLASSIFICATION,
-            eval_metric="AUC"
+            eval_metric="AUC",
+            complexity="simple"
         )
