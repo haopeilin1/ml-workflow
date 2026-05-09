@@ -40,7 +40,8 @@ async def start_fast_task(request: StartFastTaskRequest):
             files=[f.model_dump() for f in tc.uploaded_files],
             target_column=tc.extracted_slots.target_column or "target",
             task_type=tc.extracted_slots.task_type or "binary_classification",
-            task_id=task_id
+            task_id=task_id,
+            is_time_series=tc.extracted_slots.is_time_series or False
         )
         
         # 记录数据集路径到任务状态

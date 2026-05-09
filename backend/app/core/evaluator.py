@@ -390,13 +390,14 @@ class BenchmarkEvaluator:
         gt_path = gt_files[0]
 
         # 优先使用 LLM IntentAgent 识别任务信息，失败则回退到规则推断
-        task_type, target_column, eval_metric, id_column, complexity = self._recognize_task_info_llm(
+        task_type, target_column, eval_metric, id_column, complexity, is_time_series = self._recognize_task_info_llm(
             train_path, gt_path, desc_path, task_name
         )
         if not target_column:
             task_type, target_column, id_column = self._infer_task_info(train_path, gt_path)
             eval_metric = None
             complexity = "simple"
+            is_time_series = False
             logger.info(f"[BenchmarkEvaluator] {task_name}: 回退到规则推断")
 
         return BenchmarkTaskConfig(
@@ -474,7 +475,7 @@ class BenchmarkEvaluator:
     ) -> tuple:
         """
         使用 LLM IntentAgent 识别任务信息。
-        返回 (task_type, target_column, eval_metric, id_column, complexity)。
+        返回 (task_type, target_column, eval_metric, id_column, complexity, is_time_series)。
         任一环节失败则返回全 None，由调用方回退到规则推断。
         """
         cache_key = task_name
@@ -490,7 +491,7 @@ class BenchmarkEvaluator:
             gt_cols = list(gt_df.columns)
             id_column = gt_cols[0] if len(gt_cols) >= 1 else None
             logger.info(f"[BenchmarkEvaluator] {task_name}: 命中 IntentAgent 缓存")
-            return task_type, cached.target_column, cached.eval_metric, id_column, cached.complexity
+            return task_type, cached.target_column, cached.eval_metric, id_column, cached.complexity, cached.is_time_series
 
         # 读取任务描述
         user_description = ""
@@ -505,7 +506,7 @@ class BenchmarkEvaluator:
             profile = self._build_data_profile(train_path, gt_path)
         except Exception as e:
             logger.warning(f"[BenchmarkEvaluator] 构建数据画像失败 {task_name}: {e}")
-            return None, None, None, None
+            return None, None, None, None, None, None
 
         # 调用 IntentAgent
         try:
@@ -517,11 +518,11 @@ class BenchmarkEvaluator:
             )
         except Exception as e:
             logger.warning(f"[BenchmarkEvaluator] IntentAgent 调用失败 {task_name}: {e}")
-            return None, None, None, None
+            return None, None, None, None, None, None
 
         if not result or not result.target_column:
             logger.info(f"[BenchmarkEvaluator] IntentAgent 未返回 target_column {task_name}")
-            return None, None, None, None
+            return None, None, None, None, None, None
 
         # 校验 target_column 是否在训练集中
         train_df = pd.read_csv(train_path)
@@ -530,7 +531,7 @@ class BenchmarkEvaluator:
                 f"[BenchmarkEvaluator] LLM 返回的 target_column '{result.target_column}' "
                 f"不在训练集中，回退到规则推断"
             )
-            return None, None, None, None
+            return None, None, None, None, None, None
 
         # 映射 task_type
         task_type_map = {
@@ -549,9 +550,9 @@ class BenchmarkEvaluator:
         logger.info(
             f"[BenchmarkEvaluator] LLM 识别任务信息 {task_name}: "
             f"type={task_type.value}, target={result.target_column}, "
-            f"metric={result.eval_metric}, complexity={result.complexity}"
+            f"metric={result.eval_metric}, complexity={result.complexity}, ts={result.is_time_series}"
         )
-        return task_type, result.target_column, result.eval_metric, id_column, result.complexity
+        return task_type, result.target_column, result.eval_metric, id_column, result.complexity, result.is_time_series
 
     def _infer_task_info(self, train_path: Path, gt_path: Path) -> tuple:
         """
@@ -628,9 +629,10 @@ class BenchmarkEvaluator:
             if task_cfg.test_path:
                 uploaded_files.append(UploadedFile(name="test.csv", path=task_cfg.test_path, role=FileRole.TEST))
             
-            # 从 IntentAgent 缓存获取 complexity（核心层数据，不经过评测层 BenchmarkTaskConfig）
+            # 从 IntentAgent 缓存获取 complexity 和 is_time_series（核心层数据，不经过评测层 BenchmarkTaskConfig）
             cached_intent = self._intent_cache.get(task_cfg.task_name)
             complexity = cached_intent.complexity if cached_intent else "simple"
+            is_time_series = cached_intent.is_time_series if cached_intent else False
             
             tc = TaskConfig(
                 extracted_slots=ExtractedSlots(
@@ -638,6 +640,7 @@ class BenchmarkEvaluator:
                     task_type=task_cfg.task_type,
                     eval_metric=task_cfg.eval_metric,
                     complexity=complexity,
+                    is_time_series=is_time_series,
                     feature_constraints=[],
                     user_modeling_suggestions=None  # 冷启动：不传入建模建议
                 ),
@@ -668,7 +671,8 @@ class BenchmarkEvaluator:
                 files=[f.model_dump() for f in tc.uploaded_files],
                 target_column=tc.extracted_slots.target_column or "target",
                 task_type=tc.extracted_slots.task_type,
-                task_id=task_id
+                task_id=task_id,
+                is_time_series=tc.extracted_slots.is_time_series or False
             )
             task_manager.update_task(
                 task_id,

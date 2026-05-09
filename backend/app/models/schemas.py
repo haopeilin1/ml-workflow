@@ -53,6 +53,7 @@ class ExtractedSlots(BaseModel):
     task_type: Optional[TaskType] = None
     eval_metric: Optional[str] = None
     complexity: Optional[str] = "simple"  # "simple" 或 "complex"，由 Intent Agent 判定
+    is_time_series: bool = False  # 是否为时序任务，影响验证集切分方式
     feature_constraints: List[str] = Field(default_factory=list)
     user_modeling_suggestions: Optional[str] = None  # 用户在建模描述中附带的建模建议/偏好
 

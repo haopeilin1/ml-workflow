@@ -1,0 +1,5 @@
+不平衡处理：采用SMOTE过采样、欠采样或设置 class_weight='balanced'。
+模型推荐：XGBoost / LightGBM / CatBoost，对表格数据和不平衡分类效果优异。
+特征工程：Time 做周期编码，Transaction_Amount 做标准化/分箱；feat1-feat28 保持原值。
+验证策略：StratifiedKFold 交叉验证，确保每折类别比例一致。
+评估聚焦：仅优化 ROC-AUC，通过预测概率排序能力评估模型，不依赖默认 0.5 阈值。

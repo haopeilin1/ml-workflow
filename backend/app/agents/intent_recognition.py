@@ -17,14 +17,15 @@ logger = logging.getLogger(__name__)
 
 class IntentResult:
     """意图识别结果"""
-    def __init__(self, target_column: str, task_type: TaskType, eval_metric: Optional[str] = None, complexity: str = "simple"):
+    def __init__(self, target_column: str, task_type: TaskType, eval_metric: Optional[str] = None, complexity: str = "simple", is_time_series: bool = False):
         self.target_column = target_column
         self.task_type = task_type
         self.eval_metric = eval_metric
         self.complexity = complexity  # "simple" 或 "complex"
+        self.is_time_series = is_time_series  # 是否为时序任务
 
     def __repr__(self):
-        return f"IntentResult(target={self.target_column}, type={self.task_type.value}, metric={self.eval_metric}, complexity={self.complexity})"
+        return f"IntentResult(target={self.target_column}, type={self.task_type.value}, metric={self.eval_metric}, complexity={self.complexity}, ts={self.is_time_series})"
 
 
 class IntentRecognitionAgent(BaseAgent):
@@ -92,13 +93,19 @@ class IntentRecognitionAgent(BaseAgent):
      * 高维稀疏特征（列数 > 50 且大量零值）
    - 无上述信号则判定为 simple
 
+5. is_time_series（时序任务判定）
+   - 如果数据中存在时间相关列（如 year/month/day/hour/dteday/No/instant/date/datetime/season/week 等），且任务是预测未来的某个指标，则判定为 true
+   - 否则判定为 false
+   - 注意：即使 task_type 是 regression，只要有明显的时间列且任务语义涉及时序预测，也判定为 true
+
 【输出格式】
 严格输出 JSON，不要任何额外文字：
 {
   "target_column": "列名",
   "task_type": "binary_classification / multiclass_classification / regression",
   "eval_metric": "用户指定的评估指标名称（如AUC/F1/Log Loss/RMSE等，开放取值不限列表）",
-  "complexity": "simple / complex"
+  "complexity": "simple / complex",
+  "is_time_series": true / false
 }"""
 
     def recognize(
@@ -138,13 +145,15 @@ class IntentRecognitionAgent(BaseAgent):
 3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
 4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
 5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
 
 请严格输出 JSON：
 {{
   "target_column": "列名",
   "task_type": "binary_classification/multiclass_classification/regression",
   "eval_metric": "用户指定的评估指标名称（开放取值）",
-  "complexity": "simple/complex"
+  "complexity": "simple/complex",
+  "is_time_series": true/false
 }}"""
 
         try:
@@ -155,9 +164,12 @@ class IntentRecognitionAgent(BaseAgent):
             task_type_str = result.get("task_type", "binary_classification")
             eval_metric = result.get("eval_metric")
             complexity = result.get("complexity", "simple")
+            is_time_series = result.get("is_time_series", False)
             # 合法性校验
             if complexity not in ("simple", "complex"):
                 complexity = "simple"
+            if not isinstance(is_time_series, bool):
+                is_time_series = False
 
             # 验证 target_column 是否在 columns 中
             valid_cols = [c["name"] for c in columns]
@@ -172,13 +184,14 @@ class IntentRecognitionAgent(BaseAgent):
 
             logger.info(
                 f"[IntentRecognition] 识别结果: target={target_column}, "
-                f"type={task_type.value}, metric={eval_metric}, complexity={complexity}"
+                f"type={task_type.value}, metric={eval_metric}, complexity={complexity}, ts={is_time_series}"
             )
             return IntentResult(
                 target_column=target_column,
                 task_type=task_type,
                 eval_metric=eval_metric,
-                complexity=complexity
+                complexity=complexity,
+                is_time_series=is_time_series
             )
 
         except Exception as e:
@@ -239,6 +252,13 @@ class IntentRecognitionAgent(BaseAgent):
         """LLM 失败时的规则 fallback"""
         target_column = self._fallback_target_column(columns, task_description)
 
+        # 从列名推断是否为时序任务
+        time_keywords = {"year", "month", "day", "hour", "dteday", "date", "time", "datetime", "season", "week", "instant", "no"}
+        is_time_series = any(
+            any(kw in c["name"].lower() for kw in time_keywords)
+            for c in columns
+        )
+
         # 从列的 unique_count 推断任务类型
         for c in columns:
             if c["name"] == target_column:
@@ -256,7 +276,8 @@ class IntentRecognitionAgent(BaseAgent):
                     target_column=target_column,
                     task_type=task_type,
                     eval_metric=eval_metric,
-                    complexity="simple"
+                    complexity="simple",
+                    is_time_series=is_time_series
                 )
 
         # 默认 fallback
@@ -264,5 +285,6 @@ class IntentRecognitionAgent(BaseAgent):
             target_column=target_column,
             task_type=TaskType.BINARY_CLASSIFICATION,
             eval_metric="AUC",
-            complexity="simple"
+            complexity="simple",
+            is_time_series=is_time_series
         )

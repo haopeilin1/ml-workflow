@@ -730,7 +730,8 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             files=[f.model_dump() for f in tc.uploaded_files],
             target_column=tc.extracted_slots.target_column or "target",
             task_type=tc.extracted_slots.task_type or "binary_classification",
-            task_id=self.task_id
+            task_id=self.task_id,
+            is_time_series=tc.extracted_slots.is_time_series or False
         )
         self.datasets = datasets
         has_test = datasets.get('test') is not None

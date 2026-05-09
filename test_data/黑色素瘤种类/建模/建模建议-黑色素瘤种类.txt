@@ -1,0 +1,1 @@
+建议采用XGBoost或LightGBM等梯度提升模型，利用其原生支持类别不平衡与缺失值处理的优势。特征方面，对类别变量做Target Encoding，对年龄做分箱或标准化，图像尺寸可构造宽高比、面积等衍生特征。训练时使用scale_pos_weight平衡正负样本，交叉验证选用StratifiedKFold。最终模型以AUC-ROC为唯一评估标准调优，输出测试集恶性概率。

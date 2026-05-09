@@ -39,7 +39,8 @@ class DataSplitter:
         files: List[Dict],
         target_column: str,
         task_type: TaskType,
-        task_id: str
+        task_id: str,
+        is_time_series: bool = False
     ) -> Dict[str, Optional[Path]]:
         """
         准备数据集，返回处理后的文件路径映射
@@ -49,6 +50,7 @@ class DataSplitter:
             target_column: 目标列名
             task_type: 任务类型
             task_id: 任务ID，用于构建输出子目录
+            is_time_series: 是否为时序任务，时序任务按时间顺序切分（前train后val）
             
         Returns:
             {
@@ -88,9 +90,12 @@ class DataSplitter:
             result["validation"] = self._save_df(val_df, task_output_dir / "validation.csv")
         else:
             # 无验证集，从训练集自动 8:2 切分
-            logger.info("[DataSplitter] 未找到验证集，从训练集自动 8:2 切分")
+            if is_time_series:
+                logger.info("[DataSplitter] 时序任务，按时间顺序前80%训练、后20%验证切分")
+            else:
+                logger.info("[DataSplitter] 未找到验证集，从训练集自动 8:2 切分")
             train_split, val_split = self._split_train_validation(
-                train_df, target_column, task_type
+                train_df, target_column, task_type, is_time_series
             )
             result["train"] = self._save_df(train_split, task_output_dir / "train.csv")
             result["validation"] = self._save_df(val_split, task_output_dir / "validation.csv")
@@ -115,15 +120,30 @@ class DataSplitter:
         self,
         df: pd.DataFrame,
         target_column: str,
-        task_type: TaskType
+        task_type: TaskType,
+        is_time_series: bool = False
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         从训练集切分出验证集（8:2）
         
-        分类任务使用 stratify 保证类别比例一致
+        - 时序任务：按数据原有顺序切分（前80%训练，后20%验证），禁止打乱
+        - 非时序分类任务：使用 stratify 保证类别比例一致
+        - 非时序回归任务：随机切分
         """
         if target_column not in df.columns:
             raise ValueError(f"目标列 '{target_column}' 不在数据集中")
+        
+        if is_time_series:
+            # 时序任务：按原有顺序切分，前 80% 为训练，后 20% 为验证
+            n_total = len(df)
+            n_train = int(n_total * (1 - settings.DEFAULT_TEST_SIZE))
+            train_df = df.iloc[:n_train].copy()
+            val_df = df.iloc[n_train:].copy()
+            logger.info(
+                f"[DataSplitter] 时序顺序切分: train={train_df.shape} (前{n_train}行), "
+                f"val={val_df.shape} (后{n_total - n_train}行)，未打乱"
+            )
+            return train_df, val_df
         
         y = df[target_column]
         
