@@ -12,6 +12,7 @@ import shutil
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -38,7 +39,7 @@ from app.core.state import task_manager
 from app.models.evaluate_schemas import (
     BenchmarkTaskConfig, BenchmarkTaskResult, BenchmarkRoundResult,
     BenchmarkReport, JudgeResult, TestSetMetrics, TaskType,
-    TimingBreakdown, TokenUsageSummary
+    TimingBreakdown, TokenUsageSummary, ArtifactInfo
 )
 from app.models.schemas import (
     TaskConfig, ExtractedSlots, UploadedFile, FileRole,
@@ -90,6 +91,33 @@ class BenchmarkEvaluator:
         self._total_runs: int = 0
         self._running: bool = False
         self._report: Optional[BenchmarkReport] = None
+        self._lock = threading.Lock()  # 并发锁
+
+    def _run_task_round(self, task_cfg: BenchmarkTaskConfig) -> tuple:
+        """运行单个任务的所有轮次（同一任务内顺序执行，不同任务间可并行）"""
+        task_results: List[BenchmarkTaskResult] = []
+        for run_idx in range(1, self.num_runs + 1):
+            if not self._running:
+                logger.info(f"[BenchmarkEvaluator] 收到停止信号，任务 {task_cfg.task_name} 中断")
+                break
+
+            with self._lock:
+                self._current_task = task_cfg.task_name
+                self._current_run = run_idx
+
+            logger.info(f"[BenchmarkEvaluator] 开始任务: {task_cfg.task_name}, 第 {run_idx}/{self.num_runs} 次运行")
+            result = self._run_single_task(task_cfg, run_idx)
+            task_results.append(result)
+
+            with self._lock:
+                self._completed_runs += 1
+
+            logger.info(
+                f"[BenchmarkEvaluator] 任务 {task_cfg.task_name} 第 {run_idx} 次运行完成: "
+                f"success={result.success}, judge_accepted={result.judge_accepted}, "
+                f"duration={result.duration_seconds:.1f}s, artifacts={result.artifacts.completeness}"
+            )
+        return task_cfg, task_results
 
     def run_benchmark(self) -> BenchmarkReport:
         """
@@ -121,75 +149,64 @@ class BenchmarkEvaluator:
         )
         self._report = report
 
-        # 2. 对每个任务运行 num_runs 次
-        round_results: List[BenchmarkRoundResult] = []
-        for task_cfg in tasks:
-            task_results: List[BenchmarkTaskResult] = []
-            for run_idx in range(1, self.num_runs + 1):
-                if not self._running:
-                    logger.info("[BenchmarkEvaluator] 收到停止信号，中断评测")
-                    break
+        # 2. 对每个任务运行 num_runs 次（最多 3 任务并行）
+        round_results_map: Dict[str, BenchmarkRoundResult] = {}
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_task = {executor.submit(self._run_task_round, tc): tc for tc in tasks}
+            for future in as_completed(future_to_task):
+                task_cfg, task_results = future.result()
 
-                self._current_task = task_cfg.task_name
-                self._current_run = run_idx
+                # 计算本轮聚合指标
+                accepted_count = sum(1 for r in task_results if r.judge_accepted)
+                success_rate = accepted_count / len(task_results) if task_results else 0.0
 
-                logger.info(f"[BenchmarkEvaluator] 开始任务: {task_cfg.task_name}, 第 {run_idx}/{self.num_runs} 次运行")
-                result = self._run_single_task(task_cfg, run_idx)
-                task_results.append(result)
-                self._completed_runs += 1
+                scores = [r.best_score for r in task_results if r.best_score is not None]
+                avg_score = sum(scores) / len(scores) if scores else None
+                score_std = self._calc_std(scores) if scores else 0.0
+                score_cv = score_std / avg_score if avg_score and avg_score != 0 else 0.0
 
+                durations = [r.duration_seconds for r in task_results]
+                avg_duration = sum(durations) / len(durations) if durations else 0.0
+                min_duration = min(durations) if durations else 0.0
+                max_duration = max(durations) if durations else 0.0
+                duration_std = self._calc_std(durations) if durations else 0.0
+
+                tokens = [r.token_usage for r in task_results if r.token_usage]
+                avg_total_tokens = int(sum(t.total_tokens for t in tokens) / len(tokens)) if tokens else 0
+                avg_plan_tokens = int(sum(t.plan_coding_total_tokens for t in tokens) / len(tokens)) if tokens else 0
+                avg_eval_tokens = int(sum(t.evaluation_total_tokens for t in tokens) / len(tokens)) if tokens else 0
+
+                # 产物完整性聚合
+                artifact_completenesses = [r.artifacts.completeness for r in task_results if r.artifacts]
+                most_common_completeness = max(set(artifact_completenesses), key=artifact_completenesses.count) if artifact_completenesses else "none"
+
+                round_result = BenchmarkRoundResult(
+                    round_index=len(round_results_map) + 1,
+                    task_results=task_results,
+                    success_rate=success_rate,
+                    avg_best_score=avg_score,
+                    success_count=accepted_count,
+                    fail_count=len(task_results) - accepted_count,
+                    avg_duration_seconds=avg_duration,
+                    min_duration_seconds=min_duration,
+                    max_duration_seconds=max_duration,
+                    duration_std=duration_std,
+                    avg_total_tokens=avg_total_tokens,
+                    avg_plan_coding_tokens=avg_plan_tokens,
+                    avg_evaluation_tokens=avg_eval_tokens,
+                    score_std=score_std,
+                    score_cv=score_cv
+                )
+                round_results_map[task_cfg.task_name] = round_result
                 logger.info(
-                    f"[BenchmarkEvaluator] 任务 {task_cfg.task_name} 第 {run_idx} 次运行完成: "
-                    f"success={result.success}, judge_accepted={result.judge_accepted}, "
-                    f"duration={result.duration_seconds:.1f}s"
+                    f"[BenchmarkEvaluator] 任务 {task_cfg.task_name} 完成: "
+                    f"成功率={success_rate:.1%}, 平均耗时={avg_duration:.1f}s, "
+                    f"平均Token={avg_total_tokens}, score_std={score_std:.4f}, "
+                    f"产物完整性={most_common_completeness}"
                 )
 
-            # 计算本轮聚合指标
-            accepted_count = sum(1 for r in task_results if r.judge_accepted)
-            success_rate = accepted_count / len(task_results) if task_results else 0.0
-            
-            scores = [r.best_score for r in task_results if r.best_score is not None]
-            avg_score = sum(scores) / len(scores) if scores else None
-            score_std = self._calc_std(scores) if scores else 0.0
-            score_cv = score_std / avg_score if avg_score and avg_score != 0 else 0.0
-            
-            durations = [r.duration_seconds for r in task_results]
-            avg_duration = sum(durations) / len(durations) if durations else 0.0
-            min_duration = min(durations) if durations else 0.0
-            max_duration = max(durations) if durations else 0.0
-            duration_std = self._calc_std(durations) if durations else 0.0
-            
-            tokens = [r.token_usage for r in task_results if r.token_usage]
-            avg_total_tokens = int(sum(t.total_tokens for t in tokens) / len(tokens)) if tokens else 0
-            avg_plan_tokens = int(sum(t.plan_coding_total_tokens for t in tokens) / len(tokens)) if tokens else 0
-            avg_eval_tokens = int(sum(t.evaluation_total_tokens for t in tokens) / len(tokens)) if tokens else 0
-
-            round_result = BenchmarkRoundResult(
-                round_index=len(round_results) + 1,
-                task_results=task_results,
-                success_rate=success_rate,
-                avg_best_score=avg_score,
-                success_count=accepted_count,
-                fail_count=len(task_results) - accepted_count,
-                avg_duration_seconds=avg_duration,
-                min_duration_seconds=min_duration,
-                max_duration_seconds=max_duration,
-                duration_std=duration_std,
-                avg_total_tokens=avg_total_tokens,
-                avg_plan_coding_tokens=avg_plan_tokens,
-                avg_evaluation_tokens=avg_eval_tokens,
-                score_std=score_std,
-                score_cv=score_cv
-            )
-            round_results.append(round_result)
-            logger.info(
-                f"[BenchmarkEvaluator] 任务 {task_cfg.task_name} 完成: "
-                f"成功率={success_rate:.1%}, 平均耗时={avg_duration:.1f}s, "
-                f"平均Token={avg_total_tokens}, score_std={score_std:.4f}"
-            )
-
-            if not self._running:
-                break
+        # 按原始任务顺序排序
+        round_results = [round_results_map[t.task_name] for t in tasks if t.task_name in round_results_map]
 
         # 3. 生成最终报告
         total_accepted = sum(r.success_count for r in round_results)
@@ -809,7 +826,19 @@ class BenchmarkEvaluator:
                 result.judge_analysis = judge_result.analysis
                 result.judge_reason = judge_result.reason
 
-            # 10. 保存中间结果（含详细日志）
+            # 10. 检测产物生成情况
+            try:
+                result.artifacts = self._detect_artifacts(data_dir)
+                logger.info(
+                    f"[BenchmarkEvaluator] 产物检测: {task_cfg.task_name} 第 {run_index} 次 "
+                    f"completeness={result.artifacts.completeness}, "
+                    f"pred={result.artifacts.prediction_file}, model={result.artifacts.model_file}, "
+                    f"report={result.artifacts.report_html}, fig={result.artifacts.report_fig_png}"
+                )
+            except Exception as e:
+                logger.warning(f"[BenchmarkEvaluator] 产物检测失败: {e}")
+
+            # 11. 保存中间结果（含详细日志）
             result_dir = self._save_intermediate_results(
                 result, task_cfg, run_index, task_state, data_dir, engine=engine
             )
@@ -845,6 +874,43 @@ class BenchmarkEvaluator:
             test_csv_hidden.rename(test_csv_path)
             return True
         return False
+
+    def _detect_artifacts(self, data_dir: Path) -> ArtifactInfo:
+        """检测产物生成情况"""
+        output_dir = data_dir.parent / "output"
+        if not output_dir.exists():
+            output_dir = Path("output")
+
+        info = ArtifactInfo()
+        files = {
+            "prediction_file": output_dir / "test_predictions.csv",
+            "model_file": output_dir / "model.pkl",
+            "feature_importance_csv": output_dir / "feature_importance.csv",
+            "feature_importance_png": output_dir / "feature_importance.png",
+            "report_html": output_dir / "report.html",
+            "report_fig_png": output_dir / "report_fig.png",
+            "predict_script": output_dir / "predict.py",
+        }
+        for attr, path in files.items():
+            setattr(info, attr, path.exists() and path.stat().st_size > 0)
+
+        # 判断完整性
+        has_basic = info.model_file and info.prediction_file
+        has_full = has_basic and info.feature_importance_csv and info.feature_importance_png and info.report_html
+        has_fig = info.report_fig_png
+
+        if has_full and has_fig:
+            info.completeness = "full"
+        elif has_full:
+            info.completeness = "simplified"
+        elif has_basic and (info.feature_importance_csv or info.report_html):
+            info.completeness = "partial"
+        elif has_basic:
+            info.completeness = "minimal"
+        else:
+            info.completeness = "none"
+
+        return info
 
     def _wait_for_phase(self, task_id: str, target_phases: List[FastTaskPhase], timeout: int = 1200, interval: int = 2) -> bool:
         """轮询等待任务到达目标阶段之一"""

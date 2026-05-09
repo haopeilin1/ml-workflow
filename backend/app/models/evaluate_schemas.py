@@ -34,6 +34,18 @@ class TestSetMetrics(BaseModel):
     r2: Optional[float] = None
 
 
+class ArtifactInfo(BaseModel):
+    """产物生成情况检测"""
+    prediction_file: bool = False        # output/test_predictions.csv
+    model_file: bool = False             # output/model.pkl
+    feature_importance_csv: bool = False # output/feature_importance.csv
+    feature_importance_png: bool = False # output/feature_importance.png
+    report_html: bool = False            # output/report.html
+    report_fig_png: bool = False         # output/report_fig.png
+    predict_script: bool = False         # output/predict.py
+    completeness: str = "none"           # full / simplified / partial / none
+
+
 class JudgeResult(BaseModel):
     """LLM Judge 评估结果"""
     accepted: bool
@@ -88,6 +100,7 @@ class BenchmarkTaskResult(BaseModel):
     timing: TimingBreakdown = Field(default_factory=TimingBreakdown)
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     result_dir: Optional[str] = None  # 中间结果保存目录
+    artifacts: ArtifactInfo = Field(default_factory=ArtifactInfo)  # 产物生成情况
 
 
 class BenchmarkRoundResult(BaseModel):
