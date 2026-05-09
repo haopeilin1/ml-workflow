@@ -298,24 +298,35 @@ class BenchmarkEvaluator:
         """恢复 benchmark 目录下所有遗留的 test.csv.hidden 文件
         
         防止上次评测被强制 kill 后，source 中的 test.csv 永远处于 hidden 状态。
-        【关键修复】rglob('建模') 只匹配完全等于'建模'的目录，不匹配'数据建模'。
-        改为遍历所有子目录并检查目录名是否包含'建模'。
+        支持两种结构：
+        1. 单任务: benchmark_dir/建模/test.csv.hidden
+        2. 多任务: benchmark_dir/task_name/建模/test.csv.hidden
         """
         restored_count = 0
+        modeling_dirs = set()
+        
+        # 直接子目录（单任务模式）
+        for child in self.benchmark_dir.iterdir():
+            if child.is_dir() and '建模' in child.name:
+                modeling_dirs.add(child)
+        
+        # 孙目录（多任务模式）
         for task_dir in self.benchmark_dir.iterdir():
-            if not task_dir.is_dir():
-                continue
-            for name in os.listdir(task_dir):
-                child = task_dir / name
-                if child.is_dir() and '建模' in name:
-                    hidden = child / "test.csv.hidden"
-                    original = child / "test.csv"
-                    if hidden.exists():
-                        if original.exists():
-                            original.unlink()
-                        hidden.rename(original)
-                        restored_count += 1
-                        logger.info(f"[BenchmarkEvaluator] 恢复遗留的 hidden 测试集: {original}")
+            if task_dir.is_dir():
+                for grandchild in task_dir.iterdir():
+                    if grandchild.is_dir() and '建模' in grandchild.name:
+                        modeling_dirs.add(grandchild)
+        
+        for modeling_dir in modeling_dirs:
+            hidden = modeling_dir / "test.csv.hidden"
+            original = modeling_dir / "test.csv"
+            if hidden.exists():
+                if original.exists():
+                    original.unlink()
+                hidden.rename(original)
+                restored_count += 1
+                logger.info(f"[BenchmarkEvaluator] 恢复遗留的 hidden 测试集: {original}")
+        
         if restored_count > 0:
             logger.info(f"[BenchmarkEvaluator] 共恢复 {restored_count} 个遗留的 hidden 测试集")
     
@@ -975,6 +986,16 @@ class BenchmarkEvaluator:
             predict_py_path = data_dir.parent / "artifacts" / "predict.py"
         if predict_py_path.exists():
             logger.info(f"[BenchmarkEvaluator] 发现 LLM 生成的 predict.py，优先执行")
+            # 【修复】兼容 predict.py 中可能硬编码的 output/model.pkl
+            output_dir = data_dir / "output"
+            output_dir.mkdir(exist_ok=True)
+            best_model = data_dir / "best_model.pkl"
+            if best_model.exists() and not (output_dir / "model.pkl").exists():
+                try:
+                    shutil.copy2(best_model, output_dir / "model.pkl")
+                    logger.info(f"[BenchmarkEvaluator] 已复制 best_model.pkl 到 output/model.pkl 以兼容 predict.py")
+                except Exception as e:
+                    logger.warning(f"[BenchmarkEvaluator] 复制模型到 output 失败: {e}")
             try:
                 with open(predict_py_path, 'r', encoding='utf-8') as f:
                     llm_predict_code = f.read()
@@ -1064,14 +1085,18 @@ except ImportError:
             # 构造注入代码块：非空时才包 try-except，防止空 try 语法错误
             injected_defs_clean = injected_defs.strip()
             if injected_defs_clean:
-                # 【关键修复】将注入的每一行整体缩进4个空格，确保在 try 块内合法
-                injected_defs_indented = '\n'.join(
-                    '    ' + line for line in injected_defs.split('\n')
-                )
-                injected_defs_try_block = f"""try:
-{injected_defs_indented}
+                # 【关键修复】将每个顶层定义放入独立的 try 块，避免一个赋值失败导致所有后续定义被跳过
+                injected_blocks = []
+                for segment in injected_defs.split('\n\n'):
+                    segment = segment.strip()
+                    if not segment:
+                        continue
+                    indented = '\n'.join('    ' + line for line in segment.split('\n'))
+                    injected_blocks.append(f"""try:
+{indented}
 except Exception as _e:
-    print('INJECTED_DEFS_SKIPPED: ' + str(_e))"""
+    print('INJECTED_DEFS_SKIPPED: ' + str(_e))""")
+                injected_defs_try_block = '\n\n'.join(injected_blocks)
             else:
                 injected_defs_try_block = "pass  # no definitions to inject"
             
@@ -1114,6 +1139,16 @@ if isinstance(model_obj, dict):
 # ========== 加载测试集 ==========
 test = pd.read_csv('data/test.csv')
 
+# ========== 【修复】如果注入了 extract_time_features，在测试集上显式调用 ==========
+if 'extract_time_features' in dir():
+    try:
+        _time_col = 'dteday' if 'dteday' in test.columns else ('datetime' if 'datetime' in test.columns else None)
+        if _time_col:
+            test = extract_time_features(test, _time_col)
+            print('EXTRACT_TIME_FEATURES_APPLIED')
+    except Exception as _e:
+        print('EXTRACT_TIME_FEATURES_FAILED: ' + str(_e))
+
 # ========== 【关键】如果训练代码定义了 prepare_for_prediction，先调用它 ==========
 if 'prepare_for_prediction' in dir():
     try:
@@ -1133,6 +1168,17 @@ for col in list(test.columns):
                 test[f"{{col}}_day"] = dt.dt.day
                 test[f"{{col}}_hour"] = dt.dt.hour
                 test[f"{{col}}_dayofweek"] = dt.dt.dayofweek
+                # 【修复】同时生成不带前缀的版本，兼容训练代码手动提取的命名
+                if 'year' not in test.columns:
+                    test['year'] = dt.dt.year
+                if 'month' not in test.columns:
+                    test['month'] = dt.dt.month
+                if 'day' not in test.columns:
+                    test['day'] = dt.dt.day
+                if 'hour' not in test.columns:
+                    test['hour'] = dt.dt.hour
+                if 'weekday' not in test.columns:
+                    test['weekday'] = dt.dt.dayofweek
                 print(f'TIME_FEATURE_EXTRACTED from {{col}}')
         except Exception:
             pass
@@ -1339,6 +1385,17 @@ for col in list(test.columns):
                 test[f"{{col}}_day"] = dt.dt.day
                 test[f"{{col}}_hour"] = dt.dt.hour
                 test[f"{{col}}_dayofweek"] = dt.dt.dayofweek
+                # 【修复】同时生成不带前缀的版本，兼容训练代码手动提取的命名
+                if 'year' not in test.columns:
+                    test['year'] = dt.dt.year
+                if 'month' not in test.columns:
+                    test['month'] = dt.dt.month
+                if 'day' not in test.columns:
+                    test['day'] = dt.dt.day
+                if 'hour' not in test.columns:
+                    test['hour'] = dt.dt.hour
+                if 'weekday' not in test.columns:
+                    test['weekday'] = dt.dt.dayofweek
                 print(f'TIME_FEATURE_EXTRACTED from {{col}}')
         except Exception:
             pass

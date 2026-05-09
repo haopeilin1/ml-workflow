@@ -337,6 +337,47 @@ class FastEngine:
             self._append_log(f"[Plan & Coding Agent] 产物代码生成完成, 长度={len(code_output.code)}")
             logger.info(f"[FastEngine] 产物代码生成完成, 长度={len(code_output.code)}")
             
+            # 【兜底1】产物代码为空或极短时，尝试重新生成一次
+            if not code_output.code or len(code_output.code.strip()) < 50:
+                logger.warning(f"[FastEngine] 产物代码为空或极短(长度={len(code_output.code)}), 尝试重新生成")
+                self._append_log("[WARN] 产物代码为空，尝试重新生成...")
+                retry_result = [None]
+                retry_error = [None]
+                
+                def _retry_worker():
+                    try:
+                        retry_result[0] = self.plan_coding_agent.generate_artifacts(
+                            task_config=tc,
+                            best_code=best_code,
+                            has_test_set=self.state.has_test_set,
+                            data_dir=str(data_dir)
+                        )
+                    except Exception as e:
+                        retry_error[0] = e
+                
+                retry_thread = threading.Thread(target=_retry_worker)
+                retry_thread.daemon = True
+                retry_thread.start()
+                retry_thread.join(timeout=120)
+                
+                if retry_thread.is_alive():
+                    logger.error("[FastEngine] 产物代码重试生成超时")
+                    self._generate_fallback_artifacts(tc, reason="error")
+                    return
+                if retry_error[0]:
+                    logger.error(f"[FastEngine] 产物代码重试生成失败: {retry_error[0]}")
+                    self._generate_fallback_artifacts(tc, reason="error")
+                    return
+                
+                code_output = retry_result[0]
+                self._append_log(f"[Plan & Coding Agent] 产物代码重试生成完成, 长度={len(code_output.code)}")
+                logger.info(f"[FastEngine] 产物代码重试生成完成, 长度={len(code_output.code)}")
+                
+                if not code_output.code or len(code_output.code.strip()) < 50:
+                    logger.warning("[FastEngine] 产物代码重试后仍为空，降级为简化产物")
+                    self._generate_fallback_artifacts(tc, reason="error")
+                    return
+            
             # 2. 沙箱执行产物代码（允许文件写入），失败时自动修复最多5次
             data_dir = self.datasets["train"].parent if self.datasets else settings.OUTPUT_DIR / self.task_id / "data"
             artifact_dir = settings.OUTPUT_DIR / self.task_id / "artifacts"
@@ -369,8 +410,8 @@ class FastEngine:
                 
                 # 自动修复产物代码
                 error_detail = result.error_message or result.stderr or "Unknown error"
-                logger.info(f"[FastEngine] 产物代码执行失败，第 {debug_round} 次自动修复...")
-                self._append_log(f"[WARN] 产物代码执行失败: {error_detail[:200]}")
+                logger.error(f"[FastEngine] 产物代码执行失败，第 {debug_round} 次自动修复... 错误: {error_detail}")
+                self._append_log(f"[ERROR] 产物代码执行失败 (第{debug_round}次):\n{error_detail}")
                 self._append_log(f"[FastEngine] 正在第 {debug_round} 次修复产物代码...")
                 
                 fix_result = [None]
@@ -767,6 +808,10 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             
             # 执行失败 → Debug 闭环
             if not result.success:
+                # 记录详细错误信息到日志
+                init_error = result.error_message or result.stderr or "Unknown sandbox error"
+                logger.error(f"[FastEngine] 初始代码执行失败: {init_error}")
+                self._append_log(f"[ERROR] 初始代码执行失败:\n{init_error}")
                 # 执行失败时恢复旧模型（防止Debug过程中产生错误的模型文件覆盖最优模型）
                 self._restore_best_model_backup(data_dir)
                 if not self._debug_loop(result, tc):
@@ -912,6 +957,9 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             current_error = result.error_message or result.stderr or "未知错误"
             debug_history.append(f"第 {local_round} 次执行错误:\n{current_error}")
             
+            logger.error(f"[FastEngine] 第 {local_round} 次代码执行失败: {current_error}")
+            self._append_log(f"[ERROR] 第 {local_round} 次代码执行失败:\n{current_error}")
+            
             logger.warning(
                 f"[FastEngine] 代码执行失败，开始第 {local_round} 次自动修复"
             )
@@ -963,9 +1011,37 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                 return True
             
             # 继续下一轮 debug
-            logger.warning(f"[FastEngine] 第 {local_round} 次修复仍失败")
+            retry_error = result.error_message or result.stderr or "Unknown sandbox error"
+            logger.error(f"[FastEngine] 第 {local_round} 次修复仍失败: {retry_error}")
+            self._append_log(f"[ERROR] 第 {local_round} 次修复后执行仍失败:\n{retry_error}")
         
         # 5次都失败
+        # 【兜底2】如果存在 best_code，重置到上一轮可用代码再执行一次
+        if self.state.best_code:
+            logger.warning(
+                f"[FastEngine] DEBUG {settings.FAST_MAX_DEBUG_ROUNDS} 次均失败，尝试回退到 best_code 重新执行"
+            )
+            self._append_log(
+                f"[WARN] DEBUG 达到上限，尝试回退到上一轮最优代码..."
+            )
+            self.state.code = self.state.best_code
+            data_dir = self.datasets["train"].parent if self.datasets else settings.OUTPUT_DIR / self.task_id / "data"
+            result = self.sandbox.execute(
+                code=self.state.code,
+                data_dir=data_dir,
+                task_type=tc.extracted_slots.task_type or "binary_classification"
+            )
+            if result.success:
+                self.state.execution_output = result.stdout
+                self.state.metrics = result.metrics
+                logger.info("[FastEngine] 回退到 best_code 执行成功")
+                self._append_log("[FastEngine] 回退到最优代码执行成功")
+                return True
+            else:
+                fallback_error = result.error_message or result.stderr or "Unknown sandbox error"
+                logger.error(f"[FastEngine] 回退到 best_code 执行仍失败: {fallback_error}")
+                self._append_log(f"[ERROR] 回退到最优代码执行仍失败:\n{fallback_error}")
+        
         error_msg = (
             f"代码运行失败，经过 {settings.FAST_MAX_DEBUG_ROUNDS} 次自动修复仍未解决。"
             f"建议切换至深度模式进行更深入的探索。"

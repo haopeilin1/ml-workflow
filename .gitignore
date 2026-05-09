@@ -60,3 +60,12 @@ backend/uploads/
 backend/outputs/
 __pycache__/
 *.pyc
+
+
+o/o
+# Sensitive files
+github_ssh_key.txt
+
+# Test data
+test_data.zip
+test_data/
