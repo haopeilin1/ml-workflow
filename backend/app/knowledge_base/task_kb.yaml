@@ -1,6 +1,6 @@
 # ML Workflow 任务类型知识库
 # 由 Intent Agent 根据 complexity 判定动态加载
-# 具体内容待填充，当前仅搭建框架
+# 原则：只存储通用经验，不针对具体数据集，不引入代码噪声
 
 version: "1.0"
 
@@ -9,40 +9,83 @@ task_types:
     triggers:
       - task_type: "regression"
       - data_profile_hint: "列名含 year/month/day/hour/season/weekday 或存在 datetime 类型列"
-    common_failure: "时间特征未 Pipeline 化，预测时特征列不匹配"
-    must_do: []
-    avoid: []
+    common_failure: "时间特征未 Pipeline 化，预测时特征列不匹配；验证集混入未来数据导致指标虚高"
+    must_do:
+      - "训练/验证集必须按时间顺序切分（前 train 后 val），禁止随机打乱"
+      - "时间特征提取必须在 Pipeline/函数中完成，确保训练与预测时特征生成逻辑完全一致"
+      - "验证集必须模拟真实未来场景，不能用随机抽样"
+      - "保存 Pipeline 时一并保存特征生成器，避免预测时列名/列数不匹配"
+    avoid:
+      - "对时序数据使用 train_test_split 随机切分——会导致验证集混入未来信息"
+      - "手动构造时间特征后丢弃原始时间列但未统一训练与预测的处理逻辑"
+      - "用验证集指标调参后误以为测试集表现会一致（时序任务验证集往往过于乐观）"
 
   multiclass_classification:
     triggers:
       - task_type: "multiclass_classification"
-    common_failure: "F1-macro 极低，多分类表现极差"
-    must_do: []
-    avoid: []
+    common_failure: "F1-macro 极低，多数类主导预测，少数类完全遗漏"
+    must_do:
+      - "使用 F1-macro 作为主要评估指标，不要只看 Accuracy"
+      - "检查每个类别的样本数，若存在样本极少的类别（<10个），考虑合并或特殊处理"
+      - "多分类模型输出概率时，确保 predict_proba 的列顺序与训练时一致"
+      - "目标列若为有序类别（如 1/2/3/4/5 表示等级），考虑用 Ordinal Regression 或自定义损失"
+    avoid:
+      - "用 Accuracy 评估明显不平衡的多分类任务——会被多数类拉高"
+      - "忽略类别顺序信息（如评分等级）当作普通多分类处理"
+      - "预测时直接取 argmax，不检查是否有类别从未被预测到"
 
   binary_classification_imbalanced:
     triggers:
       - task_type: "binary_classification"
       - data_profile_hint: "最大类占比 > 90% 或正例比例 < 10%"
-    common_failure: "未处理类别不平衡，测试集 AUC 暴跌；严重过拟合"
-    must_do: []
-    avoid: []
+    common_failure: "默认0.5阈值下模型完全不预测正类，AUC虚高但AP极低；严重过拟合"
+    must_do:
+      - "主评估指标必须使用 AP (Average Precision) 或 F1，绝不要单独看 AUC"
+      - "首选 XGBoost 或 LightGBM，设置 scale_pos_weight = 负类数/正类数"
+      - "对线性模型使用 class_weight='balanced'，但对树模型不要使用 class_weight"
+      - "金额/计数类右偏特征尝试 log1p 变换，使分布更接近正态"
+      - "在验证集上确定最优阈值（以 F1 或 AP 最优为准），保存模型时记录该阈值"
+      - "检查混淆矩阵，确保正类 Recall > 0（默认阈值下常全部为0）"
+    avoid:
+      - "对树模型（RandomForest/XGBoost/LightGBM）使用 class_weight='balanced'——会损害AUC"
+      - "使用简单复制过采样——完全无效，只会增加训练时间"
+      - "使用下采样——虽然AUC可能升高，但会丢失大量负类信息，Precision崩溃"
+      - "默认 0.5 阈值直接预测——极度不平衡下正类概率通常 < 0.1"
+      - "单独依赖 AUC 判断模型好坏——极度不平衡下 AUC 会严重虚高"
+      - "在测试集上调优阈值——必须在验证集上确定，否则数据泄露"
 
   standard_regression:
     triggers:
       - task_type: "regression"
       - exclude_if: "已匹配 time_series_regression"
-    common_failure: "预测时特征列缺失或数量不匹配"
-    must_do: []
-    avoid: []
+    common_failure: "预测时特征列缺失或数量不匹配；未处理异常值导致RMSE被拉高"
+    must_do:
+      - "对目标变量（target）检查分布，若右偏严重尝试 log1p 变换"
+      - "标准化数值特征，尤其是使用线性模型（Ridge/Lasso/神经网络）时"
+      - "保存 Pipeline 时确保特征列名和顺序完全一致"
+    avoid:
+      - "忽略异常值——单个极端值可能让 RMSE 失真，可考虑 RobustScaler 或截断"
+      - "对回归目标做标准化（应标准化特征，而非目标变量）"
 
   binary_classification_standard:
     triggers:
       - task_type: "binary_classification"
       - exclude_if: "已匹配 binary_classification_imbalanced"
-    common_failure: "模型整体弱，AUC 接近随机"
-    must_do: []
-    avoid: []
+    common_failure: "模型整体弱，AUC 接近随机；未做特征工程"
+    must_do:
+      - "检查 AUC 是否 > 0.5，若接近 0.5 说明特征与目标无关或模型未训练成功"
+      - "对类别特征做编码（LabelEncoder 或 OneHot），不要直接传入字符串"
+      - "尝试特征交叉（如年龄×收入）可能提升非线性可分任务的性能"
+    avoid:
+      - "不做任何特征预处理直接喂原始数据给模型"
+      - "二分类用 MSE 损失——应使用交叉熵或 logloss"
 
 general:
-  antipatterns: []
+  antipatterns:
+    - "看到 AUC > 0.7 就以为模型很好——必须同时检查测试集 AP / F1 / 混淆矩阵"
+    - "在测试集上调参或选择阈值——所有调优必须在验证集完成"
+    - "忽略缺失值标记（如 -1 / 999 / ? 是缺失标记而非真实值）"
+    - "类别特征直接传入字符串给 XGBoost/LightGBM——必须先编码为整数"
+    - "预测时加载模型却不检查输入特征列名/列数是否与训练时一致"
+    - "未区分训练集和测试集的处理逻辑——测试集不可做 fit 操作"
+    - "一条代码处理所有缺失值（如 fillna(0)）——不同列应有不同填充策略"
