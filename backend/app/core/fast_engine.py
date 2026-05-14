@@ -62,13 +62,45 @@ class FastEngine:
         global_llm_config = tc.llm_config
         
         # 支持按阶段独立配置 LLM（agent_llm_configs 供开发/测试使用）
-        # 例如：{"plan_coding": LLMConfig(...), "evaluation": LLMConfig(...)}
+        # 例如：{"plan": LLMConfig(...), "coding": LLMConfig(...), "simple": LLMConfig(...), "evaluation": LLMConfig(...)}
         # 若某阶段未单独配置，则回退到全局 llm_config
         agent_configs = tc.agent_llm_configs or {}
-        plan_llm_config = agent_configs.get('plan_coding') or global_llm_config
-        eval_llm_config = agent_configs.get('evaluation') or global_llm_config
         
-        self.plan_coding_agent = PlanCodingAgent(llm_client=self._build_llm_client(plan_llm_config))
+        # 【新增】Plan/Coding 分离后的独立 LLM 配置
+        # 优先级：agent_llm_configs > .env 配置 > 全局 llm_config
+        from app.config import build_eval_llm_config
+        
+        # Plan Agent（复杂任务计划生成）
+        plan_llm_config = (
+            agent_configs.get('plan') 
+            or self._build_llm_config_from_dict(build_eval_llm_config('plan'))
+            or global_llm_config
+        )
+        # Coding Agent（复杂任务代码生成）
+        coding_llm_config = (
+            agent_configs.get('coding')
+            or self._build_llm_config_from_dict(build_eval_llm_config('coding'))
+            or global_llm_config
+        )
+        # Unified Agent（简单任务单步 PlanCoding）
+        unified_llm_config = (
+            agent_configs.get('unified')
+            or self._build_llm_config_from_dict(build_eval_llm_config('unified'))
+            or global_llm_config
+        )
+        # 评估 Agent（EvaluationAgent：代码评审、优化决策、Debug根因分析）
+        eval_llm_config = (
+            agent_configs.get('evaluation')
+            or self._build_llm_config_from_dict(build_eval_llm_config('evaluation'))
+            or global_llm_config
+        )
+        
+        self.plan_coding_agent = PlanCodingAgent(
+            llm_client=self._build_llm_client(plan_llm_config),
+            plan_llm_client=self._build_llm_client(plan_llm_config),
+            coding_llm_client=self._build_llm_client(coding_llm_config),
+            unified_llm_client=self._build_llm_client(unified_llm_config),
+        )
         self.evaluation_agent = EvaluationAgent(llm_client=self._build_llm_client(eval_llm_config))
         self.sandbox = SandboxExecutor(timeout=settings.SANDBOX_TIMEOUT)
         self.data_splitter = DataSplitter(settings.UPLOAD_DIR, settings.OUTPUT_DIR)
@@ -84,6 +116,9 @@ class FastEngine:
             "artifact_generation_seconds": 0.0,
         }
         self._timing_stack: List[tuple] = []  # 嵌套计时栈
+        
+        # 【新增】评估历史记录，用于避免重复犯错，传给 EvaluationAgent
+        self._evaluation_history: List[Dict[str, Any]] = []
     
     def _build_llm_client(self, llm_config: Optional[LLMConfig]):
         """根据配置构建 LLM 客户端"""
@@ -99,6 +134,20 @@ class FastEngine:
                 extra_body=llm_config.extra_body
             )
         return LLMClient.from_settings()
+    
+    def _build_llm_config_from_dict(self, config_dict: dict) -> Optional[LLMConfig]:
+        """将 build_eval_llm_config 返回的字典转为 LLMConfig"""
+        if not config_dict:
+            return None
+        return LLMConfig(
+            provider=config_dict.get("provider", "openai"),
+            base_url=config_dict.get("base_url", ""),
+            api_key=config_dict.get("api_key", ""),
+            model=config_dict.get("model", ""),
+            temperature=config_dict.get("temperature", 0.3),
+            max_tokens=config_dict.get("max_tokens", 4096),
+            extra_body=config_dict.get("extra_body")
+        )
     
     def _append_log(self, message: str):
         """将日志追加到状态日志中"""
@@ -192,8 +241,9 @@ class FastEngine:
                 # 用户满意 → 生成最终产物（产物就绪后再设置 COMPLETED）
                 logger.info(f"[FastEngine] 任务 {self.task_id} 用户确认满意")
                 self._append_log("正在生成可视化报告...")
-                if self.state.has_test_set:
-                    self._append_log("正在对测试集进行预测...")
+                # 【修复】has_test_set 会在 _generate_artifacts 中根据实际文件存在性修正
+                # 先假设可能有测试集，在产物阶段确认
+                self._append_log("正在对测试集进行预测（如存在测试集）...")
                 self._generate_artifacts(tc)
                 return
             
@@ -206,7 +256,8 @@ class FastEngine:
                 task_config=tc,
                 run_state="OPTIMIZE",
                 context_payload=suggestion or "用户未填写具体建议",
-                previous_code=(self.state.best_code or self.state.code)
+                previous_code=(self.state.best_code or self.state.code),
+                evaluation_history=self._evaluation_history
             )
             self.state.code = code_output.code
             self.state.code_history.append({
@@ -298,9 +349,17 @@ class FastEngine:
                 self._append_log(f"[Plan & Coding Agent] predict.py 生成完成, 长度={len(predict_result[0].code)}")
                 logger.info(f"[FastEngine] predict.py 已保存到 {predict_py_path}")
             
+            # 【关键修复】产物阶段 test.csv 已恢复，以实际文件存在性判断是否有测试集
+            # （训练阶段 test.csv 被隐藏，state.has_test_set 可能为 False，导致产物代码跳过测试集预测）
+            actual_has_test_set = (data_dir / "test.csv").exists()
+            if actual_has_test_set != self.state.has_test_set:
+                logger.info(f"[FastEngine] 修正 has_test_set: {self.state.has_test_set} -> {actual_has_test_set} (data_dir/test.csv exists={actual_has_test_set})")
+                self.state.has_test_set = actual_has_test_set
+                task_manager.update_task(self.task_id, has_test_set=actual_has_test_set)
+            
             # 1. 生成其他产物代码（带线程级超时，防止 LLM 调用无限挂起）
             self._append_log("[Plan & Coding Agent] 正在调用 LLM 生成产物代码...")
-            logger.info(f"[FastEngine] 开始生成产物代码, best_code长度={len(best_code)}")
+            logger.info(f"[FastEngine] 开始生成产物代码, best_code长度={len(best_code)}, has_test_set={self.state.has_test_set}")
             
             llm_result = [None]
             llm_error = [None]
@@ -840,10 +899,25 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                 max_optimize_rounds=settings.FAST_MAX_OPTIMIZE_ROUNDS,
                 execution_output=result.stdout,
                 user_modeling_suggestions=tc.extracted_slots.user_modeling_suggestions,
-                eval_metric=tc.extracted_slots.eval_metric
+                eval_metric=tc.extracted_slots.eval_metric,
+                evaluation_history=self._evaluation_history,
+                current_code=self.state.code or ""
             )
             self._end_timing("evaluation_seconds")
             self.state.evaluation = evaluation
+            
+            # 【新增】将本轮评估结果追加到历史记录，供下一轮使用
+            self._evaluation_history.append({
+                "round": self.state.optimize_round,
+                "score": evaluation.score,
+                "decision": evaluation.decision.value if evaluation.decision else None,
+                "suggestions_for_coding_agent": evaluation.suggestions_for_coding_agent,
+                "method_summary": evaluation.method_summary,
+                "dimension_scores": [
+                    {"name": ds.name, "score": ds.score, "reason": ds.reason}
+                    for ds in (evaluation.dimension_scores or [])
+                ]
+            })
             
             # 记录 Evaluation Agent 原始响应到日志
             self._append_log("[Evaluation Agent] 评估结果")
@@ -908,11 +982,26 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                         f"[FastEngine] 开始第 {self.state.optimize_round} 轮自动优化"
                     )
                     
+                    # 【架构变更 v2】complex 模式下，系统自动优化直接使用 EvaluationAgent 返回的 replan_output
+                    # evaluate() 已在一个 LLM 调用中同时完成评估+重新规划，无需额外调用 replan()
+                    is_complex = tc.extracted_slots.complexity == "complex"
+                    prebuilt_plan = None
+                    
+                    if is_complex and evaluation.replan_output:
+                        prebuilt_plan = evaluation.replan_output
+                        logger.info(f"[FastEngine] complex 任务自动优化：使用 EvaluationAgent 返回的 replan_output，长度={len(prebuilt_plan)}")
+                        self._append_log("[Evaluation Agent] 重新规划已完成（与评估同一调用）")
+                        self._append_log(f"=== 重新规划 ===\n{prebuilt_plan[:1500]}...")
+                    elif is_complex:
+                        logger.warning("[FastEngine] EvaluationAgent 未返回 replan_output，回退到 PlanAgent")
+                        self._append_log("[WARN] 评估结果中无重新规划，回退到 PlanAgent")
+                    
                     code_output = self.plan_coding_agent.generate(
                         task_config=tc,
                         run_state="OPTIMIZE",
                         context_payload=evaluation.suggestions_for_coding_agent or "",
-                        previous_code=(self.state.best_code or self.state.code)
+                        previous_code=(self.state.best_code or self.state.code),
+                        prebuilt_plan=prebuilt_plan
                     )
                     self.state.code = code_output.code
                     self.state.code_history.append({

@@ -53,6 +53,7 @@ class ExtractedSlots(BaseModel):
     task_type: Optional[TaskType] = None
     eval_metric: Optional[str] = None
     complexity: Optional[str] = "simple"  # "simple" 或 "complex"，由 Intent Agent 判定
+    complexity_reason: Optional[str] = None  # 复杂度判定原因说明
     is_time_series: bool = False  # 是否为时序任务，影响验证集切分方式
     feature_constraints: List[str] = Field(default_factory=list)
     user_modeling_suggestions: Optional[str] = None  # 用户在建模描述中附带的建模建议/偏好
@@ -110,6 +111,10 @@ class EvaluationResult(BaseModel):
     raw_response: Optional[str] = None  # LLM 原始完整响应
     score: Optional[float] = None  # 综合评分 0-100（加权总分）
     dimension_scores: List[DimensionScore] = Field(default_factory=list)  # 各维度评分
+    # 【新增】方法总结：对本轮代码使用的方法、策略、模型的结构化总结
+    method_summary: Optional[str] = None
+    # 【新增】重新规划输出：当 decision=AUTO_OPTIMIZE 时，直接输出结构化计划，跳过 PlanAgent
+    replan_output: Optional[str] = None
 
 
 class LLMUsageInfo(BaseModel):
@@ -119,6 +124,7 @@ class LLMUsageInfo(BaseModel):
     total_tokens: int = 0
     provider: str = ""
     model: str = ""
+    latency_seconds: float = 0.0  # 请求到响应的耗时
 
 
 class ArtifactFile(BaseModel):
@@ -137,6 +143,23 @@ class ArtifactInfo(BaseModel):
     feature_importance: Optional[List[Dict[str, Any]]] = None
     report_path: Optional[str] = None
     notes: Optional[str] = None  # 产物生成说明（如跳过哪些报告）
+    
+    # 【新增】产物完整性评估
+    completeness: Optional[str] = None  # full / simplified / partial / minimal / none
+    generated_files: List[str] = Field(default_factory=list)  # 实际生成的文件名列表
+    
+    # 各产物文件存在性标志
+    prediction_file: bool = False
+    model_file: bool = False
+    feature_importance_csv: bool = False
+    feature_importance_png: bool = False
+    report_html: bool = False
+    report_fig_png: bool = False
+    predict_script: bool = False
+    pipeline_py: bool = False
+    residual_png: bool = False
+    cluster_png: bool = False
+    ts_forecast_png: bool = False
 
 
 class FastTaskState(BaseModel):

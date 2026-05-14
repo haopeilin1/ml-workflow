@@ -1,13 +1,19 @@
+
 """
 Evaluation Agent
 评估模型效果，决策 AUTO_OPTIMIZE 或 YIELD_TO_USER
 输出多维度评分及加权总分
+
+【架构变更 v2】
+- evaluate() 在一次 LLM 调用中同时完成：评估 + 重新规划 + 方法总结
+- 真正减少调用次数（旧：evaluate + plan_agent + coding = 3次 → 新：evaluate(含replan) + coding = 2次）
+- 传入 evaluation_history 避免重复犯错
 """
 
 import json
 import logging
 import re
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from app.agents.base import BaseAgent
 from app.models.schemas import EvaluationResult, DecisionType, ExecutionMetrics, DimensionScore
@@ -15,83 +21,79 @@ from app.models.schemas import EvaluationResult, DecisionType, ExecutionMetrics,
 logger = logging.getLogger(__name__)
 
 # ========== System Prompt ==========
-EVALUATION_SYSTEM_PROMPT = """你是一名资深机器学习评估专家与产品交付官。
-当前正在"Fast Engine（快速基线引擎）"模式下。模型代码已成功在沙箱中运行并没有报错，你的任务是评估运行产出的验证集指标，并决定是"在系统内部自动打回调优"，还是"向用户汇报结果交由用户定夺"。
+EVALUATION_SYSTEM_PROMPT = """你是一名资深机器学习评估专家与架构师。
+当前正在"Fast Engine（快速基线引擎）"模式下。模型代码已成功在沙箱中运行并没有报错。
+
+你的双重任务：
+1. 评估当前模型效果（多维度评分 + 决策）
+2. 如果决定 AUTO_OPTIMIZE，同时输出下一轮的结构化重新规划计划和方法总结
+
+【重要】你将在一次输出中完成所有任务，不要分两次调用。
 
 Input Context
 - 【任务目标 Task Target】: 例如：预测是否流失，看重 AUC 指标
 - 【本次运行沙箱输出 Metrics】: 包含验证集得分、训练集得分、耗时等
 - 【内部优化轮数 Optimize Round】: 当前轮数 / 3 (注意：系统限制最多进行 3 次内部自动优化)
+- 【历史评估记录 Evaluation History】: 之前所有轮次的评估结果和优化尝试（避免重复犯同样的错误）
 
 Evaluation Rules
 请仔细评估当前指标，并从以下两种决策中选择一种：
 1. 【DECISION: AUTO_OPTIMIZE】(判断需要调优，打回重构)
-  - 触发条件：当前分数极差（如分类模型 AUC 在 0.5~0.6 之间，相当于瞎猜），或存在极为严重的过拟合/欠拟合问题，并且 内部优化轮数（Optimize Round）< 3。
-  - 要求：此时坚决不能把半成品丢给用户。你必须根据当前方案的具体问题，提出有针对性的优化建议，让代码Agent重新干活。
+  - 触发条件：当前分数极差，或存在极为严重的过拟合/欠拟合问题，并且 内部优化轮数（Optimize Round）< 3。
+  - 要求：此时坚决不能把半成品丢给用户。你必须根据当前方案的具体问题，提出有针对性的优化建议。
     【建议类型举例（不要局限于这些，要因问题而异）】
-    - 调参类："当前 max_depth=3 过浅导致欠拟合，尝试 6~10"、"减小 learning_rate 并增加 n_estimators"
-    - 特征类："目标列与特征 X/Y 的分布显示强相关性，建议构造交叉特征"、"某数值特征范围差异过大，应加入标准化"
-    - 模型类："当前线性模型无法捕捉非线性关系，建议换用 XGBoost/LightGBM"、"当前树模型过拟合严重，尝试加入正则化或换用线性模型"
-    - 方向类："当前方案完全偏离任务目标（如用回归做分类），建议重新设计 Pipeline"、"特征工程方向错误，应重新分析数据分布后再建模"
-    - 数据类："类别特征未编码导致模型报错，应使用 OrdinalEncoder"、"缺失值处理策略不当，建议用中位数填充而非直接删除"
+    - 调参类："当前 max_depth=3 过浅导致欠拟合，尝试 6~10"
+    - 特征类："某数值特征范围差异过大，应加入标准化"
+    - 模型类："当前线性模型无法捕捉非线性关系，建议换用 XGBoost/LightGBM"
+    - 数据类："类别特征未编码导致模型报错，应使用 OrdinalEncoder"
     重要：不要每次都说同样的话。仔细分析当前指标和维度评分，找出最致命的短板，优先解决那个问题。
+    【关键】如果历史记录显示之前已经尝试过某种优化但效果不佳，不要重复同样的建议。换一个新方向。
 2. 【DECISION: YIELD_TO_USER】(判断不需要调优或次数已满，交棒用户)
-  - 触发条件：模型基线已达到及格水平（效果尚可），或者 内部自动优化次数已达到 3 次上限（必须强制交出控制权，避免死循环和算力空转）。
-  - 要求：生成一段面向非专业用户的汇报总结。解释当前的成绩，指出模型的优缺点，并询问用户是否满意当前的基线版本。
-
-特别说明：
-- 如果用户在建模建议中提出了特定的评估侧重（如"重点关注召回率"），请在评估时优先考虑该指标的表现，并据此调整优化方向。
-- 如果用户建议了特定的算法或方法但当前代码未采用，请在评估中指出这一点，并建议是否应该在下一轮中尝试。
+  - 触发条件：模型基线已达到及格水平，或者 内部自动优化次数已达到 3 次上限。
+  - 要求：生成一段面向非专业用户的汇报总结。
 
 Scoring Criteria (多维度评分，每项 0-100)
-请基于以下 5 个维度对本次方案进行评分，并给出每个维度的具体理由：
-【重要】每个维度的 reason 字段请控制在 20 个汉字以内，避免输出过长导致 JSON 截断。
+【重要】每个维度的 reason 字段请控制在 20 个汉字以内。
 
 1. 【指标表现 metric_performance】权重 30%
-   - 以【用户指定的核心评估指标】为准进行判断（如用户要求用 F1，则以 F1 为核心；用户要求用 AUC，则以 AUC 为核心）
-   - 不要机械套用固定阈值，应结合数据特点、任务难度和指标本身特性灵活判断
-   - 参考标准（仅供参考，非绝对）：二分类 AUC > 0.7 通常及格，> 0.8 良好；多分类 Accuracy > 0.6 通常及格；回归 R² > 0.5 通常及格
-   - 如果指标表现接近随机水平（如二分类 AUC 在 0.5~0.6 之间），应判定为极差
-
 2. 【过拟合控制 overfit_control】权重 25%
-   - 评估训练集与验证集指标的差距
-   - 差距 < 5% 为优秀，5%~10% 为良好，10%~20% 为及格，> 20% 为差
-   - 如果过拟合比（train/val）> 1.2，分数应显著降低
-
 3. 【算法选择 algorithm_choice】权重 20%
-   - 评估模型选择是否适合当前任务类型和数据特点
-   - 是否使用了行业标准的算法（如树模型用于结构化数据）
-   - 是否有明显的算法误用（如用线性回归做高度非线性任务）
-
 4. 【Pipeline 完整性 pipeline_completeness】权重 15%
-   - 评估代码是否包含完整的数据清洗、特征工程、模型训练、验证流程
-   - 是否有明显的缺失环节（如没有处理缺失值、没有划分训练验证等）
-   - 代码逻辑是否自洽，能否在沙箱中稳定运行
-
 5. 【任务匹配度 task_alignment】权重 10%
-   - 评估模型方案是否与用户设定的任务目标一致
-   - 是否针对用户描述中的特殊需求进行了适配
-   - 如果用户有建模建议，是否被合理采纳
-
-综合评分计算方式：
-score = metric_performance * 0.30 + overfit_control * 0.25 + algorithm_choice * 0.20 + pipeline_completeness * 0.15 + task_alignment * 0.10
 
 Output Format (Strict JSON)
-你必须严格输出如下 JSON 格式（不要包含 markdown 代码块标记）：
+你必须严格输出如下 JSON 格式（不要包含 markdown 代码块标记）。
+【关键】replan_output 是核心字段，必须放在 JSON 前面，确保不被截断：
 {
-  "evaluation_analysis": "对本次运行结果的客观专业分析：拟合情况如何？分数是否达标？",
+  "decision": "AUTO_OPTIMIZE",
+  "score": 79.5,
+  "method_summary": "本轮使用了XGBoost(max_depth=3)，存在欠拟合。关键代码特征：使用了ColumnTransformer+OneHotEncoder。主要问题：树深度过浅。",
+  "replan_output": "【重新规划】基于评估结果，下一轮优化方向：must_do: 1.增加树深度到6-8 2.添加类别权重处理不平衡 avoid: 1.重复之前的浅树方案",
+  "suggestions_for_coding_agent": "具体技术建议...",
+  "report_to_user": null,
+  "evaluation_analysis": "对本次运行结果的客观专业分析",
   "dimension_scores": [
     {"name": "metric_performance", "score": 78, "weight": 0.30, "reason": "AUC 0.82 超及格线"},
     {"name": "overfit_control", "score": 85, "weight": 0.25, "reason": "差距仅3%"},
     {"name": "algorithm_choice", "score": 80, "weight": 0.20, "reason": "XGBoost适合该任务"},
     {"name": "pipeline_completeness", "score": 75, "weight": 0.15, "reason": "流程完整"},
     {"name": "task_alignment", "score": 70, "weight": 0.10, "reason": "匹配目标"}
-  ],
-  "score": 79.5,
-  "decision": "AUTO_OPTIMIZE" 或 "YIELD_TO_USER",
-  "suggestions_for_coding_agent": "如果 decision 为 AUTO_OPTIMIZE，在此写出具体的技术调优或换模型建议。否则填 null。",
-  "report_to_user": "如果 decision 为 YIELD_TO_USER，在此写出给用户的自然语言汇报，需通俗易懂并带有引导性。否则填 null。"
-}"""
+  ]
+}
+
+【字段要求】
+1. decision: 先输出决策，AUTO_OPTIMIZE 或 YIELD_TO_USER
+2. score: 加权总分
+3. method_summary: 用1-2句话总结模型、关键问题
+4. replan_output（仅 AUTO_OPTIMIZE 时）: 
+   - 必须简洁，控制在300字以内
+   - 格式: 【重新规划】must_do: ... avoid: ...
+   - 基于上一轮实际结果，量化问题
+   - 历史失败策略必须在 avoid 中列出
+5. suggestions_for_coding_agent: 给 CodingAgent 的技术建议
+6. report_to_user（仅 YIELD_TO_USER 时）: 面向用户的汇报
+7. evaluation_analysis: 专业分析
+8. dimension_scores: 5个维度评分，每个 reason 控制在20字以内"""
 
 
 class EvaluationAgent(BaseAgent):
@@ -102,6 +104,7 @@ class EvaluationAgent(BaseAgent):
     - 解析沙箱输出的验证集指标
     - 评估模型质量（多维度打分）
     - 决策：AUTO_OPTIMIZE（继续内部优化）或 YIELD_TO_USER（提交用户确认）
+    - 【新增】AUTO_OPTIMIZE 时同时输出重新规划计划和方法总结（一次调用完成）
     """
 
     # 维度权重定义（与 Prompt 中的权重一致）
@@ -121,22 +124,29 @@ class EvaluationAgent(BaseAgent):
         max_optimize_rounds: int = 3,
         execution_output: str = "",
         user_modeling_suggestions: Optional[str] = None,
-        eval_metric: Optional[str] = None
+        eval_metric: Optional[str] = None,
+        evaluation_history: Optional[List[Dict[str, Any]]] = None,
+        current_code: str = "",
     ) -> EvaluationResult:
         """
         评估模型效果并决策
-        
-        注：针对某些模型（如 deepseek-v4-flash）JSON 输出易被截断的问题，
-        已增加 max_tokens 和 JSON 修复机制。
-        """
-        """
-        评估模型效果并决策
+
+        【架构变更】一次 LLM 调用同时完成：
+        1. 多维度评估 + 决策
+        2. 方法总结 (method_summary)
+        3. 重新规划 (replan_output，仅 AUTO_OPTIMIZE 时)
+
+        Args:
+            evaluation_history: 历史评估记录列表，每项包含 {round, score, decision, suggestions, method_summary}
+            current_code: 本轮实际运行的代码（用于方法总结）
         """
         user_prompt = self._build_user_prompt(
-            task_target, metrics, optimize_round, max_optimize_rounds, execution_output, user_modeling_suggestions, eval_metric
+            task_target, metrics, optimize_round, max_optimize_rounds,
+            execution_output, user_modeling_suggestions, eval_metric,
+            evaluation_history, current_code
         )
 
-        logger.info(f"[EvaluationAgent] 评估模型, optimize_round={optimize_round}/{max_optimize_rounds}")
+        logger.info(f"[EvaluationAgent] 评估模型(含replan), optimize_round={optimize_round}/{max_optimize_rounds}")
 
         response = self._call_llm(EVALUATION_SYSTEM_PROMPT, user_prompt)
 
@@ -146,10 +156,23 @@ class EvaluationAgent(BaseAgent):
         # 校验/修正加权总分
         result = self._normalize_score(result)
 
+        # 【关键兜底】AUTO_OPTIMIZE 时必须提供 replan_output，否则从 suggestions 构建
+        if result.decision == DecisionType.AUTO_OPTIMIZE and not result.replan_output:
+            if result.suggestions_for_coding_agent:
+                result.replan_output = self._build_replan_from_suggestions(result.suggestions_for_coding_agent)
+                logger.info(f"[EvaluationAgent] 从 suggestions 自动构建 replan_output, 长度={len(result.replan_output)}")
+            else:
+                result.replan_output = self._build_replan_from_suggestions("")
+                logger.warning("[EvaluationAgent] AUTO_OPTIMIZE 但无 suggestions，使用空 replan")
+
         logger.info(f"[EvaluationAgent] 决策: {result.decision}, score={result.score}")
         if result.dimension_scores:
             for ds in result.dimension_scores:
                 logger.info(f"  [{ds.name}] {ds.score}/100 (weight={ds.weight}) {ds.reason[:60]}...")
+        if result.method_summary:
+            logger.info(f"[EvaluationAgent] 方法总结: {result.method_summary[:120]}...")
+        if result.replan_output:
+            logger.info(f"[EvaluationAgent] 重新规划长度: {len(result.replan_output)}")
 
         return result
 
@@ -161,7 +184,9 @@ class EvaluationAgent(BaseAgent):
         max_optimize_rounds: int,
         execution_output: str,
         user_modeling_suggestions: Optional[str] = None,
-        eval_metric: Optional[str] = None
+        eval_metric: Optional[str] = None,
+        evaluation_history: Optional[List[Dict[str, Any]]] = None,
+        current_code: str = "",
     ) -> str:
         """构建用户提示词"""
         metrics_dict = {}
@@ -183,8 +208,33 @@ class EvaluationAgent(BaseAgent):
         primary_metric = eval_metric or ""
         metric_section = f"""
 【核心评估指标 Core Metric】: {primary_metric or '未明确指定，请根据任务类型和指标情况自行判断'}
-【重要】评估时请优先以该指标为核心标准。如果该指标表现极差，应优先考虑 AUTO_OPTIMIZE；如果该指标已达及格线但其他辅助指标不佳，可酌情处理。
+【重要】评估时请优先以该指标为核心标准。
 """ if primary_metric else ""
+
+        # 【新增】历史评估记录（避免重复犯错）
+        history_section = ""
+        if evaluation_history:
+            history_lines = ["【历史评估记录 Evaluation History】（严禁重复历史已失败的优化方向）："]
+            for i, h in enumerate(evaluation_history, 1):
+                hist_suggestions = h.get('suggestions_for_coding_agent', '') or h.get('suggestions', '')
+                hist_method = h.get('method_summary', '')
+                history_lines.append(f"  第{i}轮: score={h.get('score', 'N/A')}, decision={h.get('decision', 'N/A')}")
+                if hist_method:
+                    history_lines.append(f"    方法: {hist_method[:100]}")
+                if hist_suggestions:
+                    history_lines.append(f"    建议: {hist_suggestions[:100]}")
+            history_section = "\n".join(history_lines) + "\n"
+
+        # 代码摘要（用于方法总结）【精简至500字符以内】
+        code_summary = ""
+        if current_code:
+            code_summary = f"""
+【本轮代码摘要】（用于生成 method_summary，已精简至前500字符）：
+```python
+{current_code[:500]}
+```
+{"...（代码截断，仅展示前500字符）" if len(current_code) > 500 else ""}
+"""
 
         prompt = f"""【任务目标 Task Target】: {task_target}{metric_section}
 
@@ -195,32 +245,36 @@ class EvaluationAgent(BaseAgent):
 
 【沙箱完整输出】:
 ```
-{execution_output[:2000] if execution_output else '无'}
+{execution_output[:1500] if execution_output else '无'}
 ```
 {suggestions_section}
+{history_section}
+{code_summary}
 【内部优化轮数 Optimize Round】: {optimize_round} / {max_optimize_rounds}
 {"【注意】已达到最大优化轮数上限，必须强制 YIELD_TO_USER。" if optimize_round >= max_optimize_rounds else ""}
 
-请根据以上信息，严格按照 JSON 格式输出评估结论。必须包含 dimension_scores 数组和加权后的 score 字段。
+请根据以上信息，严格按照 JSON 格式输出评估结论、方法总结和重新规划（如需要）。
+必须包含：dimension_scores 数组、score、decision、method_summary。
+如果 decision=AUTO_OPTIMIZE，必须同时提供详细的 replan_output。
 """
         return prompt
 
     def _parse_response(self, response: str) -> EvaluationResult:
         """
         解析 LLM 响应，提取 JSON 格式的评估结果
-        
+
         容错策略：
         1. 先尝试标准 JSON 解析
-        2. 如果失败，尝试修复截断的 JSON（补充缺失的闭合符号）
+        2. 如果失败，尝试修复截断的 JSON
         3. 如果还是失败，从文本中尽量提取关键信息
-        4. 最后兜底：基于关键词判断
+        4. 最后兜底
         """
         # 策略1：提取 markdown JSON 代码块
         json_block_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
         if json_block_match:
             json_str = json_block_match.group(1).strip()
         else:
-            # 策略2：直接匹配 JSON 对象（贪婪匹配以获取完整内容）
+            # 策略2：直接匹配 JSON 对象
             json_match = re.search(r'\{[\s\S]*\}', response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0).strip()
@@ -234,7 +288,7 @@ class EvaluationAgent(BaseAgent):
                 return self._build_result_from_dict(data)
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning(f"[EvaluationAgent] JSON 标准解析失败: {e}")
-            
+
             # 尝试修复截断的 JSON
             try:
                 fixed_json = self._fix_truncated_json(json_str)
@@ -243,7 +297,7 @@ class EvaluationAgent(BaseAgent):
                 return self._build_result_from_dict(data)
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning(f"[EvaluationAgent] JSON 修复失败: {e}")
-            
+
             # 尝试从截断的 JSON 中提取关键信息
             try:
                 extracted = self._extract_from_broken_json(json_str)
@@ -253,10 +307,10 @@ class EvaluationAgent(BaseAgent):
             except Exception as e:
                 logger.warning(f"[EvaluationAgent] 提取失败: {e}")
 
-        # 兜底：基于关键词判断
+        # 兜底
         logger.warning(f"[EvaluationAgent] 所有解析方法失败，使用兜底解析")
         return self._fallback_parse(response)
-    
+
     def _build_result_from_dict(self, data: dict) -> EvaluationResult:
         """从字典构建 EvaluationResult"""
         dim_scores = []
@@ -268,75 +322,56 @@ class EvaluationAgent(BaseAgent):
                     weight=float(d.get("weight", 0)),
                     reason=str(d.get("reason", ""))
                 ))
-        
+
         return EvaluationResult(
             evaluation_analysis=data.get("evaluation_analysis", "未提供分析"),
             decision=DecisionType(data.get("decision", "YIELD_TO_USER")),
             suggestions_for_coding_agent=data.get("suggestions_for_coding_agent"),
             report_to_user=data.get("report_to_user"),
             score=data.get("score"),
-            dimension_scores=dim_scores
+            dimension_scores=dim_scores,
+            method_summary=data.get("method_summary"),
+            replan_output=data.get("replan_output")
         )
-    
+
     def _fix_truncated_json(self, json_str: str) -> str:
-        """
-        修复截断的 JSON：
-        1. 找到最后一个完整的键值对
-        2. 补充缺失的闭合符号
-        """
+        """修复截断的 JSON"""
         fixed = json_str.strip()
-        
-        # 如果 JSON 在某个字符串值中被截断，尝试找到最后一个闭合引号
-        # 策略：从后向前找，找到最后一个完整的字段，然后补充闭合符号
-        
-        # 情况1：在某个字符串值中被截断（如 "reason": "未完成的...）
-        # 找到最后一个未闭合的引号，补充闭合
+
         quote_count = fixed.count('"')
         if quote_count % 2 != 0:
-            # 奇数个引号，说明有未闭合的字符串
             last_quote = fixed.rfind('"')
             if last_quote > 0:
-                # 检查引号后是否已有逗号或闭合括号
                 after_quote = fixed[last_quote+1:].strip()
                 if not after_quote.startswith((',', '}', ']')):
                     fixed = fixed[:last_quote+1] + '"' + fixed[last_quote+1:]
-        
-        # 补充缺失的括号
+
         open_braces = fixed.count('{') - fixed.count('}')
         open_brackets = fixed.count('[') - fixed.count(']')
         fixed += '}' * max(0, open_braces)
         fixed += ']' * max(0, open_brackets)
-        
-        # 移除末尾的逗号
         fixed = fixed.rstrip(',')
-        
+
         return fixed
-    
+
     def _extract_from_broken_json(self, json_str: str) -> Optional[EvaluationResult]:
+        """从损坏的 JSON 中尽量提取关键字段
+        
+        增强版：支持多行字符串提取（method_summary / replan_output / suggestions）
         """
-        从损坏的 JSON 中尽量提取关键字段
-        """
-        # 提取 decision
         decision_match = re.search(r'"decision"\s*:\s*"(AUTO_OPTIMIZE|YIELD_TO_USER)"', json_str)
         decision = DecisionType(decision_match.group(1)) if decision_match else DecisionType.YIELD_TO_USER
-        
-        # 提取 score
+
         score_match = re.search(r'"score"\s*:\s*(\d+\.?\d*)', json_str)
         score = float(score_match.group(1)) if score_match else None
-        
-        # 提取 evaluation_analysis
-        analysis_match = re.search(r'"evaluation_analysis"\s*:\s*"([^"]*)"', json_str)
-        analysis = analysis_match.group(1) if analysis_match else "JSON截断，部分信息提取"
-        
-        # 提取 suggestions
-        sug_match = re.search(r'"suggestions_for_coding_agent"\s*:\s*"([^"]*)"', json_str)
-        suggestions = sug_match.group(1) if sug_match else None
-        
-        # 提取 report
-        rep_match = re.search(r'"report_to_user"\s*:\s*"([^"]*)"', json_str)
-        report = rep_match.group(1) if rep_match else None
-        
-        # 提取维度评分（尽可能）
+
+        # 使用增强的多行字符串提取方法
+        analysis = self._extract_json_string_field(json_str, "evaluation_analysis") or "JSON截断，部分信息提取"
+        suggestions = self._extract_json_string_field(json_str, "suggestions_for_coding_agent")
+        report = self._extract_json_string_field(json_str, "report_to_user")
+        method_summary = self._extract_json_string_field(json_str, "method_summary")
+        replan_output = self._extract_json_string_field(json_str, "replan_output")
+
         dim_scores = []
         dim_pattern = r'\{\s*"name"\s*:\s*"([^"]*)"\s*,\s*"score"\s*:\s*(\d+\.?\d*)\s*,\s*"weight"\s*:\s*(\d+\.?\d*)\s*,\s*"reason"\s*:\s*"([^"]*)"\s*\}'
         for m in re.finditer(dim_pattern, json_str):
@@ -346,7 +381,7 @@ class EvaluationAgent(BaseAgent):
                 weight=float(m.group(3)),
                 reason=m.group(4)
             ))
-        
+
         if score is not None or dim_scores:
             return EvaluationResult(
                 evaluation_analysis=analysis,
@@ -354,18 +389,47 @@ class EvaluationAgent(BaseAgent):
                 suggestions_for_coding_agent=suggestions,
                 report_to_user=report,
                 score=score,
-                dimension_scores=dim_scores
+                dimension_scores=dim_scores,
+                method_summary=method_summary,
+                replan_output=replan_output
             )
         return None
 
+    def _extract_json_string_field(self, json_str: str, field_name: str) -> Optional[str]:
+        """从可能截断的 JSON 字符串中提取指定字段的字符串值
+        
+        支持三种情况：
+        1. 普通单行字符串: "field": "value"
+        2. 包含转义引号的字符串: "field": "val\\"ue"
+        3. 截断的字符串（到末尾）: "field": "value...（没有闭合引号）
+        """
+        # 模式1: 尝试匹配完整字符串（处理转义引号）
+        # 使用非贪婪匹配，但跳过 \\"
+        pattern_full = rf'"{re.escape(field_name)}"\s*:\s*"((?:[^"\\]|\\.)*?)"'
+        match = re.search(pattern_full, json_str)
+        if match:
+            return match.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
+        
+        # 模式2: 匹配截断字符串（到文件末尾或下一个字段开头）
+        # 查找字段名后的内容，直到下一个 JSON 键或数组/对象结束
+        pattern_trunc = rf'"{re.escape(field_name)}"\s*:\s*"(.*)'
+        match = re.search(pattern_trunc, json_str, re.DOTALL)
+        if match:
+            raw = match.group(1).strip()
+            # 截断到合理的结束位置（下一个键、闭合括号等）
+            end_markers = ['",\n', '",', '"\n', '\n}"', '\n  }', '\n]', '},\n']
+            for marker in end_markers:
+                idx = raw.find(marker)
+                if idx > 10:  # 至少保留10个字符
+                    raw = raw[:idx]
+                    break
+            return raw.replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
+        
+        return None
+
     def _normalize_score(self, result: EvaluationResult) -> EvaluationResult:
-        """
-        校验并修正加权总分
-        - 如果 LLM 未提供 dimension_scores，根据现有 score 生成默认维度
-        - 如果提供了 dimension_scores，重新计算加权总分以确保一致
-        """
+        """校验并修正加权总分"""
         if not result.dimension_scores:
-            # LLM 未返回维度评分，生成默认维度
             default_score = result.score or 50.0
             result.dimension_scores = [
                 DimensionScore(name="metric_performance", score=default_score, weight=0.30, reason="综合评分兜底"),
@@ -378,30 +442,41 @@ class EvaluationAgent(BaseAgent):
                 result.score = default_score
             return result
 
-        # 重新计算加权总分（确保与维度评分一致）
         calculated = 0.0
         for ds in result.dimension_scores:
             w = self.DIMENSION_WEIGHTS.get(ds.name, ds.weight)
             calculated += ds.score * w
 
-        # 如果 LLM 提供的 score 与计算值差距 > 5，以计算值为准（防止 LLM 计算错误）
         if result.score is None or abs(result.score - calculated) > 5:
             logger.warning(f"[EvaluationAgent] 修正加权总分: {result.score} -> {calculated:.1f}")
             result.score = round(calculated, 1)
         else:
-            # 保留 LLM 的评分（差距不大时）
             result.score = round(result.score, 1)
 
-        # 确保每个维度的 weight 与系统定义一致
         for ds in result.dimension_scores:
             ds.weight = self.DIMENSION_WEIGHTS.get(ds.name, ds.weight)
 
         return result
 
+    def _build_replan_from_suggestions(self, suggestions: str) -> str:
+        """从 suggestions 构建一个基本的 replan_output（避免回退到 PlanAgent）"""
+        if not suggestions:
+            return "【重新规划】\n基于评估建议进行优化:\n must_do:\n  - 改进模型方案\n avoid:\n  - 重复之前的错误\n"
+        return f"""【重新规划】
+基于评估发现的严重问题，下一轮优化方向如下:
+
+【任务分析】
+  上一轮问题: {suggestions[:200]}
+
+【must_do】
+  - {suggestions[:300]}
+
+【avoid】
+  - 重复之前已失败的优化方向
+"""
+
     def _fallback_parse(self, response: str) -> EvaluationResult:
-        """
-        兜底解析：当 JSON 解析失败时，基于关键词判断决策
-        """
+        """兜底解析"""
         response_upper = response.upper()
 
         if "AUTO_OPTIMIZE" in response_upper:
@@ -413,6 +488,7 @@ class EvaluationAgent(BaseAgent):
 
         suggestions = None
         report = None
+        replan_output = None
 
         if decision == DecisionType.AUTO_OPTIMIZE:
             sug_match = re.search(r'(?:建议|suggestions|优化).*?(:|：)\s*(.+?)(?:\n\n|$)', response, re.DOTALL)
@@ -420,6 +496,13 @@ class EvaluationAgent(BaseAgent):
                 suggestions = sug_match.group(2).strip()
             else:
                 suggestions = "请尝试更换模型或调整超参数。"
+            # 尝试提取 replan_output
+            replan_match = re.search(r'【结构化建模计划.*?(?:=){20,}(.*?)(?:=){20,}', response, re.DOTALL)
+            if replan_match:
+                replan_output = replan_match.group(0)
+            else:
+                # 兜底：从 suggestions 构建 replan
+                replan_output = self._build_replan_from_suggestions(suggestions)
         else:
             rep_match = re.search(r'(?:汇报|report|总结).*?(:|：)\s*(.+?)(?:\n\n|$)', response, re.DOTALL)
             if rep_match:
@@ -444,5 +527,7 @@ class EvaluationAgent(BaseAgent):
             suggestions_for_coding_agent=suggestions if decision == DecisionType.AUTO_OPTIMIZE else None,
             report_to_user=report if decision == DecisionType.YIELD_TO_USER else None,
             score=fallback_score,
-            dimension_scores=dim_scores
+            dimension_scores=dim_scores,
+            method_summary="兜底解析，无法提取方法总结。",
+            replan_output=replan_output
         )

@@ -70,9 +70,18 @@ class BenchmarkEvaluator:
         judge_llm_config: Optional[LLMConfig] = None,
         plan_coding_llm_config: Optional[LLMConfig] = None,
         max_wait_seconds: int = 1200,  # 从 600 提升到 1200，给完整流程（3轮优化+产物生成）留出足够时间
-        eval_id: Optional[str] = None
+        eval_id: Optional[str] = None,
+        # 【新增】Plan / Coding / Unified / Evaluation Agent 独立 LLM 配置
+        plan_llm_config: Optional[LLMConfig] = None,
+        coding_llm_config: Optional[LLMConfig] = None,
+        unified_llm_config: Optional[LLMConfig] = None,
+        evaluation_llm_config: Optional[LLMConfig] = None,
     ):
         self.plan_coding_llm_config = plan_coding_llm_config
+        self.plan_llm_config = plan_llm_config
+        self.coding_llm_config = coding_llm_config
+        self.unified_llm_config = unified_llm_config
+        self.evaluation_llm_config = evaluation_llm_config
         self.benchmark_dir = Path(benchmark_dir)
         self.num_runs = num_runs
         self.max_wait_seconds = max_wait_seconds
@@ -149,61 +158,59 @@ class BenchmarkEvaluator:
         )
         self._report = report
 
-        # 2. 对每个任务运行 num_runs 次（最多 3 任务并行）
+        # 2. 对每个任务运行 num_runs 次（【修复】串行执行，确保每次运行彻底冷启动，避免并发污染）
         round_results_map: Dict[str, BenchmarkRoundResult] = {}
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            future_to_task = {executor.submit(self._run_task_round, tc): tc for tc in tasks}
-            for future in as_completed(future_to_task):
-                task_cfg, task_results = future.result()
+        for tc in tasks:
+            task_cfg, task_results = self._run_task_round(tc)
 
-                # 计算本轮聚合指标
-                accepted_count = sum(1 for r in task_results if r.judge_accepted)
-                success_rate = accepted_count / len(task_results) if task_results else 0.0
+            # 计算本轮聚合指标
+            accepted_count = sum(1 for r in task_results if r.judge_accepted)
+            success_rate = accepted_count / len(task_results) if task_results else 0.0
 
-                scores = [r.best_score for r in task_results if r.best_score is not None]
-                avg_score = sum(scores) / len(scores) if scores else None
-                score_std = self._calc_std(scores) if scores else 0.0
-                score_cv = score_std / avg_score if avg_score and avg_score != 0 else 0.0
+            scores = [r.best_score for r in task_results if r.best_score is not None]
+            avg_score = sum(scores) / len(scores) if scores else None
+            score_std = self._calc_std(scores) if scores else 0.0
+            score_cv = score_std / avg_score if avg_score and avg_score != 0 else 0.0
 
-                durations = [r.duration_seconds for r in task_results]
-                avg_duration = sum(durations) / len(durations) if durations else 0.0
-                min_duration = min(durations) if durations else 0.0
-                max_duration = max(durations) if durations else 0.0
-                duration_std = self._calc_std(durations) if durations else 0.0
+            durations = [r.duration_seconds for r in task_results]
+            avg_duration = sum(durations) / len(durations) if durations else 0.0
+            min_duration = min(durations) if durations else 0.0
+            max_duration = max(durations) if durations else 0.0
+            duration_std = self._calc_std(durations) if durations else 0.0
 
-                tokens = [r.token_usage for r in task_results if r.token_usage]
-                avg_total_tokens = int(sum(t.total_tokens for t in tokens) / len(tokens)) if tokens else 0
-                avg_plan_tokens = int(sum(t.plan_coding_total_tokens for t in tokens) / len(tokens)) if tokens else 0
-                avg_eval_tokens = int(sum(t.evaluation_total_tokens for t in tokens) / len(tokens)) if tokens else 0
+            tokens = [r.token_usage for r in task_results if r.token_usage]
+            avg_total_tokens = int(sum(t.total_tokens for t in tokens) / len(tokens)) if tokens else 0
+            avg_plan_tokens = int(sum(t.plan_coding_total_tokens for t in tokens) / len(tokens)) if tokens else 0
+            avg_eval_tokens = int(sum(t.evaluation_total_tokens for t in tokens) / len(tokens)) if tokens else 0
 
-                # 产物完整性聚合
-                artifact_completenesses = [r.artifacts.completeness for r in task_results if r.artifacts]
-                most_common_completeness = max(set(artifact_completenesses), key=artifact_completenesses.count) if artifact_completenesses else "none"
+            # 产物完整性聚合
+            artifact_completenesses = [r.artifacts.completeness for r in task_results if r.artifacts]
+            most_common_completeness = max(set(artifact_completenesses), key=artifact_completenesses.count) if artifact_completenesses else "none"
 
-                round_result = BenchmarkRoundResult(
-                    round_index=len(round_results_map) + 1,
-                    task_results=task_results,
-                    success_rate=success_rate,
-                    avg_best_score=avg_score,
-                    success_count=accepted_count,
-                    fail_count=len(task_results) - accepted_count,
-                    avg_duration_seconds=avg_duration,
-                    min_duration_seconds=min_duration,
-                    max_duration_seconds=max_duration,
-                    duration_std=duration_std,
-                    avg_total_tokens=avg_total_tokens,
-                    avg_plan_coding_tokens=avg_plan_tokens,
-                    avg_evaluation_tokens=avg_eval_tokens,
-                    score_std=score_std,
-                    score_cv=score_cv
-                )
-                round_results_map[task_cfg.task_name] = round_result
-                logger.info(
-                    f"[BenchmarkEvaluator] 任务 {task_cfg.task_name} 完成: "
-                    f"成功率={success_rate:.1%}, 平均耗时={avg_duration:.1f}s, "
-                    f"平均Token={avg_total_tokens}, score_std={score_std:.4f}, "
-                    f"产物完整性={most_common_completeness}"
-                )
+            round_result = BenchmarkRoundResult(
+                round_index=len(round_results_map) + 1,
+                task_results=task_results,
+                success_rate=success_rate,
+                avg_best_score=avg_score,
+                success_count=accepted_count,
+                fail_count=len(task_results) - accepted_count,
+                avg_duration_seconds=avg_duration,
+                min_duration_seconds=min_duration,
+                max_duration_seconds=max_duration,
+                duration_std=duration_std,
+                avg_total_tokens=avg_total_tokens,
+                avg_plan_coding_tokens=avg_plan_tokens,
+                avg_evaluation_tokens=avg_eval_tokens,
+                score_std=score_std,
+                score_cv=score_cv
+            )
+            round_results_map[task_cfg.task_name] = round_result
+            logger.info(
+                f"[BenchmarkEvaluator] 任务 {task_cfg.task_name} 完成: "
+                f"成功率={success_rate:.1%}, 平均耗时={avg_duration:.1f}s, "
+                f"平均Token={avg_total_tokens}, score_std={score_std:.4f}, "
+                f"产物完整性={most_common_completeness}"
+            )
 
         # 按原始任务顺序排序
         round_results = [round_results_map[t.task_name] for t in tasks if t.task_name in round_results_map]
@@ -291,9 +298,18 @@ class BenchmarkEvaluator:
         self._restore_all_hidden_test_csvs()
         
         # 检查是否是单任务直接传入（根目录下直接有 建模/ 和 评估/）
-        direct_modeling = self.benchmark_dir / "建模"
-        direct_eval = self.benchmark_dir / "评估"
-        if direct_modeling.exists() and direct_eval.exists():
+        # 支持灵活命名：用于建模、数据建模、建模 等
+        direct_modeling = None
+        direct_eval = None
+        for child in self.benchmark_dir.iterdir():
+            if not child.is_dir():
+                continue
+            if '建模' in child.name:
+                direct_modeling = child
+            elif '评估' in child.name:
+                direct_eval = child
+        
+        if direct_modeling and direct_eval:
             task_cfg = self._parse_task_dir(self.benchmark_dir, self.benchmark_dir.name)
             if task_cfg:
                 tasks.append(task_cfg)
@@ -407,7 +423,7 @@ class BenchmarkEvaluator:
         gt_path = gt_files[0]
 
         # 优先使用 LLM IntentAgent 识别任务信息，失败则回退到规则推断
-        task_type, target_column, eval_metric, id_column, complexity, is_time_series = self._recognize_task_info_llm(
+        task_type, target_column, eval_metric, id_column, complexity, is_time_series, data_profile, complexity_reason = self._recognize_task_info_llm(
             train_path, gt_path, desc_path, task_name
         )
         if not target_column:
@@ -415,6 +431,7 @@ class BenchmarkEvaluator:
             eval_metric = None
             complexity = "simple"
             is_time_series = False
+            complexity_reason = "规则推断fallback"
             logger.info(f"[BenchmarkEvaluator] {task_name}: 回退到规则推断")
 
         return BenchmarkTaskConfig(
@@ -427,7 +444,9 @@ class BenchmarkEvaluator:
             target_column=target_column,
             task_type=task_type,
             eval_metric=eval_metric,
-            id_column=id_column
+            id_column=id_column,
+            data_profile=data_profile,
+            complexity_reason=complexity_reason
         )
 
     def _build_data_profile(self, train_path: Path, gt_path: Path) -> Dict[str, Any]:
@@ -469,6 +488,11 @@ class BenchmarkEvaluator:
                     col_info["min"] = float(non_null.min())
                     col_info["max"] = float(non_null.max())
                     col_info["mean"] = float(non_null.mean())
+                    
+                    # 【关键新增】检测单调性——时序数据的核心特征
+                    # 对疑似时间/索引列检测是否单调递增
+                    if unique_count == n_rows and n_rows > 10:
+                        col_info["isMonotonic"] = bool(non_null.is_monotonic_increasing)
             else:
                 # 类别列：增加采样值和最常见值
                 non_null = series.dropna()
@@ -478,6 +502,15 @@ class BenchmarkEvaluator:
                     if len(vc) > 0:
                         col_info["mostCommon"] = str(vc.index[0])
                         col_info["mostCommonFreq"] = int(vc.iloc[0])
+                    
+                    # 【关键新增】检测字符串列是否可解析为日期
+                    try:
+                        sample = str(non_null.iloc[0])
+                        if len(sample) >= 6 and len(sample) <= 25:
+                            pd.to_datetime(sample)
+                            col_info["isDateParseable"] = True
+                    except:
+                        pass
 
             profile["columns"].append(col_info)
 
@@ -508,7 +541,7 @@ class BenchmarkEvaluator:
             gt_cols = list(gt_df.columns)
             id_column = gt_cols[0] if len(gt_cols) >= 1 else None
             logger.info(f"[BenchmarkEvaluator] {task_name}: 命中 IntentAgent 缓存")
-            return task_type, cached.target_column, cached.eval_metric, id_column, cached.complexity, cached.is_time_series
+            return task_type, cached.target_column, cached.eval_metric, id_column, cached.complexity, cached.is_time_series, None, cached.complexity_reason
 
         # 读取任务描述
         user_description = ""
@@ -523,23 +556,23 @@ class BenchmarkEvaluator:
             profile = self._build_data_profile(train_path, gt_path)
         except Exception as e:
             logger.warning(f"[BenchmarkEvaluator] 构建数据画像失败 {task_name}: {e}")
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None, None, None
 
         # 调用 IntentAgent
         try:
             result = self.intent_agent.recognize(
                 columns=profile.get("columns", []),
                 task_description=user_description,
-                row_count=profile.get("row_count", 0),
-                col_count=profile.get("column_count", 0),
+                row_count=profile.get("rowCount", 0),
+                col_count=profile.get("columnCount", 0),
             )
         except Exception as e:
             logger.warning(f"[BenchmarkEvaluator] IntentAgent 调用失败 {task_name}: {e}")
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
 
         if not result or not result.target_column:
             logger.info(f"[BenchmarkEvaluator] IntentAgent 未返回 target_column {task_name}")
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
 
         # 校验 target_column 是否在训练集中
         train_df = pd.read_csv(train_path)
@@ -567,9 +600,10 @@ class BenchmarkEvaluator:
         logger.info(
             f"[BenchmarkEvaluator] LLM 识别任务信息 {task_name}: "
             f"type={task_type.value}, target={result.target_column}, "
-            f"metric={result.eval_metric}, complexity={result.complexity}, ts={result.is_time_series}"
+            f"metric={result.eval_metric}, complexity={result.complexity}, ts={result.is_time_series}, "
+            f"reason={result.complexity_reason}"
         )
-        return task_type, result.target_column, result.eval_metric, id_column, result.complexity, result.is_time_series
+        return task_type, result.target_column, result.eval_metric, id_column, result.complexity, result.is_time_series, profile, result.complexity_reason
 
     def _infer_task_info(self, train_path: Path, gt_path: Path) -> tuple:
         """
@@ -618,7 +652,7 @@ class BenchmarkEvaluator:
 
 
     def _run_single_task(self, task_cfg: BenchmarkTaskConfig, run_index: int) -> BenchmarkTaskResult:
-        """执行单个任务单次运行"""
+        """执行单个任务单次运行（彻底冷启动模式）"""
         task_start = time.time()
         result = BenchmarkTaskResult(
             task_name=task_cfg.task_name,
@@ -628,6 +662,22 @@ class BenchmarkEvaluator:
         )
 
         try:
+            # ========== 【冷启动】清空所有 Agent 状态和缓存 ==========
+            logger.info(f"[BenchmarkEvaluator] 【冷启动】任务 {task_cfg.task_name} 第 {run_index} 次运行，清空所有缓存和 Agent 状态")
+            # 1. 清空意图识别缓存（全部，不只是当前任务）
+            self._intent_cache.clear()
+            # 2. 清空 IntentAgent 的日志和用量
+            if hasattr(self.intent_agent, 'clear_llm_call_logs'):
+                self.intent_agent.clear_llm_call_logs()
+            if hasattr(self.intent_agent, 'reset_usage'):
+                self.intent_agent.reset_usage()
+            # 3. 清空 JudgeAgent 的日志和用量
+            if hasattr(self.judge_agent, 'clear_llm_call_logs'):
+                self.judge_agent.clear_llm_call_logs()
+            if hasattr(self.judge_agent, 'reset_usage'):
+                self.judge_agent.reset_usage()
+            logger.info(f"[BenchmarkEvaluator] 【冷启动】缓存和 Agent 状态已清空")
+            
             # 1. 读取任务描述
             user_description = ""
             if task_cfg.desc_path and Path(task_cfg.desc_path).exists():
@@ -635,10 +685,18 @@ class BenchmarkEvaluator:
 
             # 2. 创建 TaskConfig（冷启动，不传入建模建议）
             agent_configs = {}
+            # 【新增】Plan / Coding / Unified 独立 LLM 配置
+            if self.plan_llm_config:
+                agent_configs["plan"] = self.plan_llm_config
+            if self.coding_llm_config:
+                agent_configs["coding"] = self.coding_llm_config
+            if self.unified_llm_config:
+                agent_configs["unified"] = self.unified_llm_config
+            if self.evaluation_llm_config:
+                agent_configs["evaluation"] = self.evaluation_llm_config
+            # 向后兼容：plan_coding_llm_config 作为共同回退
             if self.plan_coding_llm_config:
                 agent_configs["plan_coding"] = self.plan_coding_llm_config
-                # 评测系统内 EvaluationAgent 复用 PlanCoding 配置（同属代码理解类任务）
-                agent_configs["evaluation"] = self.plan_coding_llm_config
             
             uploaded_files = [
                 UploadedFile(name="train.csv", path=task_cfg.train_path, role=FileRole.TRAIN),
@@ -646,10 +704,25 @@ class BenchmarkEvaluator:
             if task_cfg.test_path:
                 uploaded_files.append(UploadedFile(name="test.csv", path=task_cfg.test_path, role=FileRole.TEST))
             
-            # 从 IntentAgent 缓存获取 complexity 和 is_time_series（核心层数据，不经过评测层 BenchmarkTaskConfig）
-            cached_intent = self._intent_cache.get(task_cfg.task_name)
-            complexity = cached_intent.complexity if cached_intent else "simple"
-            is_time_series = cached_intent.is_time_series if cached_intent else False
+            # 每次运行都重新进行意图识别（缓存已在冷启动阶段全部清空）
+            intent_start = time.time()
+            recognized = self._recognize_task_info_llm(
+                Path(task_cfg.train_path),
+                Path(task_cfg.ground_truth_path),
+                Path(task_cfg.desc_path) if task_cfg.desc_path else None,
+                task_cfg.task_name,
+            )
+            intent_seconds = time.time() - intent_start
+            # recognized 返回元组长度可能为 6/8/10，统一安全读取
+            if recognized and recognized[0] is not None and len(recognized) >= 6:
+                complexity = recognized[4] if recognized[4] else "simple"
+                is_time_series = recognized[5] if recognized[5] is not None else False
+                complexity_reason = recognized[7] if len(recognized) > 7 else None
+            else:
+                # 识别失败，回退到默认值
+                complexity = "simple"
+                is_time_series = False
+                complexity_reason = None
             
             tc = TaskConfig(
                 extracted_slots=ExtractedSlots(
@@ -657,12 +730,14 @@ class BenchmarkEvaluator:
                     task_type=task_cfg.task_type,
                     eval_metric=task_cfg.eval_metric,
                     complexity=complexity,
+                    complexity_reason=complexity_reason,
                     is_time_series=is_time_series,
                     feature_constraints=[],
                     user_modeling_suggestions=None  # 冷启动：不传入建模建议
                 ),
                 uploaded_files=uploaded_files,
                 user_description=user_description,
+                data_profile=task_cfg.data_profile,
                 agent_llm_configs=agent_configs if agent_configs else None
             )
 
@@ -758,6 +833,7 @@ class BenchmarkEvaluator:
 
             # 收集各阶段耗时（先初始化，test_prediction_seconds 在预测后填充）
             result.timing = TimingBreakdown(
+                intent_recognition_seconds=intent_seconds,
                 code_generation_seconds=engine.timings.get("code_generation_seconds", 0.0),
                 sandbox_execution_seconds=engine.timings.get("sandbox_execution_seconds", 0.0),
                 evaluation_seconds=engine.timings.get("evaluation_seconds", 0.0),
@@ -838,7 +914,14 @@ class BenchmarkEvaluator:
             except Exception as e:
                 logger.warning(f"[BenchmarkEvaluator] 产物检测失败: {e}")
 
-            # 11. 保存中间结果（含详细日志）
+            # 11. 【新增】提取各环节实际使用的 LLM 追踪（含 fallback 情况）
+            try:
+                result.llm_usage_trace = self._extract_llm_usage_trace(engine)
+                logger.info(f"[BenchmarkEvaluator] LLM 使用追踪: {result.llm_usage_trace}")
+            except Exception as e:
+                logger.warning(f"[BenchmarkEvaluator] LLM 使用追踪提取失败: {e}")
+            
+            # 12. 保存中间结果（含详细日志）
             result_dir = self._save_intermediate_results(
                 result, task_cfg, run_index, task_state, data_dir, engine=engine
             )
@@ -876,36 +959,67 @@ class BenchmarkEvaluator:
         return False
 
     def _detect_artifacts(self, data_dir: Path) -> ArtifactInfo:
-        """检测产物生成情况"""
+        """检测产物生成情况（支持多种任务类型的差异化产物）
+        
+        【修复】同时检测 FastEngine 产物目录 artifacts/ 和传统 output/ 目录
+        """
+        # FastEngine 产物保存到 artifacts/ 目录
+        artifact_dir = data_dir.parent / "artifacts"
+        # 传统 output/ 目录（兼容旧逻辑）
         output_dir = data_dir.parent / "output"
-        if not output_dir.exists():
-            output_dir = Path("output")
+        
+        # 优先使用存在的目录，否则默认 artifacts/
+        primary_dir = artifact_dir if artifact_dir.exists() else (output_dir if output_dir.exists() else artifact_dir)
 
         info = ArtifactInfo()
+        
+        def _check_file(filename: str) -> bool:
+            """检查文件是否存在于 primary_dir 或 fallback 目录"""
+            for check_dir in [primary_dir, artifact_dir, output_dir]:
+                fpath = check_dir / filename
+                if fpath.exists() and fpath.stat().st_size > 0:
+                    return True
+            return False
+        
         files = {
-            "prediction_file": output_dir / "test_predictions.csv",
-            "model_file": output_dir / "model.pkl",
-            "feature_importance_csv": output_dir / "feature_importance.csv",
-            "feature_importance_png": output_dir / "feature_importance.png",
-            "report_html": output_dir / "report.html",
-            "report_fig_png": output_dir / "report_fig.png",
-            "predict_script": output_dir / "predict.py",
+            "prediction_file": "test_predictions.csv",
+            "model_file": "model.pkl",
+            "feature_importance_csv": "feature_importance.csv",
+            "feature_importance_png": "feature_importance.png",
+            "report_html": "report.html",
+            "report_fig_png": "report_fig.png",
+            "predict_script": "predict.py",
+            "pipeline_py": "pipeline.py",
+            "residual_png": "residual.png",
+            "cluster_png": "cluster.png",
+            "ts_forecast_png": "ts_forecast.png",
         }
-        for attr, path in files.items():
-            setattr(info, attr, path.exists() and path.stat().st_size > 0)
+        for attr, filename in files.items():
+            setattr(info, attr, _check_file(filename))
+        
+        # 收集实际存在的产物文件列表（含完整路径信息）
+        generated_files = []
+        for attr, filename in files.items():
+            if _check_file(filename):
+                generated_files.append(filename)
+        info.generated_files = generated_files
 
-        # 判断完整性
-        has_basic = info.model_file and info.prediction_file
-        has_full = has_basic and info.feature_importance_csv and info.feature_importance_png and info.report_html
-        has_fig = info.report_fig_png
+        # 判断完整性（根据存在的产物数量）
+        has_model = info.model_file
+        has_pred = info.prediction_file
+        has_fi_csv = info.feature_importance_csv
+        has_fi_png = info.feature_importance_png
+        has_report = info.report_html
+        has_fig = info.report_fig_png or info.residual_png or info.cluster_png or info.ts_forecast_png
+        has_predict = info.predict_script or info.pipeline_py
 
-        if has_full and has_fig:
+        if has_model and has_pred and has_fi_csv and has_fi_png and has_report and has_fig and has_predict:
             info.completeness = "full"
-        elif has_full:
+        elif has_model and has_pred and has_fi_csv and has_report:
             info.completeness = "simplified"
-        elif has_basic and (info.feature_importance_csv or info.report_html):
+        elif has_model and (has_pred or has_fi_csv or has_report):
             info.completeness = "partial"
-        elif has_basic:
+        elif has_model:
             info.completeness = "minimal"
         else:
             info.completeness = "none"
@@ -923,6 +1037,101 @@ class BenchmarkEvaluator:
                 return True
             time.sleep(interval)
         return False
+
+    def _extract_llm_usage_trace(self, engine) -> Dict[str, Any]:
+        """
+        提取各环节实际使用的 LLM 追踪（含 fallback 情况）
+        
+        返回格式:
+        {
+            "intent": {"model": "qwen3.6-27b", "provider": "fallback1-local", "calls": 1, "tokens": 1000},
+            "plan": {"model": "deepseek-v4-pro", "provider": "openai", "calls": 2, "tokens": 5000},
+            "coding": {"model": "deepseek-v4-pro", "provider": "openai", "calls": 5, "tokens": 15000},
+            "evaluation": {"model": "qwen3.6-27b", "provider": "fallback1-local", "calls": 4, "tokens": 8000},
+            "judge": {"model": "qwen3.5-flash", "provider": "openai", "calls": 1, "tokens": 2000}
+        }
+        """
+        trace = {}
+        
+        # 1. Intent Agent
+        intent_logs = self.intent_agent.get_llm_call_logs()
+        if intent_logs:
+            trace["intent"] = self._summarize_logs(intent_logs)
+        
+        # 2. Judge Agent
+        judge_logs = self.judge_agent.get_llm_call_logs()
+        if judge_logs:
+            trace["judge"] = self._summarize_logs(judge_logs)
+        
+        # 3. FastEngine 内的 Agent
+        if engine:
+            # PlanCoding Agent（包含 Plan/Coding/Unified/产物生成 的所有调用）
+            if hasattr(engine, 'plan_coding_agent'):
+                pc_logs = engine.plan_coding_agent.get_llm_call_logs()
+                if pc_logs:
+                    # 按 model 分组统计，区分不同阶段
+                    trace["plan_coding"] = self._summarize_logs(pc_logs)
+                    # 进一步按 model 分组，识别不同阶段使用的模型
+                    model_groups = {}
+                    for log in pc_logs:
+                        usage = log.get("usage", {})
+                        model = usage.get("model", "unknown")
+                        provider = usage.get("provider", "unknown")
+                        key = f"{provider}/{model}"
+                        if key not in model_groups:
+                            model_groups[key] = {"model": model, "provider": provider, "calls": 0, "tokens": 0}
+                        model_groups[key]["calls"] += 1
+                        model_groups[key]["tokens"] += usage.get("total_tokens", 0)
+                    trace["plan_coding_breakdown"] = list(model_groups.values())
+            
+            # Evaluation Agent
+            if hasattr(engine, 'evaluation_agent'):
+                eval_logs = engine.evaluation_agent.get_llm_call_logs()
+                if eval_logs:
+                    trace["evaluation"] = self._summarize_logs(eval_logs)
+        
+        return trace
+    
+    def _summarize_logs(self, logs: List[Dict]) -> Dict[str, Any]:
+        """汇总 LLM 调用日志（含延迟统计）"""
+        if not logs:
+            return {}
+        
+        # 统计每个 model/provider 组合的调用次数、token、延迟
+        model_counts = {}
+        total_tokens = 0
+        total_latency = 0.0
+        fallback_count = 0
+        for log in logs:
+            usage = log.get("usage", {})
+            model = usage.get("model", "unknown")
+            provider = usage.get("provider", "unknown")
+            latency = usage.get("latency_seconds", 0.0)
+            key = f"{provider}/{model}"
+            if key not in model_counts:
+                model_counts[key] = {"model": model, "provider": provider, "calls": 0, "tokens": 0, "latency": 0.0}
+            model_counts[key]["calls"] += 1
+            model_counts[key]["tokens"] += usage.get("total_tokens", 0)
+            model_counts[key]["latency"] += latency
+            total_tokens += usage.get("total_tokens", 0)
+            total_latency += latency
+            if provider not in ("openai", "") and "fallback" not in provider.lower():
+                # 标记非主提供商的调用（fallback）
+                fallback_count += 1
+        
+        # 找出使用最多的 model（主模型）
+        primary = max(model_counts.values(), key=lambda x: x["calls"])
+        
+        return {
+            "primary_model": primary["model"],
+            "primary_provider": primary["provider"],
+            "total_calls": len(logs),
+            "total_tokens": total_tokens,
+            "total_latency_seconds": round(total_latency, 2),
+            "avg_latency_seconds": round(total_latency / len(logs), 2) if logs else 0,
+            "fallback_triggers": fallback_count,
+            "model_breakdown": list(model_counts.values())
+        }
 
     @staticmethod
     def _extract_definitions_from_code(code: str) -> str:
@@ -1670,8 +1879,13 @@ print('EVAL_PREDICTIONS_SAVED')
             if common_cols:
                 id_col = common_cols[0]
             else:
-                logger.warning(f"[BenchmarkEvaluator] 预测结果与 ground_truth 无共同列，无法计算指标")
-                return TestSetMetrics()
+                # 【关键修复】无共同列时，退而使用位置匹配：将两文件第一列视为 id 列
+                logger.warning(f"[BenchmarkEvaluator] 预测结果与 ground_truth 无共同列，尝试用第一列对齐: pred={pred_df.columns[0]}, gt={gt_df.columns[0]}")
+                pred_id_col = pred_df.columns[0]
+                gt_id_col = gt_df.columns[0]
+                pred_df = pred_df.rename(columns={pred_id_col: "_auto_id"})
+                gt_df = gt_df.rename(columns={gt_id_col: "_auto_id"})
+                id_col = "_auto_id"
         
         # 【关键修复】统一 id 列类型为字符串，防止 int64 vs object merge 失败
         pred_df[id_col] = pred_df[id_col].astype(str)
@@ -2035,6 +2249,27 @@ print('EVAL_PREDICTIONS_SAVED')
             "eval_metric": task_cfg.eval_metric
         }
         (result_dir / "metrics.json").write_text(json.dumps(metrics_data, indent=2, ensure_ascii=False), encoding='utf-8')
+        
+        # 5.5 保存产物总结
+        if result.artifacts:
+            artifact_summary = {
+                "completeness": result.artifacts.completeness,
+                "generated_files": result.artifacts.generated_files,
+                "prediction_file": result.artifacts.prediction_file,
+                "model_file": result.artifacts.model_file,
+                "feature_importance_csv": result.artifacts.feature_importance_csv,
+                "feature_importance_png": result.artifacts.feature_importance_png,
+                "report_html": result.artifacts.report_html,
+                "report_fig_png": result.artifacts.report_fig_png,
+                "predict_script": result.artifacts.predict_script,
+                "pipeline_py": result.artifacts.pipeline_py,
+                "residual_png": result.artifacts.residual_png,
+                "cluster_png": result.artifacts.cluster_png,
+                "ts_forecast_png": result.artifacts.ts_forecast_png,
+            }
+            (result_dir / "artifact_summary.json").write_text(
+                json.dumps(artifact_summary, indent=2, ensure_ascii=False), encoding='utf-8'
+            )
 
         # 6. 保存 Judge 结果
         judge_data = {
@@ -2080,8 +2315,144 @@ print('EVAL_PREDICTIONS_SAVED')
             if hasattr(engine, 'evaluation_agent') and engine.evaluation_agent.get_llm_call_logs():
                 engine.evaluation_agent.save_llm_logs_to_dir(llm_log_dir / "evaluation", "evaluation")
 
+        # 10. 生成易读的运行摘要（方便测试人员快速查看）
+        try:
+            summary_lines = self._generate_run_summary(result, task_cfg, run_index)
+            (result_dir / "summary.txt").write_text("\n".join(summary_lines), encoding='utf-8')
+        except Exception as e:
+            logger.warning(f"[BenchmarkEvaluator] 生成 summary.txt 失败: {e}")
+
         logger.info(f"[BenchmarkEvaluator] 中间结果已保存至 {result_dir}")
         return result_dir
+
+    def _generate_run_summary(
+        self,
+        result: BenchmarkTaskResult,
+        task_cfg: BenchmarkTaskConfig,
+        run_index: int
+    ) -> List[str]:
+        """生成易读的运行摘要（供测试人员快速查看）"""
+        lines = []
+        sep = "=" * 60
+        
+        # 头部
+        lines.append(sep)
+        lines.append(f"  任务运行摘要: {task_cfg.task_name} (第 {run_index} 次运行)")
+        lines.append(sep)
+        lines.append("")
+        
+        # 基本信息
+        lines.append("【基本信息】")
+        lines.append(f"  任务类型: {task_cfg.task_type.value if task_cfg.task_type else 'unknown'}")
+        lines.append(f"  目标列: {task_cfg.target_column}")
+        lines.append(f"  评估指标: {task_cfg.eval_metric or 'auto'}")
+        lines.append(f"  运行结果: {'✅ 成功' if result.success else '❌ 失败'}")
+        lines.append(f"  评审通过: {'✅ 是' if result.judge_accepted else '❌ 否'}")
+        lines.append("")
+        
+        # 核心指标
+        lines.append("【核心指标】")
+        lines.append(f"  Best Score: {result.best_score:.2f}" if result.best_score is not None else "  Best Score: N/A")
+        lines.append(f"  总耗时: {result.duration_seconds:.1f}s")
+        if result.val_metrics:
+            vm = result.val_metrics
+            if vm.val_score is not None:
+                lines.append(f"  验证集 Score: {vm.val_score:.4f}")
+            if vm.val_auc is not None:
+                lines.append(f"  验证集 AUC: {vm.val_auc:.4f}")
+            if vm.val_rmse is not None:
+                lines.append(f"  验证集 RMSE: {vm.val_rmse:.4f}")
+        if result.test_metrics:
+            tm = result.test_metrics
+            if tm.f1 is not None:
+                lines.append(f"  测试集 F1: {tm.f1:.4f}")
+            if tm.auc is not None:
+                lines.append(f"  测试集 AUC: {tm.auc:.4f}")
+            if tm.rmse is not None:
+                lines.append(f"  测试集 RMSE: {tm.rmse:.4f}")
+        lines.append("")
+        
+        # 各阶段耗时
+        if result.timing:
+            t = result.timing
+            lines.append("【各阶段耗时】")
+            lines.append(f"  意图识别: {t.intent_recognition_seconds:.1f}s")
+            lines.append(f"  代码生成: {t.code_generation_seconds:.1f}s")
+            lines.append(f"  沙箱执行: {t.sandbox_execution_seconds:.1f}s")
+            lines.append(f"  评估优化: {t.evaluation_seconds:.1f}s")
+            lines.append(f"  产物生成: {t.artifact_generation_seconds:.1f}s")
+            lines.append(f"  测试预测: {t.test_prediction_seconds:.1f}s")
+            lines.append(f"  总计: {t.total_seconds:.1f}s")
+            lines.append("")
+        
+        # Token 消耗
+        if result.token_usage:
+            tu = result.token_usage
+            lines.append("【Token 消耗】")
+            lines.append(f"  Plan/Coding 调用: {tu.plan_coding_calls} 次, {tu.plan_coding_total_tokens} tokens")
+            lines.append(f"  Evaluation 调用: {tu.evaluation_calls} 次, {tu.evaluation_total_tokens} tokens")
+            lines.append(f"  总计: {tu.total_calls} 次, {tu.total_tokens} tokens")
+            lines.append("")
+        
+        # LLM 使用追踪
+        if result.llm_usage_trace:
+            lines.append("【LLM 使用追踪】")
+            trace = result.llm_usage_trace
+            for stage in ["intent", "plan_coding", "evaluation", "judge"]:
+                info = trace.get(stage)
+                if info:
+                    model = info.get("primary_model", "unknown")
+                    provider = info.get("primary_provider", "unknown")
+                    calls = info.get("total_calls", 0)
+                    tokens = info.get("total_tokens", 0)
+                    latency = info.get("total_latency_seconds", 0)
+                    fallback = info.get("fallback_triggers", 0)
+                    fb_info = f" (fallback={fallback})" if fallback else ""
+                    lines.append(f"  {stage:12s}: {model}@{provider} | {calls}calls | {tokens}tokens | {latency:.1f}s{fb_info}")
+                    # 模型细分
+                    breakdown = info.get("model_breakdown", [])
+                    for bd in breakdown:
+                        lines.append(f"    - {bd.get('model')}@{bd.get('provider')}: {bd.get('calls')} calls, {bd.get('tokens')} tokens, {bd.get('latency', 0):.1f}s")
+            lines.append("")
+        
+        # 产物完整性
+        if result.artifacts:
+            art = result.artifacts
+            lines.append("【产物生成】")
+            lines.append(f"  完整性: {art.completeness or 'unknown'}")
+            lines.append(f"  生成文件: {', '.join(art.generated_files) if art.generated_files else '无'}")
+            lines.append("")
+        
+        # 评审结果
+        if result.judge_analysis:
+            lines.append("【评审分析】")
+            lines.append(f"  {result.judge_analysis[:300]}...")
+            lines.append("")
+        
+        # 错误信息
+        if result.error_message:
+            lines.append("【错误信息】")
+            lines.append(f"  {result.error_message[:500]}")
+            lines.append("")
+        
+        # 维度评分
+        if result.dimension_scores:
+            lines.append("【维度评分】")
+            for ds in result.dimension_scores:
+                name = ds.get("dimension", "unknown")
+                score = ds.get("score", "N/A")
+                weight = ds.get("weight", "")
+                w_str = f" (weight={weight})" if weight else ""
+                lines.append(f"  {name}: {score}{w_str}")
+            lines.append("")
+        
+        # 尾部
+        lines.append(sep)
+        lines.append(f"  结果目录: {result.result_dir or 'N/A'}")
+        lines.append(f"  生成时间: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        lines.append(sep)
+        
+        return lines
 
     def _cleanup_task(self, task_id: str):
         """清理任务资源：停止引擎、移除全局引用、删除中间产物目录"""
@@ -2203,6 +2574,7 @@ print('EVAL_PREDICTIONS_SAVED')
                     "judge_analysis": (r.judge_analysis or "").replace("\n", " ")[:200],
                     "judge_reason": (r.judge_reason or "").replace("\n", " ")[:200],
                     # 耗时
+                    "intent_seconds": round(r.timing.intent_recognition_seconds, 2) if r.timing else "",
                     "code_gen_seconds": round(r.timing.code_generation_seconds, 2) if r.timing else "",
                     "sandbox_seconds": round(r.timing.sandbox_execution_seconds, 2) if r.timing else "",
                     "eval_seconds": round(r.timing.evaluation_seconds, 2) if r.timing else "",
@@ -2216,6 +2588,15 @@ print('EVAL_PREDICTIONS_SAVED')
                     "evaluation_tokens": r.token_usage.evaluation_total_tokens if r.token_usage else "",
                     "total_llm_calls": r.token_usage.total_calls if r.token_usage else "",
                     "total_tokens": r.token_usage.total_tokens if r.token_usage else "",
+                    # LLM 使用追踪
+                    "intent_model": r.llm_usage_trace.get("intent", {}).get("primary_model", "") if r.llm_usage_trace else "",
+                    "intent_latency": r.llm_usage_trace.get("intent", {}).get("total_latency_seconds", "") if r.llm_usage_trace else "",
+                    "plan_coding_model": r.llm_usage_trace.get("plan_coding", {}).get("primary_model", "") if r.llm_usage_trace else "",
+                    "plan_coding_latency": r.llm_usage_trace.get("plan_coding", {}).get("total_latency_seconds", "") if r.llm_usage_trace else "",
+                    "evaluation_model": r.llm_usage_trace.get("evaluation", {}).get("primary_model", "") if r.llm_usage_trace else "",
+                    "evaluation_latency": r.llm_usage_trace.get("evaluation", {}).get("total_latency_seconds", "") if r.llm_usage_trace else "",
+                    "judge_model": r.llm_usage_trace.get("judge", {}).get("primary_model", "") if r.llm_usage_trace else "",
+                    "fallback_triggers": r.llm_usage_trace.get("plan_coding", {}).get("fallback_triggers", "") if r.llm_usage_trace else "",
                     # 该任务本轮聚合指标
                     "task_success_rate": round(round_result.success_rate, 4),
                     "task_avg_best_score": round(round_result.avg_best_score, 4) if round_result.avg_best_score is not None else "",

@@ -46,7 +46,10 @@ async def start_benchmark(request: StartBenchmarkRequest):
             num_runs=request.num_runs,
             plan_coding_llm_config=request.plan_coding_llm_config,
             judge_llm_config=request.judge_llm_config,
-            max_wait_seconds=request.max_wait_seconds
+            max_wait_seconds=request.max_wait_seconds,
+            plan_llm_config=request.plan_llm_config,
+            coding_llm_config=request.coding_llm_config,
+            unified_llm_config=request.unified_llm_config,
         )
 
         with _evaluator_lock:

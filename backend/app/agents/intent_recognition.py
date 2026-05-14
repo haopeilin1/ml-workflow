@@ -17,15 +17,20 @@ logger = logging.getLogger(__name__)
 
 class IntentResult:
     """意图识别结果"""
-    def __init__(self, target_column: str, task_type: TaskType, eval_metric: Optional[str] = None, complexity: str = "simple", is_time_series: bool = False):
+    def __init__(self, target_column: str, task_type: TaskType, eval_metric: Optional[str] = None, complexity: str = "simple", is_time_series: bool = False, complexity_reason: Optional[str] = None):
         self.target_column = target_column
         self.task_type = task_type
         self.eval_metric = eval_metric
         self.complexity = complexity  # "simple" 或 "complex"
         self.is_time_series = is_time_series  # 是否为时序任务
+        self.complexity_reason = complexity_reason  # 复杂度判定原因说明
 
     def __repr__(self):
-        return f"IntentResult(target={self.target_column}, type={self.task_type.value}, metric={self.eval_metric}, complexity={self.complexity}, ts={self.is_time_series})"
+        return f"IntentResult(target={self.target_column}, type={self.task_type.value}, metric={self.eval_metric}, complexity={self.complexity}, ts={self.is_time_series}, reason={self.complexity_reason})"
+    
+    def get_complexity_reason(self) -> str:
+        """获取复杂度判定原因的简短描述"""
+        return self.complexity_reason or "LLM直接判定"
 
 
 class IntentRecognitionAgent(BaseAgent):
@@ -93,10 +98,14 @@ class IntentRecognitionAgent(BaseAgent):
      * 高维稀疏特征（列数 > 50 且大量零值）
    - 无上述信号则判定为 simple
 
-5. is_time_series（时序任务判定）
-   - 如果数据中存在时间相关列（如 year/month/day/hour/dteday/No/instant/date/datetime/season/week 等），且任务是预测未来的某个指标，则判定为 true
-   - 否则判定为 false
-   - 注意：即使 task_type 是 regression，只要有明显的时间列且任务语义涉及时序预测，也判定为 true
+5. is_time_series（时序任务判定）——【请特别谨慎】
+   - 时序任务的真正定义：数据按**完整的时间戳**排列（如 year+month+day+hour），目标是基于历史时间序列预测未来值。
+   - 【强信号】有 year(2000-2030) + month(1-12) + day(1-31) 组合，或有 dteday/Date 日期列 → 判定为 true
+   - 【强信号】任务描述明确提到"时序回归""按时间顺序""预测未来趋势" → 判定为 true
+   - 【排除信号】仅有一个 Time/Timestamp 列（如信用卡交易的秒级时间戳），但无 year/month/day → 判定为 false（这是交易时刻，不是时间序列索引）
+   - 【排除信号】month 列全是 0 或同一个值 → 判定为 false
+   - 【排除信号】仅有 hour 列但无 year/month/day → 判定为 false（孤立的小时段不是时序）
+   - 默认判定为 false，除非有明确的时间序列证据
 
 【输出格式】
 严格输出 JSON，不要任何额外文字：
@@ -182,21 +191,32 @@ class IntentRecognitionAgent(BaseAgent):
 
             task_type = self._map_task_type(task_type_str)
 
+            # 【关键修复】先进行时序判定校正，再校正 complexity
+            # 原 bug：_correct_complexity 使用 LLM 原始返回的 is_time_series，
+            # 导致时序任务无法触发 complexity=complex 强制升级
+            is_time_series, ts_reason = self._detect_time_series(
+                columns, row_count, task_description, is_time_series
+            )
+            if ts_reason:
+                logger.info(f"[IntentRecognition] 时序判定校正: ts={is_time_series}, reason={ts_reason}")
+
             # 规则校正 complexity：防止 LLM（尤其是小模型）判定过于保守
-            complexity = self._correct_complexity(
+            complexity, complexity_reason = self._correct_complexity(
                 columns, row_count, col_count, target_column, task_type, complexity, is_time_series
             )
 
             logger.info(
                 f"[IntentRecognition] 识别结果: target={target_column}, "
-                f"type={task_type.value}, metric={eval_metric}, complexity={complexity}, ts={is_time_series}"
+                f"type={task_type.value}, metric={eval_metric}, complexity={complexity}, ts={is_time_series}, "
+                f"reason={complexity_reason}"
             )
             return IntentResult(
                 target_column=target_column,
                 task_type=task_type,
                 eval_metric=eval_metric,
                 complexity=complexity,
-                is_time_series=is_time_series
+                is_time_series=is_time_series,
+                complexity_reason=complexity_reason
             )
 
         except Exception as e:
@@ -212,42 +232,55 @@ class IntentRecognitionAgent(BaseAgent):
         task_type: TaskType,
         complexity: str,
         is_time_series: bool
-    ) -> str:
+    ) -> tuple:
         """
         基于数据画像规则校正 complexity，防止 LLM（尤其是 7b 小模型）判定过于保守。
         只要满足任一 complex 信号，强制升级为 complex。
+        
+        Returns:
+            (complexity, reason): 校正后的复杂度及原因说明
         """
         if complexity == "complex":
-            return "complex"
+            return "complex", "LLM直接判定为complex"
 
         # 规则1: 时序任务（已有时间列或 is_time_series=True）
         if is_time_series:
-            logger.info(f"[IntentRecognition] 规则校正: 时序任务强制 complex")
-            return "complex"
+            reason = "时序任务强制complex"
+            logger.info(f"[IntentRecognition] 规则校正: {reason}")
+            return "complex", reason
 
         # 规则2: 多分类任务
         if task_type == TaskType.MULTICLASS_CLASSIFICATION:
-            logger.info(f"[IntentRecognition] 规则校正: 多分类任务强制 complex")
-            return "complex"
+            reason = "多分类任务强制complex"
+            logger.info(f"[IntentRecognition] 规则校正: {reason}")
+            return "complex", reason
 
-        # 规则3: 极度不平衡二分类（最大类占比 > 95%）
+        # 规则3: 极度不平衡二分类（最大类占比 > 95% 或最小类 < 1%）
         if task_type == TaskType.BINARY_CLASSIFICATION and row_count > 0:
             for c in columns:
                 if c.get("name") == target_column:
                     most_common_freq = c.get("mostCommonFreq", 0)
+                    if most_common_freq is None:
+                        most_common_freq = 0
                     if most_common_freq > 0:
                         imbalance_ratio = most_common_freq / row_count
-                        if imbalance_ratio > 0.95:
-                            logger.info(
-                                f"[IntentRecognition] 规则校正: 极度不平衡"
-                                f"(最大类占比{imbalance_ratio:.1%})强制 complex"
-                            )
-                            return "complex"
-                    # 备用：通过 uniqueCount 推断
-                    unique_count = c.get("uniqueCount", 0)
-                    if unique_count == 2:
-                        # 二分类但没有 mostCommonFreq，用通用规则
-                        pass
+                        if imbalance_ratio > 0.90:
+                            reason = f"极度不平衡(最大类占比{imbalance_ratio:.1%})强制complex"
+                            logger.info(f"[IntentRecognition] 规则校正: {reason}")
+                            return "complex", reason
+                    # 【关键增强】mostCommonFreq 缺失时，用 sampleValues 推断
+                    if most_common_freq == 0:
+                        samples = c.get("sampleValues", [])
+                        if samples and len(samples) >= 2:
+                            from collections import Counter
+                            sample_counter = Counter(str(v) for v in samples)
+                            if sample_counter:
+                                most_common_count = sample_counter.most_common(1)[0][1]
+                                inferred_ratio = most_common_count / len(samples)
+                                if inferred_ratio >= 0.85:
+                                    reason = f"极度不平衡(sampleValues推断最大类占比{inferred_ratio:.0%})强制complex"
+                                    logger.info(f"[IntentRecognition] 规则校正: {reason}")
+                                    return "complex", reason
                     break
 
         # 规则4: 严重缺失值（任意列缺失率 > 20%）
@@ -255,18 +288,158 @@ class IntentRecognitionAgent(BaseAgent):
             for c in columns:
                 missing_count = c.get("missingCount", 0)
                 if missing_count / row_count > 0.20:
-                    logger.info(
-                        f"[IntentRecognition] 规则校正: 列 '{c['name']}' "
-                        f"缺失率{missing_count/row_count:.1%}强制 complex"
-                    )
-                    return "complex"
+                    reason = f"列'{c['name']}'缺失率{missing_count/row_count:.1%}强制complex"
+                    logger.info(f"[IntentRecognition] 规则校正: {reason}")
+                    return "complex", reason
 
         # 规则5: 高维稀疏（列数 > 50）
         if col_count > 50:
-            logger.info(f"[IntentRecognition] 规则校正: 高维数据({col_count}列)强制 complex")
-            return "complex"
+            reason = f"高维数据({col_count}列)强制complex"
+            logger.info(f"[IntentRecognition] 规则校正: {reason}")
+            return "complex", reason
 
-        return complexity
+        return complexity, "LLM判定为simple，无复杂信号触发"
+
+    def _detect_time_series(
+        self,
+        columns: List[Dict],
+        row_count: int,
+        task_description: str,
+        llm_is_time_series: bool
+    ) -> tuple:
+        """
+        基于数据画像规则检测时序任务，校正 LLM 的时序判断。
+        
+        核心原则：时序数据的关键特征是【时间维度单调递增】，
+        不能仅凭列名含 "time" 就判定（如信用卡欺诈的 Time 是随机交易时刻）。
+        
+        改进点：
+        1. 使用 isMonotonic 特征区分"时间戳"vs"时间序列索引"
+        2. 使用 isDateParseable 特征识别日期字符串列
+        3. 不强制排除，而是基于证据强度判断
+        
+        Returns:
+            (is_time_series, reason)
+        """
+        task_desc_lower = task_description.lower() if task_description else ""
+        
+        # ========== 0. 任务描述强信号 ==========
+        ts_keywords = ["时序回归", "时间序列", "按时间顺序", "时序预测", "time series", "temporal", "sequential"]
+        if any(kw in task_desc_lower for kw in ts_keywords):
+            return True, "任务描述明确涉及时序"
+        
+        # ========== 1. 提取候选时间列及其特征 ==========
+        year_col = None
+        month_col = None
+        day_col = None
+        hour_col = None
+        dt_col = None           # 可解析为日期的列
+        monotonic_time_col = None   # 单调递增的时间相关列
+        monotonic_seq_col = None    # 单调递增的序列索引列
+        
+        for c in columns:
+            name = c.get("name", "").lower()
+            most_common = c.get("mostCommon", "")
+            is_mono = c.get("isMonotonic", False)
+            is_date = c.get("isDateParseable", False)
+            unique_count = c.get("uniqueCount", 0)
+            
+            # 日期字符串列（通过 isDateParseable 或列名识别）
+            if is_date or name in ["dteday", "date", "datetime"]:
+                dt_col = c
+                continue
+            
+            # year 列：值在 2000-2030 范围内
+            if name == "year":
+                try:
+                    val = int(most_common) if most_common else 0
+                    if 2000 <= val <= 2030:
+                        year_col = c
+                except:
+                    pass
+            
+            # month 列：值在 1-12 范围内
+            elif name in ["month", "mnth"]:
+                try:
+                    val = int(most_common) if most_common else 0
+                    if 1 <= val <= 12:
+                        month_col = c
+                except:
+                    pass
+            
+            # day 列：值在 1-31 范围内
+            elif name == "day":
+                try:
+                    val = int(most_common) if most_common else 0
+                    if 1 <= val <= 31:
+                        day_col = c
+                except:
+                    pass
+            
+            # hour 列：值在 0-23 范围内
+            elif name in ["hour", "hr"]:
+                try:
+                    val = int(most_common) if most_common else 0
+                    if 0 <= val <= 23:
+                        hour_col = c
+                except:
+                    pass
+            
+            # 【关键改进】单调递增的时间相关列
+            # 包括：timestamp, time（如果是单调的，说明是时间序列索引而非随机交易时刻）
+            elif name in ["timestamp", "time", "epoch", "unix_time"]:
+                if is_mono and unique_count == row_count:
+                    monotonic_time_col = c
+            
+            # 单调递增的序列索引（如 instant, No）
+            elif name in ["instant", "no"]:
+                if is_mono and unique_count == row_count and row_count > 100:
+                    monotonic_seq_col = c
+        
+        # ========== 2. 强信号：完整时间戳或日期列 ==========
+        if year_col and month_col:
+            return True, f"有year+month{'+day' if day_col else ''}{'+hour' if hour_col else ''}构成完整时间戳"
+        
+        if dt_col:
+            return True, f"有日期列{dt_col['name']}"
+        
+        # ========== 3. 【关键改进】单调递增时间戳 ==========
+        # 如果 Time/Timestamp 列是单调递增的，说明是时间序列索引（如传感器数据）
+        if monotonic_time_col:
+            return True, f"有单调递增时间列{monotonic_time_col['name']}"
+        
+        # ========== 4. 弱信号：单调递增索引 + 其他时间特征 ==========
+        has_season = any(c.get("name", "").lower() == "season" for c in columns)
+        has_weekday = any(c.get("name", "").lower() in ["weekday", "week_day"] for c in columns)
+        
+        if monotonic_seq_col and (has_season or has_weekday or hour_col):
+            return True, f"有单调递增索引{monotonic_seq_col['name']}+{ 'season' if has_season else ''}{ 'weekday' if has_weekday else ''}{ 'hour' if hour_col else ''}"
+        
+        # ========== 5. 否定信号（仅降低置信度，不强制排除） ==========
+        # 5a. Time 列非单调（随机交易时刻，如信用卡欺诈）
+        for c in columns:
+            name = c.get("name", "").lower()
+            if name in ["time", "timestamp"]:
+                is_mono = c.get("isMonotonic", False)
+                if not is_mono:
+                    # Time 列非单调 → 不是时序
+                    return False, f"{c['name']}列非单调（随机交易时刻，非时间序列）"
+        
+        # 5b. month 列无效（全是0）
+        for c in columns:
+            if c.get("name", "").lower() in ["month", "mnth"]:
+                most_common = c.get("mostCommon", "")
+                try:
+                    val = int(most_common) if most_common else 0
+                    if val == 0:
+                        return False, "month列全是0（无效时间列）"
+                except:
+                    pass
+        
+        # ========== 6. 默认信任 LLM ==========
+        if llm_is_time_series:
+            return True, "LLM判定为时序（数据画像无明确否定信号）"
+        return False, "无时间列特征"
 
     def _parse_json(self, content: str) -> dict:
         """从 LLM 输出中提取 JSON"""
@@ -347,6 +520,7 @@ class IntentRecognitionAgent(BaseAgent):
                     task_type=task_type,
                     eval_metric=eval_metric,
                     complexity="simple",
+                    complexity_reason="规则fallback推断",
                     is_time_series=is_time_series
                 )
 

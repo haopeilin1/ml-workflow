@@ -1,0 +1,96 @@
+{
+  "version": "1.0",
+  "description": "按错误类型整理的知识库（储存阶段，暂未启用）",
+  "patterns": [
+    {
+      "error_type": "LIGHTGBM_STRING_DTYPE",
+      "error_keywords": ["pandas dtypes must be int, float or bool", "bad pandas dtypes"],
+      "root_cause": "类别特征列（dtype=object/str）未编码为数值，直接传入 LightGBM/XGBoost/sklearn 模型",
+      "affected_models": ["LGBMClassifier", "LGBMRegressor", "XGBClassifier", "XGBRegressor", "LogisticRegression"],
+      "solution": "使用 sklearn ColumnTransformer + OneHotEncoder/OrdinalEncoder 将类别列编码为数值，嵌入 Pipeline",
+      "solution_code": "from sklearn.compose import ColumnTransformer\nfrom sklearn.preprocessing import OneHotEncoder, StandardScaler\nfrom sklearn.impute import SimpleImputer\nfrom sklearn.pipeline import Pipeline\n\ncat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()\nnum_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()\n\npreprocessor = ColumnTransformer([\n    ('cat', Pipeline([\n        ('imputer', SimpleImputer(strategy='most_frequent')),\n        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))\n    ]), cat_cols),\n    ('num', Pipeline([\n        ('imputer', SimpleImputer(strategy='median')),\n        ('scaler', StandardScaler())\n    ]), num_cols)\n], remainder='passthrough')\n\npipeline = Pipeline([\n    ('preprocess', preprocessor),\n    ('model', LGBMClassifier(random_state=42))\n])",
+      "prevention_prompt": "所有类别特征列（dtype=object/str/categorical）必须在传入模型前编码为数值。严禁直接将包含字符串列的 DataFrame 喂给树模型。",
+      "first_seen_task": "肝硬化患者状态预测",
+      "first_seen_date": "2026-05-12",
+      "debug_effectiveness": "低 - 代码模型反复忽略预处理步骤，Debug prompt 的'历史错误清单'未能有效阻止重复犯错",
+      "notes": "INIT prompt 中已增加强制规则和完整示例，待验证效果"
+    },
+    {
+      "error_type": "LIGHTGBM_DEPRECATED_API",
+      "error_keywords": ["unexpected keyword argument 'early_stopping_rounds'", "unexpected keyword argument 'verbose'"],
+      "root_cause": "LightGBM 4.6.0 已移除 fit() 中的 early_stopping_rounds/verbose/eval_at 参数",
+      "affected_models": ["LGBMClassifier", "LGBMRegressor"],
+      "solution": "使用 callbacks=[lgb.early_stopping(stopping_rounds=50)] 替代",
+      "prevention_prompt": "LGBMClassifier.fit() 中严禁使用 early_stopping_rounds/verbose/eval_at 参数",
+      "first_seen_task": "信用卡欺诈检测",
+      "first_seen_date": "2026-05-11",
+      "debug_effectiveness": "高 - Debug prompt 中的历史错误清单能有效阻止重复犯错"
+    },
+    {
+      "error_type": "SKLEARN_LOGISTIC_REGRESSION_MULTICLASS",
+      "error_keywords": ["unexpected keyword argument 'multi_class'", "liblinear solver does not support multiclass"],
+      "root_cause": "sklearn 1.6+ 已移除 LogisticRegression 的 multi_class 参数；liblinear solver 不支持多分类",
+      "affected_models": ["LogisticRegression"],
+      "solution": "多分类任务使用 solver='lbfgs'（默认）或 'newton-cg'/'sag'/'saga'，不传 multi_class 参数",
+      "prevention_prompt": "LogisticRegression 严禁传入 multi_class 参数；多分类严禁使用 solver='liblinear'",
+      "first_seen_task": "睡眠障碍预测",
+      "first_seen_date": "2026-05-12",
+      "debug_effectiveness": "中 - 需要 prompt 中明确给出正确示例"
+    },
+    {
+      "error_type": "IMBALANCED_LEARN_DATA_LEAKAGE",
+      "error_keywords": ["SMOTE", "RandomOverSampler", "fit 验证集"],
+      "root_cause": "重采样器（SMOTE/RandomOverSampler）fit 了验证集或全量数据，导致数据泄露",
+      "affected_models": ["SMOTE", "RandomOverSampler", "RandomUnderSampler"],
+      "solution": "重采样器只能 fit 训练集；在 Pipeline 中必须使用 imblearn.pipeline.Pipeline（不是 sklearn.pipeline.Pipeline）",
+      "prevention_prompt": "SMOTE/RandomOverSampler 只能 fit 训练集，严禁 fit 验证集/测试集；Pipeline 中必须用 imblearn.pipeline.Pipeline",
+      "first_seen_task": "信用卡欺诈检测",
+      "first_seen_date": "2026-05-11",
+      "debug_effectiveness": "高"
+    },
+    {
+      "error_type": "CATEGORY_ENCODER_DATA_LEAKAGE",
+      "error_keywords": ["TargetEncoder", "LeaveOneOutEncoder"],
+      "root_cause": "编码器 fit 了验证集或全量数据，导致数据泄露",
+      "affected_models": ["TargetEncoder", "LeaveOneOutEncoder"],
+      "solution": "编码器只能 fit 训练集，验证/测试集用 transform()",
+      "prevention_prompt": "TargetEncoder/LeaveOneOutEncoder 只能 fit 训练集，严禁 fit 验证集/测试集",
+      "first_seen_task": "信用卡欺诈检测",
+      "first_seen_date": "2026-05-11",
+      "debug_effectiveness": "高"
+    },
+    {
+      "error_type": "TRAIN_TEST_SPLIT_FORBIDDEN",
+      "error_keywords": ["import train_test_split", "train_test_split"],
+      "root_cause": "代码中 import 或使用了 train_test_split，但系统已预先切分好验证集",
+      "solution": "直接使用 data/validation.csv，严禁重新切分",
+      "prevention_prompt": "严禁 import train_test_split，即使不使用也不允许导入",
+      "first_seen_task": "多任务",
+      "first_seen_date": "2026-05-11",
+      "debug_effectiveness": "高"
+    },
+    {
+      "error_type": "FUNCTION_TRANSFORMER_DTYPE_MISMATCH",
+      "error_keywords": ["InvalidIndexError", "slice(None, None, None)", "FunctionTransformer"],
+      "root_cause": "FunctionTransformer 的 func 中假设输入为 numpy 数组，使用 X[:, i] 等 numpy 切片语法，但实际传入的是 pandas DataFrame",
+      "affected_models": ["FunctionTransformer"],
+      "solution": "在 FunctionTransformer 的 func 中使用 pandas 兼容写法（X.copy() + for col in X.columns）或先用 X.to_numpy() 转换",
+      "solution_code": "# 方法1：兼容 DataFrame 写法\ndef log_transform_df(X):\n    X = X.copy()\n    for col in X.columns:\n        if X[col].min() >= 0:\n            X[col] = np.log1p(X[col])\n    return X\n\nlog_tf = FunctionTransformer(log_transform_df)\n\n# 方法2：如果确定输入是 numpy array\ndef log_transform_np(X):\n    return np.log1p(X)\n\nlog_tf = FunctionTransformer(log_transform_np)",
+      "prevention_prompt": "FunctionTransformer 的 func 接收的参数可能是 pandas DataFrame 或 numpy array，严禁使用 X[:, i] 等 numpy 切片语法。应使用 X.copy() + for col in X.columns 或 X.to_numpy()[:, i] 等兼容写法。",
+      "first_seen_task": "肝硬化患者状态预测",
+      "first_seen_date": "2026-05-12",
+      "debug_effectiveness": "未知 - 首次发现，已在 INIT prompt 中增加示例，待验证效果",
+      "notes": "该错误发生在 ColumnTransformer 之前直接对 DataFrame 应用 FunctionTransformer 的场景"
+    },
+    {
+      "error_type": "TEST_CSV_IN_TRAINING_PHASE",
+      "error_keywords": ["data/test.csv", "No such file or directory: 'data/test.csv'"],
+      "root_cause": "训练阶段代码尝试读取 data/test.csv，但沙箱中只有 train.csv 和 validation.csv",
+      "solution": "训练阶段只读取 data/train.csv 和 data/validation.csv，test.csv 在产物生成阶段才可用",
+      "prevention_prompt": "训练阶段严禁读取 data/test.csv，只有 train.csv 和 validation.csv",
+      "first_seen_task": "肝硬化患者状态预测",
+      "first_seen_date": "2026-05-12",
+      "debug_effectiveness": "中"
+    }
+  ]
+}

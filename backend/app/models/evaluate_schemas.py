@@ -20,6 +20,8 @@ class BenchmarkTaskConfig(BaseModel):
     task_type: TaskType = TaskType.BINARY_CLASSIFICATION
     eval_metric: Optional[str] = None
     id_column: Optional[str] = None  # 从 ground_truth 自动推断
+    data_profile: Optional[Dict[str, Any]] = None  # 数据画像（供PlanCodingAgent使用）
+    complexity_reason: Optional[str] = None  # 复杂度判定原因
 
 
 class TestSetMetrics(BaseModel):
@@ -34,16 +36,8 @@ class TestSetMetrics(BaseModel):
     r2: Optional[float] = None
 
 
-class ArtifactInfo(BaseModel):
-    """产物生成情况检测"""
-    prediction_file: bool = False        # output/test_predictions.csv
-    model_file: bool = False             # output/model.pkl
-    feature_importance_csv: bool = False # output/feature_importance.csv
-    feature_importance_png: bool = False # output/feature_importance.png
-    report_html: bool = False            # output/report.html
-    report_fig_png: bool = False         # output/report_fig.png
-    predict_script: bool = False         # output/predict.py
-    completeness: str = "none"           # full / simplified / partial / none
+# 【修复】从 schemas.py 导入统一的 ArtifactInfo，避免字段不一致
+from app.models.schemas import ArtifactInfo
 
 
 class JudgeResult(BaseModel):
@@ -56,6 +50,7 @@ class JudgeResult(BaseModel):
 
 class TimingBreakdown(BaseModel):
     """各阶段耗时分解"""
+    intent_recognition_seconds: float = 0.0  # 意图识别耗时
     code_generation_seconds: float = 0.0
     sandbox_execution_seconds: float = 0.0
     evaluation_seconds: float = 0.0
@@ -101,6 +96,15 @@ class BenchmarkTaskResult(BaseModel):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     result_dir: Optional[str] = None  # 中间结果保存目录
     artifacts: ArtifactInfo = Field(default_factory=ArtifactInfo)  # 产物生成情况
+    
+    # 【新增】各环节实际使用的 LLM 追踪（含 fallback 情况）
+    llm_usage_trace: Dict[str, Any] = Field(default_factory=dict)  # {
+    #   "intent": {"model": "qwen3.6-27b", "provider": "fallback1-local", "calls": 1},
+    #   "plan": {"model": "deepseek-v4-pro", "provider": "openai", "calls": 2},
+    #   "coding": {"model": "deepseek-v4-pro", "provider": "openai", "calls": 5},
+    #   "evaluation": {"model": "qwen3.6-27b", "provider": "fallback1-local", "calls": 4},
+    #   "judge": {"model": "qwen3.5-flash", "provider": "openai", "calls": 1}
+    # }
 
 
 class BenchmarkRoundResult(BaseModel):
@@ -155,6 +159,11 @@ class StartBenchmarkRequest(BaseModel):
     plan_coding_llm_config: Optional[LLMConfig] = None
     judge_llm_config: Optional[LLMConfig] = None
     max_wait_seconds: int = 600  # 每个任务最大等待时间
+    # 【新增】Plan / Coding / Unified Agent 独立 LLM 配置
+    # 若未传入，自动回退到 plan_coding_llm_config
+    plan_llm_config: Optional[LLMConfig] = None
+    coding_llm_config: Optional[LLMConfig] = None
+    unified_llm_config: Optional[LLMConfig] = None
 
 
 class StartBenchmarkResponse(BaseModel):

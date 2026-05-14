@@ -1,0 +1,1 @@
+建议对median_house_value做标准化处理（注意目标值被截断在500001）。地理位置特征可考虑聚类或构造区域特征。ocean_proximity为类别特征需编码。total_rooms和total_bedrooms高度相关，建议构造人均房间数等衍生特征。
