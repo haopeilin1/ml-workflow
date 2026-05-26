@@ -21,14 +21,13 @@ from app.models.schemas import EvaluationResult, DecisionType, ExecutionMetrics,
 logger = logging.getLogger(__name__)
 
 # ========== System Prompt ==========
-EVALUATION_SYSTEM_PROMPT = """你是一名资深机器学习评估专家与架构师。
+EVALUATION_SYSTEM_PROMPT = """你是一名资深机器学习评估专家。
 当前正在"Fast Engine（快速基线引擎）"模式下。模型代码已成功在沙箱中运行并没有报错。
 
-你的双重任务：
-1. 评估当前模型效果（多维度评分 + 决策）
-2. 如果决定 AUTO_OPTIMIZE，同时输出下一轮的结构化重新规划计划和方法总结
+【重要】你的评估必须基于【实际运行指标 Metrics】和【沙箱输出 stdout】，严禁基于【代码片段】做技术判断（代码片段可能不完整）。
 
-【重要】你将在一次输出中完成所有任务，不要分两次调用。
+你的唯一任务：评估当前模型效果（多维度评分 + 决策 + 优化建议）。
+你**不负责**生成具体的优化计划——计划由专门的 PlanAgent 来做。
 
 Input Context
 - 【任务目标 Task Target】: 例如：预测是否流失，看重 AUC 指标
@@ -39,8 +38,8 @@ Input Context
 Evaluation Rules
 请仔细评估当前指标，并从以下两种决策中选择一种：
 1. 【DECISION: AUTO_OPTIMIZE】(判断需要调优，打回重构)
-  - 触发条件：当前分数极差，或存在极为严重的过拟合/欠拟合问题，并且 内部优化轮数（Optimize Round）< 3。
-  - 要求：此时坚决不能把半成品丢给用户。你必须根据当前方案的具体问题，提出有针对性的优化建议。
+  - 触发条件：当前分数有提升空间，或存在过拟合/欠拟合问题，并且 内部优化轮数（Optimize Round）< 3。
+  - 要求：提出有针对性的优化建议（给后续 PlanAgent 参考）。
     【建议类型举例（不要局限于这些，要因问题而异）】
     - 调参类："当前 max_depth=3 过浅导致欠拟合，尝试 6~10"
     - 特征类："某数值特征范围差异过大，应加入标准化"
@@ -52,23 +51,34 @@ Evaluation Rules
   - 触发条件：模型基线已达到及格水平，或者 内部自动优化次数已达到 3 次上限。
   - 要求：生成一段面向非专业用户的汇报总结。
 
+【核心指标缺失的强制规则】
+如果当前验证集核心指标（val_auc / val_rmse / val_accuracy）为 None 或缺失，说明模型训练完全失败。
+此时：
+- score 必须给极低分（< 20）
+- 如果 optimize_round > 0（不是初始代码），必须决策 YIELD_TO_USER
+- suggestions 中必须指出"模型训练失败，验证指标缺失"
+
 Scoring Criteria (多维度评分，每项 0-100)
 【重要】每个维度的 reason 字段请控制在 20 个汉字以内。
 
 1. 【指标表现 metric_performance】权重 30%
+   - 评分核心：以【核心评估指标 Core Metric】为首要标准。
+   - 二分类参考：AUC > 0.9 优秀，0.8-0.9 良好，0.7-0.8 及格，< 0.7 较差。
+   - 多分类参考：accuracy > 0.9 优秀，0.85-0.9 良好，0.7-0.85 及格。
+   - 回归参考：RMSE/MAE 越低越好，R2 > 0.85 优秀，0.7-0.85 良好。
+   - 辅助指标仅作参考，不得喧宾夺主。
 2. 【过拟合控制 overfit_control】权重 25%
 3. 【算法选择 algorithm_choice】权重 20%
-4. 【Pipeline 完整性 pipeline_completeness】权重 15%
-5. 【任务匹配度 task_alignment】权重 10%
+4. 【代码完整性 code_completeness】权重 15%
+5. 【任务匹配度 task_alig
+nment】权重 10%
 
 Output Format (Strict JSON)
-你必须严格输出如下 JSON 格式（不要包含 markdown 代码块标记）。
-【关键】replan_output 是核心字段，必须放在 JSON 前面，确保不被截断：
+你必须严格输出如下 JSON 格式（不要包含 markdown 代码块标记）：
 {
   "decision": "AUTO_OPTIMIZE",
   "score": 79.5,
   "method_summary": "本轮使用了XGBoost(max_depth=3)，存在欠拟合。关键代码特征：使用了ColumnTransformer+OneHotEncoder。主要问题：树深度过浅。",
-  "replan_output": "【重新规划】基于评估结果，下一轮优化方向：must_do: 1.增加树深度到6-8 2.添加类别权重处理不平衡 avoid: 1.重复之前的浅树方案",
   "suggestions_for_coding_agent": "具体技术建议...",
   "report_to_user": null,
   "evaluation_analysis": "对本次运行结果的客观专业分析",
@@ -76,7 +86,7 @@ Output Format (Strict JSON)
     {"name": "metric_performance", "score": 78, "weight": 0.30, "reason": "AUC 0.82 超及格线"},
     {"name": "overfit_control", "score": 85, "weight": 0.25, "reason": "差距仅3%"},
     {"name": "algorithm_choice", "score": 80, "weight": 0.20, "reason": "XGBoost适合该任务"},
-    {"name": "pipeline_completeness", "score": 75, "weight": 0.15, "reason": "流程完整"},
+    {"name": "code_completeness", "score": 75, "weight": 0.15, "reason": "流程完整"},
     {"name": "task_alignment", "score": 70, "weight": 0.10, "reason": "匹配目标"}
   ]
 }
@@ -85,15 +95,10 @@ Output Format (Strict JSON)
 1. decision: 先输出决策，AUTO_OPTIMIZE 或 YIELD_TO_USER
 2. score: 加权总分
 3. method_summary: 用1-2句话总结模型、关键问题
-4. replan_output（仅 AUTO_OPTIMIZE 时）: 
-   - 必须简洁，控制在300字以内
-   - 格式: 【重新规划】must_do: ... avoid: ...
-   - 基于上一轮实际结果，量化问题
-   - 历史失败策略必须在 avoid 中列出
-5. suggestions_for_coding_agent: 给 CodingAgent 的技术建议
-6. report_to_user（仅 YIELD_TO_USER 时）: 面向用户的汇报
-7. evaluation_analysis: 专业分析
-8. dimension_scores: 5个维度评分，每个 reason 控制在20字以内"""
+4. suggestions_for_coding_agent: 给 PlanAgent/CodingAgent 的技术建议（具体、可操作）
+5. report_to_user（仅 YIELD_TO_USER 时）: 面向用户的汇报
+6. evaluation_analysis: 专业分析
+7. dimension_scores: 5个维度评分，每个 reason 控制在20字以内"""
 
 
 class EvaluationAgent(BaseAgent):
@@ -112,7 +117,7 @@ class EvaluationAgent(BaseAgent):
         "metric_performance": 0.30,
         "overfit_control": 0.25,
         "algorithm_choice": 0.20,
-        "pipeline_completeness": 0.15,
+        "code_completeness": 0.15,
         "task_alignment": 0.10,
     }
 
@@ -131,10 +136,12 @@ class EvaluationAgent(BaseAgent):
         """
         评估模型效果并决策
 
-        【架构变更】一次 LLM 调用同时完成：
-        1. 多维度评估 + 决策
+        职责：
+        1. 多维度评估 + 决策 (AUTO_OPTIMIZE / YIELD_TO_USER)
         2. 方法总结 (method_summary)
-        3. 重新规划 (replan_output，仅 AUTO_OPTIMIZE 时)
+        3. 优化建议 (suggestions_for_coding_agent)
+        
+        注意：不再生成 replan_output。优化计划由 PlanAgent 负责。
 
         Args:
             evaluation_history: 历史评估记录列表，每项包含 {round, score, decision, suggestions, method_summary}
@@ -156,23 +163,14 @@ class EvaluationAgent(BaseAgent):
         # 校验/修正加权总分
         result = self._normalize_score(result)
 
-        # 【关键兜底】AUTO_OPTIMIZE 时必须提供 replan_output，否则从 suggestions 构建
-        if result.decision == DecisionType.AUTO_OPTIMIZE and not result.replan_output:
-            if result.suggestions_for_coding_agent:
-                result.replan_output = self._build_replan_from_suggestions(result.suggestions_for_coding_agent)
-                logger.info(f"[EvaluationAgent] 从 suggestions 自动构建 replan_output, 长度={len(result.replan_output)}")
-            else:
-                result.replan_output = self._build_replan_from_suggestions("")
-                logger.warning("[EvaluationAgent] AUTO_OPTIMIZE 但无 suggestions，使用空 replan")
-
         logger.info(f"[EvaluationAgent] 决策: {result.decision}, score={result.score}")
         if result.dimension_scores:
             for ds in result.dimension_scores:
                 logger.info(f"  [{ds.name}] {ds.score}/100 (weight={ds.weight}) {ds.reason[:60]}...")
         if result.method_summary:
             logger.info(f"[EvaluationAgent] 方法总结: {result.method_summary[:120]}...")
-        if result.replan_output:
-            logger.info(f"[EvaluationAgent] 重新规划长度: {len(result.replan_output)}")
+        if result.suggestions_for_coding_agent:
+            logger.info(f"[EvaluationAgent] 建议: {result.suggestions_for_coding_agent[:120]}...")
 
         return result
 
@@ -225,15 +223,30 @@ class EvaluationAgent(BaseAgent):
                     history_lines.append(f"    建议: {hist_suggestions[:100]}")
             history_section = "\n".join(history_lines) + "\n"
 
-        # 代码摘要（用于方法总结）【精简至500字符以内】
+        # 代码摘要（仅用于 method_summary 描述技术选型，不做技术判断依据）
+        # 【修复】提取关键代码行（模型定义、预处理配置），而非截断前500字符
         code_summary = ""
         if current_code:
+            # 提取关键行：模型定义、编码器、scale_pos_weight、class_weight、SMOTE、train_test_split 等
+            key_lines = []
+            for line in current_code.split('\n'):
+                stripped = line.strip()
+                if any(kw in stripped for kw in [
+                    'LGBMClassifier', 'LGBMRegressor', 'XGBClassifier', 'XGBRegressor',
+                    'RandomForest', 'LogisticRegression', 'Ridge', 'Lasso',
+                    'scale_pos_weight', 'class_weight', 'SMOTE', 'RandomOverSampler',
+                    'OneHotEncoder', 'OrdinalEncoder', 'StandardScaler',
+                    'ColumnTransformer', 'Pipeline',
+                    'early_stopping', 'eval_set', 'train_test_split'
+                ]):
+                    key_lines.append(line)
+            key_code = '\n'.join(key_lines[:30])  # 最多30行关键代码
             code_summary = f"""
-【本轮代码摘要】（用于生成 method_summary，已精简至前500字符）：
+【本轮关键代码片段】（仅用于 method_summary 描述技术选型，严禁基于代码片段做技术判断）：
 ```python
-{current_code[:500]}
+{key_code}
 ```
-{"...（代码截断，仅展示前500字符）" if len(current_code) > 500 else ""}
+{"...（仅展示关键行）" if len(key_lines) > 30 else ""}
 """
 
         prompt = f"""【任务目标 Task Target】: {task_target}{metric_section}
@@ -253,9 +266,8 @@ class EvaluationAgent(BaseAgent):
 【内部优化轮数 Optimize Round】: {optimize_round} / {max_optimize_rounds}
 {"【注意】已达到最大优化轮数上限，必须强制 YIELD_TO_USER。" if optimize_round >= max_optimize_rounds else ""}
 
-请根据以上信息，严格按照 JSON 格式输出评估结论、方法总结和重新规划（如需要）。
+请根据以上信息，严格按照 JSON 格式输出评估结论、方法总结和优化建议。
 必须包含：dimension_scores 数组、score、decision、method_summary。
-如果 decision=AUTO_OPTIMIZE，必须同时提供详细的 replan_output。
 """
         return prompt
 
@@ -330,8 +342,7 @@ class EvaluationAgent(BaseAgent):
             report_to_user=data.get("report_to_user"),
             score=data.get("score"),
             dimension_scores=dim_scores,
-            method_summary=data.get("method_summary"),
-            replan_output=data.get("replan_output")
+            method_summary=data.get("method_summary")
         )
 
     def _fix_truncated_json(self, json_str: str) -> str:
@@ -357,7 +368,7 @@ class EvaluationAgent(BaseAgent):
     def _extract_from_broken_json(self, json_str: str) -> Optional[EvaluationResult]:
         """从损坏的 JSON 中尽量提取关键字段
         
-        增强版：支持多行字符串提取（method_summary / replan_output / suggestions）
+        增强版：支持多行字符串提取（method_summary / suggestions）
         """
         decision_match = re.search(r'"decision"\s*:\s*"(AUTO_OPTIMIZE|YIELD_TO_USER)"', json_str)
         decision = DecisionType(decision_match.group(1)) if decision_match else DecisionType.YIELD_TO_USER
@@ -370,7 +381,6 @@ class EvaluationAgent(BaseAgent):
         suggestions = self._extract_json_string_field(json_str, "suggestions_for_coding_agent")
         report = self._extract_json_string_field(json_str, "report_to_user")
         method_summary = self._extract_json_string_field(json_str, "method_summary")
-        replan_output = self._extract_json_string_field(json_str, "replan_output")
 
         dim_scores = []
         dim_pattern = r'\{\s*"name"\s*:\s*"([^"]*)"\s*,\s*"score"\s*:\s*(\d+\.?\d*)\s*,\s*"weight"\s*:\s*(\d+\.?\d*)\s*,\s*"reason"\s*:\s*"([^"]*)"\s*\}'
@@ -390,8 +400,7 @@ class EvaluationAgent(BaseAgent):
                 report_to_user=report,
                 score=score,
                 dimension_scores=dim_scores,
-                method_summary=method_summary,
-                replan_output=replan_output
+                method_summary=method_summary
             )
         return None
 
@@ -435,7 +444,7 @@ class EvaluationAgent(BaseAgent):
                 DimensionScore(name="metric_performance", score=default_score, weight=0.30, reason="综合评分兜底"),
                 DimensionScore(name="overfit_control", score=default_score, weight=0.25, reason="综合评分兜底"),
                 DimensionScore(name="algorithm_choice", score=default_score, weight=0.20, reason="综合评分兜底"),
-                DimensionScore(name="pipeline_completeness", score=default_score, weight=0.15, reason="综合评分兜底"),
+                DimensionScore(name="code_completeness", score=default_score, weight=0.15, reason="综合评分兜底"),
                 DimensionScore(name="task_alignment", score=default_score, weight=0.10, reason="综合评分兜底"),
             ]
             if result.score is None:
@@ -458,23 +467,6 @@ class EvaluationAgent(BaseAgent):
 
         return result
 
-    def _build_replan_from_suggestions(self, suggestions: str) -> str:
-        """从 suggestions 构建一个基本的 replan_output（避免回退到 PlanAgent）"""
-        if not suggestions:
-            return "【重新规划】\n基于评估建议进行优化:\n must_do:\n  - 改进模型方案\n avoid:\n  - 重复之前的错误\n"
-        return f"""【重新规划】
-基于评估发现的严重问题，下一轮优化方向如下:
-
-【任务分析】
-  上一轮问题: {suggestions[:200]}
-
-【must_do】
-  - {suggestions[:300]}
-
-【avoid】
-  - 重复之前已失败的优化方向
-"""
-
     def _fallback_parse(self, response: str) -> EvaluationResult:
         """兜底解析"""
         response_upper = response.upper()
@@ -488,7 +480,6 @@ class EvaluationAgent(BaseAgent):
 
         suggestions = None
         report = None
-        replan_output = None
 
         if decision == DecisionType.AUTO_OPTIMIZE:
             sug_match = re.search(r'(?:建议|suggestions|优化).*?(:|：)\s*(.+?)(?:\n\n|$)', response, re.DOTALL)
@@ -496,13 +487,6 @@ class EvaluationAgent(BaseAgent):
                 suggestions = sug_match.group(2).strip()
             else:
                 suggestions = "请尝试更换模型或调整超参数。"
-            # 尝试提取 replan_output
-            replan_match = re.search(r'【结构化建模计划.*?(?:=){20,}(.*?)(?:=){20,}', response, re.DOTALL)
-            if replan_match:
-                replan_output = replan_match.group(0)
-            else:
-                # 兜底：从 suggestions 构建 replan
-                replan_output = self._build_replan_from_suggestions(suggestions)
         else:
             rep_match = re.search(r'(?:汇报|report|总结).*?(:|：)\s*(.+?)(?:\n\n|$)', response, re.DOTALL)
             if rep_match:
@@ -517,7 +501,7 @@ class EvaluationAgent(BaseAgent):
             DimensionScore(name="metric_performance", score=fallback_score, weight=0.30, reason="兜底解析"),
             DimensionScore(name="overfit_control", score=fallback_score, weight=0.25, reason="兜底解析"),
             DimensionScore(name="algorithm_choice", score=fallback_score, weight=0.20, reason="兜底解析"),
-            DimensionScore(name="pipeline_completeness", score=fallback_score, weight=0.15, reason="兜底解析"),
+            DimensionScore(name="code_completeness", score=fallback_score, weight=0.15, reason="兜底解析"),
             DimensionScore(name="task_alignment", score=fallback_score, weight=0.10, reason="兜底解析"),
         ]
 
@@ -528,6 +512,5 @@ class EvaluationAgent(BaseAgent):
             report_to_user=report if decision == DecisionType.YIELD_TO_USER else None,
             score=fallback_score,
             dimension_scores=dim_scores,
-            method_summary="兜底解析，无法提取方法总结。",
-            replan_output=replan_output
+            method_summary="兜底解析，无法提取方法总结。"
         )

@@ -19,7 +19,7 @@ JUDGE_SYSTEM_PROMPT = """你是一名资深机器学习模型评估专家与质�
 
 【重要说明】
 1. 这是"首次交付"的最终判定，不需要提出迭代优化建议。即使判定为拒绝，也不会重新训练模型。
-2. 测试集数据在建模与迭代过程中完全不可见，只在最终交付时进行一次预测。因此测试集指标能真实反映模型的泛化能力。
+2. 测试集特征（test.csv）在建模过程中可用，但真值（ground truth）不在沙箱中，因此代码无法计算测试集指标。测试集指标只能在系统层面通过对比预测结果与真值获得。
 3. 判断时必须以【建模时使用的主要指标】为核心标准：
    - 如果验证集主要指标是 AUC，则重点看测试集 AUC
    - 如果验证集主要指标是 F1，则重点看测试集 F1
@@ -29,7 +29,7 @@ JUDGE_SYSTEM_PROMPT = """你是一名资深机器学习模型评估专家与质�
 
 评估维度：
 1. 核心指标表现：模型在测试集上的【主要指标】是否达到该任务类型的合理基线
-2. 泛化一致性：测试集表现与验证集是否基本一致（差距 < 10% 为良好）
+2. 泛化一致性：测试集表现与验证集是否基本一致（相对差距 < 10% 为良好，< 20% 为可接受）
 3. 过拟合风险：训练集与验证集/测试集指标差距是否过大
 
 判断标准（请灵活判断，不要机械套用固定阈值）：
@@ -44,10 +44,18 @@ JUDGE_SYSTEM_PROMPT = """你是一名资深机器学习模型评估专家与质�
 - 核心指标接近随机水平（如 AUC < 0.6、Accuracy < 0.5、Log Loss > 2.5 等）通常不可接受
 
 特别说明：
-- 如果测试集核心指标与验证集差距过大（如差距 > 0.15），说明泛化能力差，应拒绝
+- 泛化一致性判定应使用【相对差距】而非绝对差距：
+  * 对于 AUC/Accuracy/F1/R²（越高越好）：相对差距 = (val - test) / val
+  * 对于 RMSE/MAE/Log Loss（越低越好）：相对差距 = (test - val) / val
+  * 相对差距 < 10% 为良好，10%-30% 为可接受范围（时序/回归任务可放宽至 50%），> 50% 说明泛化能力差，应拒绝
+- 【时序/回归任务特别放宽】对于时间序列回归任务（如预测、销量、租赁量等），测试集数据通常在验证集之后，可能跨越季节边界或遇到分布自然偏移。此时：
+  * 若 R² > 0.95 或测试集 MAE/RMSE 绝对值很小（如 MAE < 10% 目标均值），即使相对差距达到 30%-50% 也可接受
+  * 应以【测试集绝对指标质量】为主，【验证-测试相对差距】为辅进行综合判断
+  * 不应仅凭 RMSE 相对差距 > 20% 就拒绝一个 R² > 0.98 的高质量回归模型
 - 如果模型存在严重过拟合（训练集指标远高于验证集/测试集），应拒绝
 - 如果模型未成功运行（所有指标为 None），必须拒绝
-- 如果测试集核心指标略低于验证集但在可接受范围内，可以酌情接受
+- 如果验证集核心指标本身已接近随机水平（如 AUC < 0.6、Accuracy < 0.5），即使 test 差距不大也应拒绝
+- 【关键】如果测试集预测使用了通用回退模板（generic fallback），说明预测阶段的特征工程与训练阶段很可能不一致，预测结果不可靠。此时即使指标看起来尚可，也应拒绝，并在 reason 中明确说明"使用了通用回退模板，特征工程不一致导致预测不可靠"。
 
 输出格式（严格 JSON，不要包含 markdown 代码块标记）：
 {
@@ -89,7 +97,8 @@ class EvaluateJudgeAgent(BaseAgent):
         target_column: str,
         eval_metric: Optional[str],
         val_metrics: Optional[ExecutionMetrics],
-        test_metrics: Optional[TestSetMetrics]
+        test_metrics: Optional[TestSetMetrics],
+        prediction_strategy: Optional[str] = None
     ) -> JudgeResult:
         """
         评估模型并决定是否接受
@@ -100,12 +109,13 @@ class EvaluateJudgeAgent(BaseAgent):
             eval_metric: 评估指标名称
             val_metrics: 验证集指标
             test_metrics: 测试集指标
+            prediction_strategy: 测试集预测策略 (llm_predict / injected / generic_fallback)
 
         Returns:
             JudgeResult
         """
         user_prompt = self._build_user_prompt(
-            task_type, target_column, eval_metric, val_metrics, test_metrics
+            task_type, target_column, eval_metric, val_metrics, test_metrics, prediction_strategy
         )
 
         try:
@@ -126,7 +136,8 @@ class EvaluateJudgeAgent(BaseAgent):
         target_column: str,
         eval_metric: Optional[str],
         val_metrics: Optional[ExecutionMetrics],
-        test_metrics: Optional[TestSetMetrics]
+        test_metrics: Optional[TestSetMetrics],
+        prediction_strategy: Optional[str] = None
     ) -> str:
         """构建 Judge 的用户 Prompt"""
 
@@ -187,6 +198,17 @@ class EvaluateJudgeAgent(BaseAgent):
         else:
             test_lines.append("  - 无测试集指标（模型可能未成功运行）")
 
+        # 预测策略说明
+        strategy_lines = []
+        if prediction_strategy == "llm_predict":
+            strategy_lines.append("- 测试集预测策略: LLM 生成的 predict.py（可靠性高）")
+        elif prediction_strategy == "injected":
+            strategy_lines.append("- 测试集预测策略: 注入式预测脚本（复用训练代码自定义定义，可靠性中高）")
+        elif prediction_strategy == "generic_fallback":
+            strategy_lines.append("- 测试集预测策略: 通用回退模板（⚠️ 可靠性低：特征工程可能与训练阶段不一致）")
+        else:
+            strategy_lines.append("- 测试集预测策略: 未知")
+
         return f"""请对以下机器学习模型的最终交付质量进行一次性判定。
 
 【任务信息】
@@ -200,11 +222,15 @@ class EvaluateJudgeAgent(BaseAgent):
 【测试集指标】（测试集在建模过程中完全不可见，仅最终预测一次）
 {chr(10).join(test_lines)}
 
+【预测策略信息】
+{chr(10).join(strategy_lines)}
+
 【判定要求】
 1. 请以【建模时使用的主要指标：{primary_metric or '核心指标'}】为核心判断标准
 2. 重点关注测试集上的该指标表现是否达到可交付水平
 3. 同时检查测试集与验证集指标是否一致（差距是否过大）
-4. 这是最终判定，不需要提出优化建议
+4. 如果预测策略为"通用回退模板"，必须拒绝，因为特征工程不一致导致预测结果不可靠
+5. 这是最终判定，不需要提出优化建议
 
 请给出你的评估结论。
 """

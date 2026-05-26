@@ -93,6 +93,7 @@ async def get_task_status(task_id: str):
         plan=task.plan,
         logs=task.logs,
         best_code=task.best_code,
+        best_snapshot=task.best_snapshot,
         artifacts=task.artifacts,
         has_test_set=task.has_test_set
     )

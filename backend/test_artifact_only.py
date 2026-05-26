@@ -40,8 +40,9 @@ def test_artifact_generation():
     """测试产物生成阶段"""
     
     # 1. 准备数据来源
-    result_dir = Path("/home/hpl/ml-workflow/backend/outputs/eval_e6c567256df6/睡眠障碍预测/run_1")
-    data_source = Path("/home/hpl/ml-workflow/test_data/睡眠障碍预测/建模")
+    script_dir = Path(__file__).resolve().parent
+    result_dir = script_dir / "outputs" / "eval_e6c567256df6" / "睡眠障碍预测" / "run_1"
+    data_source = script_dir.parent / "test_data" / "睡眠障碍预测" / "建模"
     
     # 2. 创建测试数据目录
     test_data_dir = Path("outputs/test_artifact_data")

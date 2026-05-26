@@ -83,14 +83,102 @@
       "notes": "该错误发生在 ColumnTransformer 之前直接对 DataFrame 应用 FunctionTransformer 的场景"
     },
     {
-      "error_type": "TEST_CSV_IN_TRAINING_PHASE",
-      "error_keywords": ["data/test.csv", "No such file or directory: 'data/test.csv'"],
-      "root_cause": "训练阶段代码尝试读取 data/test.csv，但沙箱中只有 train.csv 和 validation.csv",
-      "solution": "训练阶段只读取 data/train.csv 和 data/validation.csv，test.csv 在产物生成阶段才可用",
-      "prevention_prompt": "训练阶段严禁读取 data/test.csv，只有 train.csv 和 validation.csv",
-      "first_seen_task": "肝硬化患者状态预测",
-      "first_seen_date": "2026-05-12",
+      "error_type": "TEST_CSV_DATA_LEAKAGE",
+      "error_keywords": ["fit test", "test data leakage", "test set in training"],
+      "root_cause": "训练阶段用 test 数据 fit 了模型、编码器、归一化器或 imputer，导致数据泄露",
+      "solution": "所有 fit 操作只能在训练集上进行（X_train, y_train），验证集和测试集只能用 transform()",
+      "prevention_prompt": "严禁用 test 数据 fit 任何模型或 transformer，fit 只允许在训练集上进行。test.csv 只能用于 transform 和最终预测。",
+      "first_seen_task": "通用",
+      "first_seen_date": "2026-05-14",
+      "debug_effectiveness": "高"
+    },
+    {
+      "error_type": "TEST_CSV_MISSING_TARGET_COLUMN_DROP",
+      "error_keywords": ["not found in axis", "drop(columns=["],
+      "root_cause": "test.csv 没有目标列 y，但代码尝试用 drop(columns=[target_col]) 移除目标列，且未设置 errors='ignore'",
+      "solution": "在 drop 目标列时始终设置 errors='ignore'，或使用 if target_col in df.columns: df = df.drop(columns=[target_col])",
+      "solution_code": "# 安全做法：先检查列是否存在，或使用 errors='ignore'\nif target_col in test_df.columns:\n    test_df = test_df.drop(columns=[target_col])\n# 或者\ntest_df = test_df.drop(columns=[target_col], errors='ignore')",
+      "prevention_prompt": "test.csv 没有目标列。在 drop 目标列时必须使用 errors='ignore' 或先检查列是否存在，否则会报 KeyError。",
+      "first_seen_task": "银行账户欺诈",
+      "first_seen_date": "2026-05-15",
       "debug_effectiveness": "中"
+    },
+    {
+      "error_type": "WINDOWS_CONSOLE_UNICODE",
+      "error_keywords": ["gbk codec can't encode", "UnicodeEncodeError"],
+      "root_cause": "print 语句中包含 emoji 或非 ASCII 字符（如 \\u26a0），Windows 控制台默认 GBK 编码无法处理",
+      "solution": "避免在 print/log 中使用 emoji 或特殊 Unicode 字符，使用纯 ASCII 字符（如 [WARN] / [OK]）",
+      "solution_code": "# 错误\nprint('\\u26a0\\ufe0f 测试集没有目标列')\n# 正确\nprint('[WARN] 测试集没有目标列，跳过预测')",
+      "prevention_prompt": "代码中的 print 和 log 消息严禁使用 emoji 或非 ASCII 特殊字符（如 \\u26a0 \\u2705 \\u274c 等），必须使用纯 ASCII 字符。",
+      "first_seen_task": "银行账户欺诈",
+      "first_seen_date": "2026-05-15",
+      "debug_effectiveness": "高"
+    },
+    {
+      "error_type": "XGBOOST_BEST_ITERATION_WITHOUT_EARLY_STOPPING",
+      "error_keywords": ["best_iteration is only defined when early stopping is used"],
+      "root_cause": "代码访问了 model.best_iteration，但训练时未启用 early stopping",
+      "solution": "在访问 best_iteration 前先检查属性是否存在，或确保启用了 early_stopping_rounds",
+      "solution_code": "# 安全做法\nif hasattr(model, 'best_iteration'):\n    print(f'Best iteration: {model.best_iteration}')\nelse:\n    print('Best iteration: N/A (no early stopping)')",
+      "prevention_prompt": "访问 model.best_iteration 前必须先检查 hasattr(model, 'best_iteration')，未启用 early stopping 时该属性不存在。",
+      "first_seen_task": "银行账户欺诈",
+      "first_seen_date": "2026-05-15",
+      "debug_effectiveness": "高"
+    },
+    {
+      "error_type": "HTML_FORMAT_CSS_CONFLICT",
+      "error_keywords": ["KeyError: ' font-family'", "format()"],
+      "root_cause": "HTML 模板字符串使用 .format() 格式化时，CSS 样式中的 {...} 被误识别为格式化占位符",
+      "solution": "使用 f-string 或 % 格式化替代 .format()；或将 CSS 中的 { 写成 {{",
+      "solution_code": "# 错误\nhtml = \"<style>body { font-family: Arial; }</style>\".format(title=title)\n# 正确（f-string）\nhtml = f\"<style>body {{ font-family: Arial; }}</style><h1>{title}</h1>\"",
+      "prevention_prompt": "生成 HTML/CSS 字符串时严禁使用 .format()，必须使用 f-string。CSS 中的 { 在 f-string 中需写成 {{。",
+      "first_seen_task": "银行账户欺诈",
+      "first_seen_date": "2026-05-15",
+      "debug_effectiveness": "高"
+    },
+    {
+      "error_type": "PIPELINE_COLUMNTRANSFORMER_MISSING_COLUMNS",
+      "error_keywords": ["columns are missing", "ColumnTransformer"],
+      "root_cause": "ColumnTransformer 在 transform 阶段期望的列与输入 DataFrame 的实际列不一致。通常是因为训练代码在 Pipeline 外丢弃/重命名了列，或 test.csv 的列与训练时不同",
+      "solution": "确保 test.csv 的列与训练时完全一致；在 Pipeline 内完成所有列操作；如需丢弃列，使用 FunctionTransformer 或在 ColumnTransformer 的 remainder 中处理",
+      "solution_code": "# 错误：Pipeline 外丢弃列，导致 ColumnTransformer 找不到列\ndrop_cols = ['id', 'name_email_similarity']\ntrain_df = train_df.drop(columns=drop_cols)  # 列被永久移除\n# 正确：在 Pipeline 内处理列丢弃\nfrom sklearn.compose import ColumnTransformer\nfrom sklearn.preprocessing import FunctionTransformer\n\ndef drop_columns(X, cols_to_drop):\n    cols = [c for c in X.columns if c not in cols_to_drop]\n    return X[cols]\n\npipeline = Pipeline([\n    ('drop_id', FunctionTransformer(drop_columns, kw_args={'cols_to_drop': ['id']})),\n    ('preprocess', preprocessor),\n    ('model', LGBMClassifier())\n])",
+      "prevention_prompt": "严禁在 Pipeline 外对 DataFrame 做永久性列丢弃（如 df.drop(columns=[...])），这会导致 ColumnTransformer 在 transform 阶段找不到期望的列。所有列操作必须通过 Pipeline 步骤完成。",
+      "first_seen_task": "银行账户欺诈",
+      "first_seen_date": "2026-05-15",
+      "debug_effectiveness": "中"
+    },
+    {
+      "error_type": "CUSTOM_CLASS_PICKLE_FAILURE",
+      "error_keywords": ["Can't get attribute", "NEWOBJ class argument must be a type", "FeatureEngineeringWrapper"],
+      "root_cause": "训练代码定义了自定义类（如 FeatureEngineeringWrapper）或使用了 lambda 函数，用 pickle/dill 序列化后，在独立的 predict.py 中无法反序列化还原",
+      "solution": "避免定义自定义类；避免使用 lambda；所有特征工程和预处理必须使用标准 sklearn 组件（FunctionTransformer、ColumnTransformer 等）",
+      "solution_code": "# 错误：自定义类无法序列化\nclass FeatureEngineeringWrapper:\n    def transform(self, X): ...\n\n# 正确：使用标准 sklearn 组件\nfrom sklearn.preprocessing import FunctionTransformer\n\ndef my_transform(X):\n    X = X.copy()\n    # 特征工程逻辑\n    return X\n\nfeature_engineer = FunctionTransformer(my_transform)",
+      "prevention_prompt": "严禁在训练代码中定义自定义类（class XXX）或使用 lambda 函数。所有特征工程必须使用标准 sklearn 组件（FunctionTransformer、ColumnTransformer、Pipeline 等），否则 model.pkl 在 predict.py 中无法加载。",
+      "first_seen_task": "银行账户欺诈",
+      "first_seen_date": "2026-05-15",
+      "debug_effectiveness": "高"
+    },
+    {
+      "error_type": "ONEHOTENCODER_OBJECT_OUTPUT",
+      "error_keywords": ["pandas dtypes must be int, float or bool", "object"],
+      "root_cause": "OneHotEncoder 输出为 numpy array，但 ColumnTransformer 在某些情况下将其包装为 DataFrame 时保留了 object dtype；或数据读取时数值列被错误识别为 object（如含-1标记值）",
+      "solution": "在数据加载时显式转换数值列类型；在 Pipeline 最后添加类型转换步骤；确保 OneHotEncoder 的 sparse_output=False 输出为数值数组",
+      "solution_code": "# 数据加载时显式转换\nfor col in df.columns:\n    if df[col].dtype == 'object':\n        # 尝试转换为数值，失败则保持原样（类别列）\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n# 或者在 Pipeline 中添加类型转换\nfrom sklearn.preprocessing import FunctionTransformer\n\ndef ensure_numeric(X):\n    return pd.DataFrame(X).astype(float).values\n\npipeline = Pipeline([\n    ('preprocess', preprocessor),\n    ('ensure_numeric', FunctionTransformer(ensure_numeric)),\n    ('model', LGBMClassifier())\n])",
+      "prevention_prompt": "LightGBM/XGBoost/sklearn 模型严禁接收 object 类型列。数据加载时必须检查并转换类型：数值列用 pd.to_numeric(col, errors='coerce')，类别列必须通过 Encoder 转为整数。",
+      "first_seen_task": "银行账户欺诈",
+      "first_seen_date": "2026-05-15",
+      "debug_effectiveness": "中"
+    },
+    {
+      "error_type": "TARGET_COLUMN_IN_TEST_FEATURES",
+      "error_keywords": ["not in index", "KeyError"],
+      "root_cause": "代码在获取特征列时（如 common_cols = train.columns.intersection(test.columns)）把目标列（target_col）包含进去了，但 test.csv 没有目标列，导致 X_test[target_col] 报 KeyError",
+      "solution": "在获取特征列时，必须从列列表中显式排除目标列。或者，在从 test.csv 读取数据后，用 errors='ignore' 安全地 drop 目标列",
+      "solution_code": "# 正确做法1：获取特征列时排除目标列\ntarget_col = 'fraud_bool'\nfeature_cols = [c for c in train_df.columns if c != target_col]\nX_train = train_df[feature_cols]\nX_test = test_df[feature_cols]  # test.csv 没有 target_col，但 feature_cols 也不包含它\n\n# 正确做法2：从训练集分离 X/y 后，用训练集的 X 列来约束测试集\nX_train = train_df.drop(columns=[target_col])\ny_train = train_df[target_col]\nX_test = test_df.drop(columns=[target_col], errors='ignore')  # errors='ignore' 防止 test 中没有 target_col 时报错\n\n# 错误做法（严禁）：\ncommon_cols = list(set(train_df.columns) & set(test_df.columns))  # 包含 target_col！\nX_test = test_df[common_cols]  # KeyError: target_col not in index",
+      "prevention_prompt": "在获取特征列时，必须从列列表中显式排除目标列（target_col）。test.csv 没有目标列，任何包含目标列的列列表都会导致 KeyError。推荐做法：X = df.drop(columns=[target_col], errors='ignore')",
+      "first_seen_task": "银行账户欺诈",
+      "first_seen_date": "2026-05-15",
+      "debug_effectiveness": "高"
     }
   ]
 }

@@ -80,6 +80,8 @@ PLAN_AGENT_SYSTEM_PROMPT = """你是一名资深机器学习架构师。
 ```yaml
 task_analysis:
   task_type: "binary_classification / multiclass_classification / regression"
+  primary_metric: "AUC / accuracy / F1 / RMSE / MAE / R2 / ..."
+  secondary_metrics: ["accuracy", "precision", "recall", "F1", ...]
   dataset_size: "大致行数"
   class_balance: "如: 极度不平衡 (正例占0.17%) / 基本平衡"
   time_series: true / false
@@ -135,6 +137,42 @@ risks:
 5. 【严禁越界】禁止在 must_do 中指定具体类名、函数名、API 参数细节。
 6. 【优先级】must_do 中 critical=true 的项必须不超过 5 个，且按重要性排序。
 7. 【用户反馈场景特别要求】如果输入中包含用户建议，必须在 must_do 中明确体现用户意图的采纳方式，未采纳的部分说明理由。
+8. 【指标选择】task_analysis 中必须明确 primary_metric（主要指标）和可选的 secondary_metrics（辅助指标）。
+   - 如果用户明确指定了评估指标，primary_metric 必须与用户指定一致。
+   - 如果用户未指定，根据任务类型和特点自行推断最合理的 primary_metric（如二分类不平衡选 AUC/F1，回归选 RMSE/MAE）。
+   - secondary_metrics 用于提供更全面的模型表现视角，但评估和决策应以 primary_metric 为核心。
+   - must_do 中应包含确保 primary_metric 被正确计算的步骤（如类别不平衡时避免仅用 accuracy）。
+"""
+
+
+PLAN_AGENT_OPTIMIZE_SYSTEM_PROMPT = """你是一名资深机器学习架构师，当前处于 **OPTIMIZE 模式**。
+
+你的任务：基于【当前最优代码】和【评估结果】，生成一个**最小改动、针对性极强**的优化计划。
+
+## 与 INIT 模式的核心区别
+
+INIT 模式：从零开始设计完整架构，允许大刀阔斧。
+OPTIMIZE 模式：**只修复评估中指出的问题**，其他部分一个字都不要动。
+
+## 绝对红线（违反会导致优化失败，浪费 API token）
+
+1. **最小改动原则**：must_do 不超过 5 项，每项必须直接对应评估中的一个低分维度或具体问题。
+2. **严禁重写整个函数**：如果评估只说"max_depth 过浅"，计划只能要求"调大 max_depth"，不能要求"重新设计 feature_engineering"。
+3. **PREPROCESS_STATE 致命陷阱**：
+   - 全局变量 `PREPROCESS_STATE` 初始是**空字典 `{}`**。
+   - 如果优化计划涉及 `preprocess()`，必须在 must_do 中明确要求：
+     - `mode='train'` 时必须先 `setdefault` 或赋值，再读取
+     - 严禁出现 `drop_cols = PREPROCESS_STATE['drop_cols']` 这种先读后写的模式
+   - 正确示范：`PREPROCESS_STATE.setdefault('drop_cols', [])`
+4. **历史失败避免**：如果历史记录显示某优化方向已尝试过且 score 未提升，必须在 avoid 中明确列出，不得重复。
+5. **验证指标缺失 = 最高优先级**：如果评估指出"验证集指标缺失（val_auc/val_rmse is None）"，must_do 的第一项必须是修复模型训练逻辑，而不是调参。
+
+## 输出格式
+
+与 INIT 模式相同的 YAML 结构，但：
+- must_do 更精简（3-5 项）
+- 每项必须直接关联评估中的具体问题
+- avoid 必须包含历史已失败的方向
 """
 
 
@@ -146,21 +184,39 @@ class PlanAgent(BaseAgent):
     def generate(
         self,
         task_config: TaskConfig,
+        run_state: str = "INIT",
         context_payload: str = "",
-        evaluation_history: Optional[List[Dict[str, Any]]] = None
+        evaluation_history: Optional[List[Dict[str, Any]]] = None,
+        best_code: Optional[str] = None,
+        best_evaluation: Optional[Any] = None,
+        best_metrics: Optional[Any] = None,
+        optimization_history: Optional[List[Dict[str, Any]]] = None
     ) -> PlanResult:
         """
         生成结构化建模计划
         
         Args:
             task_config: 任务配置
-            context_payload: 优化建议/评估反馈（OPTIMIZE 状态时传入）
-            evaluation_history: 【新增】历史评估记录（用户反馈路径传入，避免重复犯错）
+            run_state: "INIT" 或 "OPTIMIZE"
+            context_payload: 优化建议/评估反馈（用户反馈路径传入）
+            evaluation_history: 历史评估记录
+            best_code: 当前最优代码（OPTIMIZE 时传入）
+            best_evaluation: 当前最优代码的评估结果（OPTIMIZE 时传入）
+            best_metrics: 当前最优代码的指标（OPTIMIZE 时传入）
+            optimization_history: 优化/调试历史记录（包含失败尝试和代码）
         """
-        user_prompt = self._build_user_prompt(task_config, context_payload, evaluation_history)
-        logger.info(f"[PlanAgent] 生成计划, task_type={task_config.extracted_slots.task_type}")
+        if run_state == "OPTIMIZE":
+            user_prompt = self._build_optimize_user_prompt(
+                task_config, best_code, best_evaluation, best_metrics, evaluation_history, optimization_history
+            )
+            system_prompt = PLAN_AGENT_OPTIMIZE_SYSTEM_PROMPT
+            logger.info(f"[PlanAgent] 生成优化计划, task_type={task_config.extracted_slots.task_type}")
+        else:
+            user_prompt = self._build_user_prompt(task_config, context_payload, evaluation_history)
+            system_prompt = PLAN_AGENT_SYSTEM_PROMPT
+            logger.info(f"[PlanAgent] 生成初始计划, task_type={task_config.extracted_slots.task_type}")
 
-        response = self._call_llm(PLAN_AGENT_SYSTEM_PROMPT, user_prompt)
+        response = self._call_llm(system_prompt, user_prompt)
 
         plan_result = self._parse_yaml_response(response)
         plan_result.raw_plan_text = response
@@ -265,10 +321,10 @@ class PlanAgent(BaseAgent):
                 notes.append(f"高度偏斜列（建议log变换）: {[c['name'] for c in skewed]}")
 
             # 不平衡
-            if task_config.data_profile.get("targetStats"):
-                ts = task_config.data_profile["targetStats"]
-                if ts.get("isImbalanced"):
-                    notes.append(f"目标列极度不平衡: 正例占比 {ts.get('minorityRatio', 'unknown')}")
+            if task_config.data_profile.get("classBalance"):
+                cb = task_config.data_profile["classBalance"]
+                if cb.get("isSeverelyImbalanced"):
+                    notes.append(f"目标列极度不平衡: 最小类占比 {cb.get('minClassRatio', 'unknown')}, 不平衡比 {cb.get('imbalanceRatio', 'unknown')}")
 
             if notes:
                 preprocessing_notes = "\n".join(f"- {n}" for n in notes)
@@ -295,7 +351,7 @@ class PlanAgent(BaseAgent):
                         history_lines.append(f"    低分维度: {', '.join(weak_dims)}")
             history_section = "\n".join(history_lines) + "\n"
 
-        prompt = f"""【任务配置】:
+        prompt = f"""【任务配置":
 - 任务类型: {slots.task_type or 'unknown'}
 - 目标列: {slots.target_column or 'unknown'}
 - 评估指标: {slots.eval_metric or 'unknown'}
@@ -326,6 +382,147 @@ class PlanAgent(BaseAgent):
 4. 每个 must_do 必须说明 "如果不做会怎样" 的后果
 5. 如果传入了【评估优化建议】，请仔细分析这些建议，将其中的合理部分纳入 must_do/pipeline_plan，不合理的部分说明理由后舍弃。
 6. 【关键】如果历史评估记录显示某种优化方向已经尝试过且效果不佳（score 未提升或 decision 仍为 AUTO_OPTIMIZE），严禁在 must_do 中重复同样的建议。必须在 avoid 中明确列出已失败的方向，并选择全新的优化策略。
+"""
+        return prompt
+
+    def _build_optimize_user_prompt(
+        self,
+        task_config: TaskConfig,
+        best_code: Optional[str],
+        best_evaluation: Optional[Any],
+        best_metrics: Optional[Any],
+        evaluation_history: Optional[List[Dict[str, Any]]],
+        optimization_history: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """构建 OPTIMIZE 模式的用户提示词——基于当前最优代码做最小改动计划"""
+        slots = task_config.extracted_slots
+
+        # 提取 best_code 中的关键代码片段
+        code_summary = ""
+        if best_code:
+            key_lines = []
+            for line in best_code.split('\n'):
+                stripped = line.strip()
+                if any(kw in stripped for kw in [
+                    'def preprocess', 'def feature_engineering', 'def build_model',
+                    'LGBMClassifier', 'LGBMRegressor', 'XGBClassifier', 'XGBRegressor',
+                    'RandomForest', 'LogisticRegression', 'Ridge', 'Lasso',
+                    'scale_pos_weight', 'class_weight', 'SMOTE', 'RandomOverSampler',
+                    'OneHotEncoder', 'OrdinalEncoder', 'StandardScaler',
+                    'ColumnTransformer', 'Pipeline',
+                    'early_stopping', 'eval_set',
+                    'PREPROCESS_STATE'
+                ]):
+                    key_lines.append(line)
+            code_summary = '\n'.join(key_lines[:40])
+            if len(key_lines) > 40:
+                code_summary += "\n...（仅展示关键行）"
+
+        # 当前最优指标
+        metrics_lines = []
+        if best_metrics:
+            if getattr(best_metrics, 'val_auc', None) is not None:
+                metrics_lines.append(f"  - 验证集 AUC: {best_metrics.val_auc:.4f}")
+            if getattr(best_metrics, 'val_accuracy', None) is not None:
+                metrics_lines.append(f"  - 验证集 Accuracy: {best_metrics.val_accuracy:.4f}")
+            if getattr(best_metrics, 'val_rmse', None) is not None:
+                metrics_lines.append(f"  - 验证集 RMSE: {best_metrics.val_rmse:.4f}")
+            if getattr(best_metrics, 'val_score', None) is not None:
+                metrics_lines.append(f"  - 验证集 Score: {best_metrics.val_score:.4f}")
+        metrics_section = '\n'.join(metrics_lines) if metrics_lines else "  - 无可用指标"
+
+        # 当前最优评估
+        eval_section = ""
+        if best_evaluation:
+            eval_lines = [f"  - 综合评分 score: {best_evaluation.score}"]
+            if getattr(best_evaluation, 'method_summary', None):
+                eval_lines.append(f"  - 方法总结: {best_evaluation.method_summary[:200]}")
+            if getattr(best_evaluation, 'suggestions_for_coding_agent', None):
+                eval_lines.append(f"  - 上一轮优化建议: {best_evaluation.suggestions_for_coding_agent[:200]}")
+            dim_scores = getattr(best_evaluation, 'dimension_scores', None)
+            if dim_scores:
+                weak_dims = [f"{d.name}={d.score}" for d in dim_scores if d.score < 65]
+                if weak_dims:
+                    eval_lines.append(f"  - 低分维度: {', '.join(weak_dims)}")
+            eval_section = '\n'.join(eval_lines)
+        else:
+            eval_section = "  - 无可用评估记录"
+
+        # 历史评估记录（避免重复）
+        history_section = ""
+        if evaluation_history:
+            history_lines = ["【历史评估记录】（严禁重复历史已失败的优化方向）："]
+            for i, h in enumerate(evaluation_history, 1):
+                hist_score = h.get('score', 'N/A')
+                hist_decision = h.get('decision', 'N/A')
+                hist_method = h.get('method_summary', '')
+                hist_suggestions = h.get('suggestions_for_coding_agent', '') or h.get('suggestions', '')
+                history_lines.append(f"  第{i}轮: score={hist_score}, decision={hist_decision}")
+                if hist_method:
+                    history_lines.append(f"    方法: {hist_method[:100]}")
+                if hist_suggestions:
+                    history_lines.append(f"    建议: {hist_suggestions[:100]}")
+            history_section = '\n'.join(history_lines) + '\n'
+        
+        # 【框架对齐】优化/调试历史记录（包含失败尝试和代码变更）
+        opt_history_section = ""
+        if optimization_history:
+            opt_lines = ["【优化/调试历史记录】（包含代码执行失败和成功但未超越的尝试）："]
+            
+            # 展示最近1次失败的完整记录
+            recent_failures = [h for h in reversed(optimization_history) if not h.get('success', True)]
+            if recent_failures:
+                fail = recent_failures[0]
+                opt_lines.append("  【最近失败尝试】")
+                opt_lines.append(f"    类型: {fail.get('run_type', 'unknown')}, 轮次: {fail.get('round', 'N/A')}")
+                if fail.get('error_message'):
+                    opt_lines.append(f"    失败原因: {fail['error_message'][:300]}")
+                if fail.get('code'):
+                    # 提取失败代码的关键片段（前20行）
+                    fail_code_lines = fail['code'].split('\n')[:20]
+                    opt_lines.append(f"    失败代码片段:")
+                    opt_lines.append("    ```python")
+                    for line in fail_code_lines:
+                        opt_lines.append(f"    {line}")
+                    opt_lines.append("    ```")
+            
+            # 展示所有非最优尝试的摘要（避免重复方向）
+            non_best = [h for h in optimization_history if not h.get('is_best', False) and h.get('success', False)]
+            if non_best:
+                opt_lines.append("  【已尝试但未提升的方向】")
+                for h in non_best[-3:]:  # 最近3次
+                    opt_lines.append(f"    - {h.get('run_type', 'unknown')} 轮{h.get('round', 'N/A')}: score={h.get('score', 'N/A')}")
+                    if h.get('plan'):
+                        opt_lines.append(f"      方法: {h['plan'][:100]}")
+            
+            opt_history_section = '\n'.join(opt_lines) + '\n'
+
+        prompt = f"""【任务配置】
+- 任务类型: {slots.task_type or 'unknown'}
+- 目标列: {slots.target_column or 'unknown'}
+- 评估指标: {slots.eval_metric or 'unknown'}
+- 用户描述: {task_config.user_description or '无'}
+
+【当前最优代码关键片段】（只修改计划中明确指出的部分，其余保持不动）：
+```python
+{code_summary or '（无代码片段）'}
+```
+
+【当前最优验证指标】
+{metrics_section}
+
+【当前最优评估结果】
+{eval_section}
+
+{history_section}
+{opt_history_section}
+【优化要求】
+1. must_do 不超过 5 项，每项必须直接关联评估中的具体问题
+2. 严禁重写整个函数——只改计划中明确要求改进的部分
+3. avoid 必须包含历史已失败的方向
+4. PREPROCESS_STATE 初始是空字典 {{}}，mode='train' 时必须先写入后读取
+
+请基于以上信息，严格按照 YAML 格式输出优化计划。
 """
         return prompt
 

@@ -138,14 +138,26 @@ class Settings(BaseSettings):
     SANDBOX_MEMORY_LIMIT: str = "2g"
     SANDBOX_CPU_LIMIT: float = 2.0
     # 优先使用项目 venv 中的 Python（如果存在），否则使用当前解释器
-    PYTHON_EXECUTABLE: str = str(
-        Path(__file__).parent.parent / "venv" / "bin" / "python"
-    ) if (Path(__file__).parent.parent / "venv" / "bin" / "python").exists() else sys.executable
+    # 支持跨平台：Windows 检测 venv/Scripts/python.exe，Linux/Mac 检测 venv/bin/python
+    PYTHON_EXECUTABLE: str = (
+        str(_venv_windows)
+        if (_venv_windows := Path(__file__).parent.parent / "venv" / "Scripts" / "python.exe").exists()
+        else str(_venv_linux)
+        if (_venv_linux := Path(__file__).parent.parent / "venv" / "bin" / "python").exists()
+        else sys.executable
+    )
     
     # 快速模式限制
     FAST_MAX_OPTIMIZE_ROUNDS: int = 3
-    FAST_MAX_DEBUG_ROUNDS: int = 5
+    FAST_MAX_DEBUG_ROUNDS: int = 3
     FAST_MAX_USER_FEEDBACK_ROUNDS: int = 3
+    # 动态时间预算：单轮预估耗时（代码生成+沙箱+评估，秒）
+    FAST_ROUND_ESTIMATE_SECONDS: int = 300  # 默认5分钟/轮
+    
+    # 动态错误知识库：是否自动收集沙箱错误并注入 LLM prompt
+    DYNAMIC_ERROR_KB_ENABLED: bool = True
+    # 动态错误知识库：是否允许累积新错误（false=只读模式，可注入已有错误但不添加新错误）
+    DYNAMIC_ERROR_KB_ACCUMULATE: bool = True
     
     # 数据切分配置
     DEFAULT_TEST_SIZE: float = 0.2

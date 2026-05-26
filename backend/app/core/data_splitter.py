@@ -2,7 +2,7 @@
 数据切分与验证集管理
 - 有 validation 文件时直接使用
 - 无 validation 时从 train 自动 8:2 切分
-- test 文件始终隔离，仅用于最终预测
+- test 文件同时进入训练流程，用于与训练/验证集一致的预处理与特征工程
 """
 
 import pandas as pd
@@ -25,7 +25,7 @@ class DataSplitter:
     职责：
     1. 根据文件角色识别 train / validation / test
     2. 若无 validation，从 train 自动 8:2 切分（分类任务 stratify）
-    3. test 文件始终隔离，不进入训练流程
+    3. test 文件同时进入训练流程，用于一致的预处理与特征工程（fit 只在训练集上执行，transform 应用到验证集和测试集）
     4. 切分结果持久化到输出目录，供沙箱中的代码读取
     """
     
@@ -40,7 +40,8 @@ class DataSplitter:
         target_column: str,
         task_type: TaskType,
         task_id: str,
-        is_time_series: bool = False
+        is_time_series: bool = False,
+        data_profile: Optional[Dict] = None
     ) -> Dict[str, Optional[Path]]:
         """
         准备数据集，返回处理后的文件路径映射
@@ -95,7 +96,7 @@ class DataSplitter:
             else:
                 logger.info("[DataSplitter] 未找到验证集，从训练集自动 8:2 切分")
             train_split, val_split = self._split_train_validation(
-                train_df, target_column, task_type, is_time_series
+                train_df, target_column, task_type, is_time_series, data_profile
             )
             result["train"] = self._save_df(train_split, task_output_dir / "train.csv")
             result["validation"] = self._save_df(val_split, task_output_dir / "validation.csv")
@@ -121,56 +122,164 @@ class DataSplitter:
         df: pd.DataFrame,
         target_column: str,
         task_type: TaskType,
-        is_time_series: bool = False
+        is_time_series: bool = False,
+        data_profile: Optional[Dict] = None
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        从训练集切分出验证集（8:2）
+        智能切分训练集/验证集（SmartSplitStrategy）
         
-        - 时序任务：按数据原有顺序切分（前80%训练，后20%验证），禁止打乱
-        - 非时序分类任务：使用 stratify 保证类别比例一致
-        - 非时序回归任务：随机切分
+        - 动态验证集比例：基于样本量和类别分布自动计算
+        - 时序任务：检测时间列并排序后切分（前train后val）
+        - 分类任务：stratify + 验证集少数类样本数校验
+        - 回归任务：随机切分
         """
         if target_column not in df.columns:
             raise ValueError(f"目标列 '{target_column}' 不在数据集中")
         
+        n_samples = len(df)
+        
+        # ========== 1. 计算动态验证集比例 ==========
+        minority_ratio = None
+        if task_type in (TaskType.BINARY_CLASSIFICATION, TaskType.MULTICLASS_CLASSIFICATION):
+            y = df[target_column]
+            value_counts = y.value_counts()
+            minority_ratio = value_counts.min() / n_samples
+        
+        val_ratio = self._compute_validation_ratio(n_samples, minority_ratio, task_type)
+        ratio_str = f"{minority_ratio:.4f}" if minority_ratio is not None else "N/A"
+        logger.info(
+            f"[SmartSplit] 样本量={n_samples}, minority_ratio={ratio_str}, "
+            f"验证集比例={val_ratio:.2f}"
+        )
+        
+        # ========== 2. 时序任务：检测时间列并排序 ==========
         if is_time_series:
-            # 时序任务：按原有顺序切分，前 80% 为训练，后 20% 为验证
-            n_total = len(df)
-            n_train = int(n_total * (1 - settings.DEFAULT_TEST_SIZE))
+            time_col = self._detect_time_column(df, data_profile)
+            if time_col:
+                df = df.sort_values(by=time_col).reset_index(drop=True)
+                logger.info(f"[SmartSplit] 时序任务：按时间列 '{time_col}' 排序后切分")
+            else:
+                logger.warning("[SmartSplit] 时序任务但未检测到时间列，按原始行顺序切分（可能不准确）")
+            
+            n_train = int(n_samples * (1 - val_ratio))
             train_df = df.iloc[:n_train].copy()
             val_df = df.iloc[n_train:].copy()
             logger.info(
-                f"[DataSplitter] 时序顺序切分: train={train_df.shape} (前{n_train}行), "
-                f"val={val_df.shape} (后{n_total - n_train}行)，未打乱"
+                f"[SmartSplit] 时序顺序切分: train={train_df.shape} (前{n_train}行), "
+                f"val={val_df.shape} (后{n_samples - n_train}行)"
             )
             return train_df, val_df
         
+        # ========== 3. 非时序任务切分 ==========
         y = df[target_column]
         
         stratify = None
         if task_type in (TaskType.BINARY_CLASSIFICATION, TaskType.MULTICLASS_CLASSIFICATION):
-            # 检查是否满足 stratify 条件：每个类别至少2个样本
             value_counts = y.value_counts()
             if (value_counts >= 2).all():
                 stratify = y
-                logger.info(f"[DataSplitter] 分类任务，启用 stratify 切分")
+                logger.info(f"[SmartSplit] 分类任务，启用 stratify 切分")
             else:
                 logger.warning(
-                    f"[DataSplitter] 某些类别样本数不足（最小={value_counts.min()}），跳过 stratify"
+                    f"[SmartSplit] 某些类别样本数不足（最小={value_counts.min()}），跳过 stratify"
                 )
         
         train_df, val_df = train_test_split(
             df,
-            test_size=settings.DEFAULT_TEST_SIZE,
+            test_size=val_ratio,
             random_state=settings.DEFAULT_RANDOM_STATE,
             stratify=stratify
         )
         
+        # ========== 4. 不平衡校验：验证集少数类样本数是否足够 ==========
+        if task_type in (TaskType.BINARY_CLASSIFICATION, TaskType.MULTICLASS_CLASSIFICATION):
+            val_y = val_df[target_column]
+            min_class_count = val_y.value_counts().min()
+            if min_class_count < 50:
+                logger.warning(
+                    f"[SmartSplit] 验证集少数类仅 {min_class_count} 个样本，"
+                    f"AUC/F1 评估可能不稳定（建议≥50）"
+                )
+            else:
+                logger.info(f"[SmartSplit] 验证集少数类样本数={min_class_count}，评估稳定性良好")
+        
         logger.info(
-            f"[DataSplitter] 切分完成: train={train_df.shape}, val={val_df.shape}, "
+            f"[SmartSplit] 切分完成: train={train_df.shape}, val={val_df.shape}, "
             f"stratify={'Yes' if stratify is not None else 'No'}"
         )
         return train_df, val_df
+    
+    def _compute_validation_ratio(
+        self,
+        n_samples: int,
+        minority_ratio: Optional[float],
+        task_type: TaskType
+    ) -> float:
+        """
+        基于样本量和类别分布计算最优验证集比例。
+        原则：验证集中少数类至少保证 50 个样本用于稳定评估。
+        """
+        # 基础比例由样本量决定
+        if n_samples < 1000:
+            base_ratio = 0.30
+        elif n_samples < 50000:
+            base_ratio = 0.20
+        else:
+            base_ratio = 0.10
+        
+        # 极度不平衡时增加比例，确保验证集少数类 ≥50 个
+        if minority_ratio is not None and minority_ratio < 0.05:
+            needed = 50.0 / (n_samples * minority_ratio)
+            base_ratio = max(base_ratio, min(needed, 0.40))
+            logger.info(
+                f"[SmartSplit] 极度不平衡（minority={minority_ratio:.4f}），"
+                f"验证集比例上调至 {base_ratio:.2f}"
+            )
+        
+        return base_ratio
+    
+    def _detect_time_column(
+        self,
+        df: pd.DataFrame,
+        data_profile: Optional[Dict] = None
+    ) -> Optional[str]:
+        """
+        检测时间列，用于时序任务切分前排序。
+        优先级：IntentAgent 判定 > isMonotonic 索引列 > isDateParseable 日期列
+        """
+        if data_profile:
+            columns_info = data_profile.get("columns", [])
+            # 优先级1：单调递增的数值索引列（instant, No, id）
+            for col_info in columns_info:
+                name = col_info.get("name", "")
+                n_samples = data_profile.get("rowCount", 0)
+                if col_info.get("isMonotonic") and n_samples > 10:
+                    if col_info.get("uniqueCount") == n_samples:
+                        # 列名含时间相关关键词，或就是简单的序号列
+                        if any(kw in name.lower() for kw in ["instant", "no", "id", "index", "seq"]):
+                            if name in df.columns:
+                                return name
+            
+            # 优先级2：可解析为日期的字符串列
+            for col_info in columns_info:
+                name = col_info.get("name", "")
+                if col_info.get("isDateParseable") and name in df.columns:
+                    return name
+        
+        # 回退：按列名启发式匹配
+        time_keywords = ["dteday", "date", "datetime", "timestamp", "time", "year", "month", "day"]
+        for col in df.columns:
+            if any(kw in col.lower() for kw in time_keywords):
+                # 确认该列确实能解析为日期或单调递增
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    return col
+                try:
+                    pd.to_datetime(df[col], errors='raise')
+                    return col
+                except:
+                    pass
+        
+        return None
     
     def _read_file(self, path: Path) -> pd.DataFrame:
         """读取 CSV 或 Excel 文件"""

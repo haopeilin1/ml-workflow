@@ -7,7 +7,7 @@ from app.config import build_eval_llm_config
 from app.models.schemas import TaskConfig, ExtractedSlots, UploadedFile, FileRole, TaskType, LLMConfig
 from app.core.evaluator import BenchmarkEvaluator
 
-TASK_DIR = "/home/hpl/ml-workflow/test_data/肝硬化患者状态预测"
+TASK_DIR = str(Path(__file__).resolve().parent.parent / "test_data" / "肝硬化患者状态预测")
 
 def _get_llm_config(agent_type: str):
     cfg = build_eval_llm_config(agent_type)

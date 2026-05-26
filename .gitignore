@@ -66,3 +66,18 @@ o/o
 # Sensitive files
 github_ssh_key.txt
 
+
+# Benchmark data & outputs (large files)
+test_data_*/
+benchmark_9tasks/
+test_benchmark/
+backend/outputs/
+backend/batch_results.csv
+backend/batch_summary.json
+backend/judge_result*.json
+backend/eval_result*.json
+backend/eval_result*.md
+backend/*_summary.md
+backend/*_summary.json
+backend/smoke_test_task_id.txt
+backend/benchmark_eval_id.txt

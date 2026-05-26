@@ -35,7 +35,7 @@ plan_llm_config = _get_llm_config("plan")
 coding_llm_config = _get_llm_config("coding")
 simple_llm_config = _get_llm_config("unified")
 
-TASK_DIR = "/home/hpl/ml-workflow/test_data/信用卡欺诈-二分类-类别极度不平衡"
+TASK_DIR = str(Path(__file__).resolve().parent.parent / "test_data" / "信用卡欺诈-二分类-类别极度不平衡")
 
 def test_plan_agent_only():
     """只测试 PlanAgent 输出"""
@@ -52,13 +52,13 @@ def test_plan_agent_only():
     )
     
     # 手动构建 data profile
-    train_path = Path(TASK_DIR) / "用于建模" / "train.csv"
-    gt_path = Path(TASK_DIR) / "用于评估" / "test_with_target.csv"
+    train_path = Path(TASK_DIR) / "建模" / "train.csv"
+    gt_path = Path(TASK_DIR) / "评估" / "test_with_target.csv"
     profile = evaluator._build_data_profile(train_path, gt_path)
     
     # 2. 意图识别
     intent_agent = IntentRecognitionAgent()
-    desc_path = Path(TASK_DIR) / "用于建模" / "任务描述-信用卡欺诈.txt"
+    desc_path = Path(TASK_DIR) / "建模" / "任务描述-信用卡欺诈.txt"
     desc = desc_path.read_text(encoding='utf-8').strip() if desc_path.exists() else ""
     
     intent = intent_agent.recognize(
@@ -131,7 +131,7 @@ def test_plan_agent_only():
         print(f"  ⚠ {r}")
     
     # 保存完整 plan 文本
-    output_dir = Path("/tmp/test_plan_output")
+    output_dir = Path(__file__).resolve().parent / "outputs" / "test_plan_output"
     output_dir.mkdir(exist_ok=True)
     (output_dir / "plan_raw.txt").write_text(plan_result.raw_plan_text, encoding='utf-8')
     formatted = plan_agent.format_plan_for_coding(plan_result)
@@ -176,7 +176,7 @@ def test_coding_agent(tc, formatted_plan):
         print(f"  {status} {item}")
     
     # 保存代码
-    output_dir = Path("/tmp/test_plan_output")
+    output_dir = Path(__file__).resolve().parent / "outputs" / "test_plan_output"
     (output_dir / "generated_code.py").write_text(code, encoding='utf-8')
     (output_dir / "coding_plan.txt").write_text(code_output.plan, encoding='utf-8')
     print(f"\n代码已保存到: {output_dir}/generated_code.py")
@@ -204,7 +204,7 @@ def test_end_to_end():
         coding_llm_config=coding_llm,
         unified_llm_config=unified_llm,
         judge_llm_config=plan_llm,
-        max_wait_seconds=1200,
+        max_wait_seconds=1800,
         eval_id="test_credit_fraud_single"
     )
     
@@ -268,7 +268,7 @@ def test_end_to_end():
             print(f"  {log[:150]}")
     
     # 保存完整结果
-    output_dir = Path("/tmp/test_plan_output")
+    output_dir = Path(__file__).resolve().parent / "outputs" / "test_plan_output"
     (output_dir / "benchmark_result.json").write_text(
         result.model_dump_json(indent=2), encoding='utf-8'
     )

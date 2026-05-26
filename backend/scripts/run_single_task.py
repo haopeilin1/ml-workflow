@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--benchmark-dir", required=True, help="任务目录（单任务模式）")
     parser.add_argument("--num-runs", type=int, default=1, help="运行次数")
     parser.add_argument("--max-wait", type=int, default=1800, help="单任务最大等待秒数")
+    parser.add_argument("--eval-id", default="", help="自定义评测 ID")
     args = parser.parse_args()
 
     # 独立 LLM 配置
@@ -54,6 +55,7 @@ def main():
         benchmark_dir=args.benchmark_dir,
         num_runs=args.num_runs,
         max_wait_seconds=args.max_wait,
+        eval_id=args.eval_id or None,
         plan_llm_config=plan_cfg,
         coding_llm_config=coding_cfg,
         unified_llm_config=unified_cfg,

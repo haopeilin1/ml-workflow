@@ -20,14 +20,14 @@ llm_config = {
     "max_tokens": 4096,
 }
 
-TASK_DIR = "/home/hpl/ml-workflow/test_data/信用卡欺诈-二分类-类别极度不平衡"
+TASK_DIR = str(Path(__file__).resolve().parent.parent / "test_data" / "信用卡欺诈-二分类-类别极度不平衡")
 
 # 读取已保存的 plan
-plan_formatted = Path("/tmp/test_plan_output/plan_formatted.txt").read_text(encoding='utf-8')
+plan_formatted = (Path(__file__).resolve().parent / "outputs" / "test_plan_output" / "plan_formatted.txt").read_text(encoding='utf-8')
 
 # 构建 TaskConfig（复用之前的数据）
-train_path = Path(TASK_DIR) / "用于建模" / "train.csv"
-desc_path = Path(TASK_DIR) / "用于建模" / "任务描述-信用卡欺诈.txt"
+train_path = Path(TASK_DIR) / "建模" / "train.csv"
+desc_path = Path(TASK_DIR) / "建模" / "任务描述-信用卡欺诈.txt"
 desc = desc_path.read_text(encoding='utf-8').strip() if desc_path.exists() else ""
 
 # 构建 data profile（简化版）
@@ -110,7 +110,7 @@ for item, found in checks:
     print(f"  {status} {item}")
 
 # 保存代码
-output_dir = Path("/tmp/test_plan_output")
+output_dir = Path(__file__).resolve().parent / "outputs" / "test_plan_output"
 (output_dir / "generated_code.py").write_text(code, encoding='utf-8')
 (output_dir / "coding_plan.txt").write_text(code_output.plan, encoding='utf-8')
 

@@ -11,6 +11,7 @@ import sys
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -58,12 +59,17 @@ BATCH_2_TASKS = [
 ]
 # 注意：实际20个任务，第一批9个 + 第二批11个 = 20个
 
-TEST_DATA_ROOT = Path("/home/hpl/ml-workflow/test_data")
+# 自动检测 test_data 路径（支持跨平台）
+SCRIPT_DIR = Path(__file__).resolve().parent
+TEST_DATA_ROOT = SCRIPT_DIR.parent / "test_data"
 
 
 def create_benchmark_dir(task_names: list, batch_name: str) -> Path:
     """创建临时 benchmark 目录，包含指定任务的符号链接"""
-    batch_dir = Path(f"/tmp/benchmark_{batch_name}_{datetime.now().strftime('%m%d_%H%M')}")
+    temp_base = Path(tempfile.gettempdir()) if os.name != 'nt' else SCRIPT_DIR / "outputs" / "batch_benchmarks"
+    if not temp_base.exists():
+        temp_base.mkdir(parents=True, exist_ok=True)
+    batch_dir = temp_base / f"benchmark_{batch_name}_{datetime.now().strftime('%m%d_%H%M')}"
     if batch_dir.exists():
         shutil.rmtree(batch_dir)
     batch_dir.mkdir(parents=True)
@@ -126,7 +132,7 @@ def main():
     parser.add_argument("--batch", choices=["1", "2", "all"], default="1", help="运行批次: 1=第一批9个, 2=第二批, all=全部")
     parser.add_argument("--num-runs", type=int, default=3, help="每个任务运行次数")
     parser.add_argument("--max-wait", type=int, default=1800, help="每个任务最大等待时间（秒）")
-    parser.add_argument("--output-dir", default="/home/hpl/ml-workflow/backend/benchmark_results", help="结果输出目录")
+    parser.add_argument("--output-dir", default=str(SCRIPT_DIR / "benchmark_results"), help="结果输出目录")
     
     args = parser.parse_args()
     

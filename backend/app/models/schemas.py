@@ -52,6 +52,7 @@ class ExtractedSlots(BaseModel):
     target_column: Optional[str] = None
     task_type: Optional[TaskType] = None
     eval_metric: Optional[str] = None
+    id_column: Optional[str] = None  # 标识列（如 id、ID 等），用于预测结果对齐
     complexity: Optional[str] = "simple"  # "simple" 或 "complex"，由 Intent Agent 判定
     complexity_reason: Optional[str] = None  # 复杂度判定原因说明
     is_time_series: bool = False  # 是否为时序任务，影响验证集切分方式
@@ -87,6 +88,7 @@ class ExecutionMetrics(BaseModel):
     val_score: Optional[float] = None
     val_auc: Optional[float] = None
     val_accuracy: Optional[float] = None
+    val_f1_macro: Optional[float] = None
     val_rmse: Optional[float] = None
     train_auc: Optional[float] = None
     train_score: Optional[float] = None
@@ -113,8 +115,6 @@ class EvaluationResult(BaseModel):
     dimension_scores: List[DimensionScore] = Field(default_factory=list)  # 各维度评分
     # 【新增】方法总结：对本轮代码使用的方法、策略、模型的结构化总结
     method_summary: Optional[str] = None
-    # 【新增】重新规划输出：当 decision=AUTO_OPTIMIZE 时，直接输出结构化计划，跳过 PlanAgent
-    replan_output: Optional[str] = None
 
 
 class LLMUsageInfo(BaseModel):
@@ -162,6 +162,31 @@ class ArtifactInfo(BaseModel):
     ts_forecast_png: bool = False
 
 
+class OptimizationRecord(BaseModel):
+    """优化/调试历史记录"""
+    round: int
+    run_type: str  # "optimize" | "debug" | "user_feedback"
+    code: str
+    plan: Optional[str] = None
+    success: bool
+    metrics: Optional[Any] = None
+    evaluation: Optional[Any] = None
+    error_message: Optional[str] = None
+    score: Optional[float] = None
+    is_best: bool = False
+
+
+class BestCodeSnapshot(BaseModel):
+    """最优代码节点的完整快照——存储 best_code 当时的全部上下文"""
+    code: str  # 完整代码
+    score: float
+    metrics: Optional[ExecutionMetrics] = None
+    evaluation: Optional[EvaluationResult] = None
+    optimize_round: int = 0  # 当时是第几轮产生的
+    execution_output: Optional[str] = None  # 沙箱 stdout
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
 class FastTaskState(BaseModel):
     """快速模式任务状态"""
     task_id: str
@@ -178,10 +203,12 @@ class FastTaskState(BaseModel):
     debug_round: int = 0
     user_feedback_round: int = 0
     logs: List[str] = Field(default_factory=list)  # Agent 过程日志
-    best_code: Optional[str] = None  # 历史最高分代码
+    best_code: Optional[str] = None  # 历史最高分代码（兼容旧字段）
     best_score: Optional[float] = None  # 历史最高评分
     best_metrics: Optional[ExecutionMetrics] = None  # 历史最佳评估指标
     best_evaluation: Optional[EvaluationResult] = None  # 历史最佳评估结果
+    best_snapshot: Optional[BestCodeSnapshot] = None  # 【新增】最优节点完整快照
+    optimization_history: List[OptimizationRecord] = Field(default_factory=list)  # 【新增】优化/调试历史记录
     artifacts: Optional[ArtifactInfo] = None  # 最终产物
     has_test_set: bool = False  # 是否有测试集
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -220,6 +247,7 @@ class TaskStatusResponse(BaseModel):
     plan: Optional[str] = None
     logs: List[str] = Field(default_factory=list)
     best_code: Optional[str] = None
+    best_snapshot: Optional[BestCodeSnapshot] = None  # 前端可获取最佳代码完整上下文
     artifacts: Optional[ArtifactInfo] = None
     has_test_set: bool = False
 

@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--max-wait", type=int, default=1200, help="每个任务最大等待时间（秒，默认1200）")
     parser.add_argument("--judge-model", default="", help="覆盖 Judge LLM model（默认从 .env 读取）")
     parser.add_argument("--plan-model", default="", help="覆盖 PlanCoding LLM model（默认从 .env 读取）")
+    parser.add_argument("--eval-id", default="", help="评测 ID（默认自动生成）")
     parser.add_argument("--output", default="", help="报告输出路径（默认保存到 outputs/eval_xxx/）")
 
     args = parser.parse_args()
@@ -65,7 +66,8 @@ def main():
         num_runs=args.num_runs,
         judge_llm_config=judge_llm_config,
         plan_coding_llm_config=plan_llm_config,
-        max_wait_seconds=args.max_wait
+        max_wait_seconds=args.max_wait,
+        eval_id=args.eval_id or None
     )
 
     report = evaluator.run_benchmark()

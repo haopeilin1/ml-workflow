@@ -122,7 +122,8 @@ class IntentRecognitionAgent(BaseAgent):
         columns: List[Dict],
         task_description: str,
         row_count: int = 0,
-        col_count: int = 0
+        col_count: int = 0,
+        data_profile: Optional[Dict] = None
     ) -> IntentResult:
         """
         识别任务意图
@@ -142,8 +143,26 @@ class IntentRecognitionAgent(BaseAgent):
             "columns": columns
         }
 
+        # 【新增】构建重点信号段落，突出时序和不平衡信号
+        signal_section = ""
+        ts_signal = data_profile.get("timeSeriesSignal")
+        if ts_signal and ts_signal.get("coherent"):
+            signal_section += f"\n【重点信号-时序】{ts_signal.get('reason', '检测到连贯时间列')}\n"
+        
+        balance = data_profile.get("classBalance")
+        if balance and balance.get("isSeverelyImbalanced"):
+            signal_section += (
+                f"\n【重点信号-类别不平衡】目标列 '{balance['targetColumn']}' 极度不平衡："
+                f"最大类占比 {balance['maxClassRatio']*100:.1f}%，"
+                f"最小类占比 {balance['minClassRatio']*100:.1f}%，"
+                f"不平衡比 {balance['imbalanceRatio']:.1f}:1\n"
+            )
+        
         user_prompt = f"""【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
 {task_description}
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+{signal_section if signal_section else "（无特殊信号）"}
 
 【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
 {json.dumps(data_profile, ensure_ascii=False, indent=2)}
@@ -192,13 +211,18 @@ class IntentRecognitionAgent(BaseAgent):
             task_type = self._map_task_type(task_type_str)
 
             # 【关键修复】先进行时序判定校正，再校正 complexity
-            # 原 bug：_correct_complexity 使用 LLM 原始返回的 is_time_series，
-            # 导致时序任务无法触发 complexity=complex 强制升级
-            is_time_series, ts_reason = self._detect_time_series(
-                columns, row_count, task_description, is_time_series
-            )
-            if ts_reason:
-                logger.info(f"[IntentRecognition] 时序判定校正: ts={is_time_series}, reason={ts_reason}")
+            # 新增：利用 data_profile 中的 timeSeriesSignal 强信号
+            ts_signal = data_profile.get("timeSeriesSignal") if data_profile else None
+            if ts_signal and ts_signal.get("coherent"):
+                is_time_series = True
+                ts_reason = f"数据画像检测到连贯时间列: {ts_signal.get('reason', '')}"
+                logger.info(f"[IntentRecognition] 时序强信号触发: {ts_reason}")
+            else:
+                is_time_series, ts_reason = self._detect_time_series(
+                    columns, row_count, task_description, is_time_series
+                )
+                if ts_reason:
+                    logger.info(f"[IntentRecognition] 时序判定校正: ts={is_time_series}, reason={ts_reason}")
 
             # 规则校正 complexity：防止 LLM（尤其是小模型）判定过于保守
             complexity, complexity_reason = self._correct_complexity(

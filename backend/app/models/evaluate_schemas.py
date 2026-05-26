@@ -89,6 +89,7 @@ class BenchmarkTaskResult(BaseModel):
     judge_accepted: bool = False
     judge_analysis: Optional[str] = None
     judge_reason: Optional[str] = None
+    prediction_strategy: Optional[str] = None  # llm_predict / injected / generic_fallback
     error_message: Optional[str] = None
     logs: List[str] = Field(default_factory=list)
     duration_seconds: float = 0.0
@@ -96,6 +97,12 @@ class BenchmarkTaskResult(BaseModel):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     result_dir: Optional[str] = None  # 中间结果保存目录
     artifacts: ArtifactInfo = Field(default_factory=ArtifactInfo)  # 产物生成情况
+    
+    # 【新增】意图识别结果（冷启动测评必需）
+    complexity: Optional[str] = None  # simple / complex
+    complexity_reason: Optional[str] = None  # 复杂度判定原因
+    is_time_series: bool = False  # 时序任务判定
+    intent_recognized: bool = False  # 意图识别是否成功
     
     # 【新增】各环节实际使用的 LLM 追踪（含 fallback 情况）
     llm_usage_trace: Dict[str, Any] = Field(default_factory=dict)  # {

@@ -29,7 +29,7 @@ plan_llm_config = _get_llm_config("plan")
 coding_llm_config = _get_llm_config("coding")
 simple_llm_config = _get_llm_config("unified")
 
-TASK_DIR = "/home/hpl/ml-workflow/test_data/银行账户欺诈"
+TASK_DIR = str(Path(__file__).resolve().parent.parent / "test_data" / "银行账户欺诈")
 
 
 def test_end_to_end():
@@ -48,7 +48,7 @@ def test_end_to_end():
         coding_llm_config=coding_llm,
         unified_llm_config=unified_llm,
         judge_llm_config=plan_llm,
-        max_wait_seconds=1200,
+        max_wait_seconds=1800,
         eval_id="test_bank_fraud_single"
     )
 
@@ -113,7 +113,7 @@ def test_end_to_end():
             print(f"  {log[:180]}")
 
     # 保存完整结果
-    output_dir = Path("/tmp/test_bank_fraud_output")
+    output_dir = Path(__file__).resolve().parent / "outputs" / "test_bank_fraud_output"
     output_dir.mkdir(exist_ok=True)
     (output_dir / "benchmark_result.json").write_text(
         result.model_dump_json(indent=2), encoding='utf-8'

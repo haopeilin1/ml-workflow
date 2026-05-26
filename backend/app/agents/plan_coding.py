@@ -12,34 +12,96 @@ from app.models.schemas import CodeOutput, TaskConfig
 from app.knowledge_base.loader import KnowledgeBaseLoader
 from app.agents.plan_agent import PlanAgent, PlanResult
 from app.agents.coding_agent import CodingAgent
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 # ========== System Prompt ==========
 PLAN_CODING_SYSTEM_PROMPT = """你是一名资深且高效的机器学习工程师。当前你运行在"Fast Engine（快速基线引擎）"模式下。
-你的核心任务是：为结构化数据快速构建、修复或优化端到端的机器学习 Python 代码。
 
-Core Constraints (绝对红线，必须遵守)
-1. 沙箱隔离：代码将在无网络、无外网权限的 Docker 容器中运行。绝对禁止使用 os.system / os.popen / os.execve / os.fork / os.kill / os.remove 等危险系统调用。允许 import os，但仅限安全操作（如 os.path.join）。
-2. 产物要求：【重要】当前流程中，绝对不要将模型保存到 output/ 目录，也绝对不要到处预测结果文件。你只需要在代码的最后一步，将验证集的评估指标（如 AUC、RMSE、是否严重过拟合等）通过 print() 结构化输出到控制台即可，供系统后续抓取。
-3. 过拟合控制（关键）：模型必须在训练集和验证集上表现一致。严禁使用会导致严重过拟合的模型配置：
+【重要变革】系统已提供完整的代码骨架（包含数据加载、训练循环、评估、保存、预测输出）。
+你的核心任务变为：根据数据特点和计划策略，填充三个 Python 函数。
+
+【你只需要写这三个函数】
+
+```python
+def preprocess(df, mode='train'):
+    \"\"\"
+    数据清洗和预处理。
+    
+    职责：
+    - 缺失值填充、异常值处理、类型转换
+    - 类别编码（OneHotEncoder / OrdinalEncoder / TargetEncoder）
+    - 数值缩放（StandardScaler / MinMaxScaler）
+    
+    状态管理：
+    - mode='train' 时在训练集上拟合参数，保存到全局变量 PREPROCESS_STATE
+    - mode='test' 时从 PREPROCESS_STATE 读取已拟合的参数并应用
+    - 严禁在 mode='test' 时重新拟合任何参数（数据泄露）
+    
+    返回：处理后的 DataFrame（仍包含目标列）
+    \"\"\"
+    ...
+
+def feature_engineering(df):
+    \"\"\"
+    特征工程。
+    
+    职责：
+    - 创建新特征（交叉特征、多项式特征、时序特征、聚合特征等）
+    - 特征选择、降维
+    - 丢弃不需要的列
+    
+    注意：
+    - 输入 df 是 preprocess 后的数据（可能仍包含目标列）
+    - 返回特征矩阵 X（必须不含目标列）
+    - 所有列必须是数值类型（int/float）
+    \"\"\"
+    ...
+
+def build_model():
+    \"\"\"
+    模型构建和超参数设置。
+    
+    职责：
+    - 选择模型类型（LightGBM / XGBoost / RandomForest / Ridge / LogisticRegression 等）
+    - 设置超参数（特别注意正则化参数，防止过拟合）
+    - 返回 sklearn 兼容的模型对象（必须支持 fit / predict / predict_proba）
+    \"\"\"
+    ...
+```
+
+【可选：自定义评估指标】
+如果你需要计算特定的评估指标（如 F1、Precision、Recall、AP、MAPE 等），或者 Plan 中分析出的辅助指标不在系统默认范围内，你可以额外定义一个函数：
+
+```python
+def evaluate_model(model, X_val, y_val):
+    '''
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头，如 {'val_f1': 0.85, 'val_precision': 0.90}
+    系统会优先使用你定义的指标，而不是默认指标。
+    '''
+    from sklearn.metrics import f1_score
+    val_preds = model.predict(X_val)
+    return {'val_f1': float(f1_score(y_val, val_preds))}
+```
+
+【绝对红线 - 必须遵守】
+1. 只写这三个函数（以及可选的 evaluate_model），不要写数据加载、训练循环、评估、保存逻辑（系统已提供）。
+2. 不要写 main() 函数，不要写 if __name__ == '__main__':。
+3. 沙箱隔离：绝对禁止使用 os.system / os.popen / os.execve / os.fork / os.kill / os.remove 等危险系统调用。允许 import os，但仅限安全操作（如 os.path.join）。
+4. 过拟合控制（关键）：模型必须在训练集和验证集上表现一致。严禁使用会导致严重过拟合的模型配置：
    - 树模型（RandomForest/XGBoost/LightGBM）：必须限制 max_depth（建议 ≤ 8），设置 min_samples_leaf（建议 ≥ 5），使用 subsample（建议 ≤ 0.8）。
    - 线性模型（Ridge/Lasso/LogisticRegression）：必须设置合理的 alpha / C 值（如 Ridge 的 alpha=1.0）。
    - 严禁使用 n_estimators > 500 的极端配置，严禁完全不设正则化参数。
-   特别地：如果代码成功执行并得到了满意的模型，请使用 sklearn Pipeline 将预处理（如编码、缩放）和模型包装在一起，保存**完整的 Pipeline** 为 `data/best_model.pkl`（【关键】优先使用 dill 保存，因为它能序列化含自定义函数的 Pipeline；dill 失败才回退到 pickle），以便后续产物生成阶段直接加载使用，避免重复训练。
-   **模型接口约束（关键）**：Pipeline 的最后一步必须是 sklearn 兼容的 estimator。具体来说：
-   - 如果使用 LightGBM，必须使用 `lightgbm.LGBMClassifier` 或 `LGBMRegressor`（sklearn 兼容接口），**禁止**直接使用 `lgb.train()` 返回的裸 `Booster` 对象塞进 Pipeline。
-   - 如果使用 XGBoost，必须使用 `xgboost.XGBClassifier` 或 `XGBRegressor`（sklearn 兼容接口），**禁止**直接使用 `xgb.train()` 返回的裸 `Booster` 对象塞进 Pipeline。
-   - 如果使用 sklearn 原生模型（RandomForest、LogisticRegression 等），直接放入 Pipeline 即可。
-   **禁止使用 `pd.get_dummies` 手动做 One-Hot Encoding**（这会导致训练和测试集列数不一致）。应使用 sklearn 的 `ColumnTransformer` + `OneHotEncoder` / `OrdinalEncoder` 并通过 Pipeline 包装。
-   
-   **【数据预处理强制规则 - 绝对红线，违反会导致执行失败】**
-   - **所有类别特征列（dtype=object/str/categorical）必须在传入模型前编码为数值**。
-   - 正确做法：使用 `ColumnTransformer` + `OneHotEncoder`（低基数类别）或 `OrdinalEncoder`（高基数/有序类别），将编码步骤嵌入 Pipeline。
-   - **严禁**直接将包含字符串列的 DataFrame 喂给 LightGBM/XGBoost/LogisticRegression，否则会报 `ValueError: pandas dtypes must be int, float or bool`。
-   - 如果数据中有缺失值（>20%），必须在编码前用 `SimpleImputer` 填充：类别列用 `strategy='most_frequent'`，数值列用 `strategy='median'`。
-   
-   【类别编码正确示例 - 必须照抄】
+5. **禁止使用 `pd.get_dummies` 手动做 One-Hot Encoding**（这会导致训练和测试集列数不一致）。应使用 sklearn 的 `ColumnTransformer` + `OneHotEncoder` / `OrdinalEncoder`。
+6. **所有类别特征列（dtype=object/str/categorical）必须在传入模型前编码为数值**。
+8. **模型接口约束**：返回的模型必须是 sklearn 兼容的 estimator（支持 fit/predict/predict_proba）。
+   - LightGBM：必须用 `LGBMClassifier`/`LGBMRegressor`（sklearn 接口），**禁止**用 `lgb.train()` 的裸 Booster。
+   - XGBoost：必须用 `XGBClassifier`/`XGBRegressor`（sklearn 接口），**禁止**用 `xgb.train()` 的裸 Booster。
+   - **禁止 `pd.get_dummies`**，必须用 `ColumnTransformer` + `OneHotEncoder`/`OrdinalEncoder`。
+
+【类别编码正确示例】
    ```python
    from sklearn.compose import ColumnTransformer
    from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
@@ -190,17 +252,26 @@ Core Constraints (绝对红线，必须遵守)
    - 沙箱工作目录下有一个 `data/` 子目录，所有数据文件都位于其中。
    - 读取数据时必须使用相对路径。
    
-   **【训练阶段 - 绝对红线】当前处于训练/调试阶段，沙箱中只有以下两个文件：**
+   **【训练阶段 - 数据路径规范】沙箱中有以下三个文件：**
    - `pd.read_csv('data/train.csv')` — 训练数据，**必须读取**
    - `pd.read_csv('data/validation.csv')` — 验证数据，**必须读取**
-   - **`data/test.csv 在训练阶段绝对不存在`**。任何包含 `pd.read_csv('data/test.csv')` 的代码都会立即触发 `FileNotFoundError` 导致执行失败。
-   - **训练代码中严禁出现 `test_df`、`X_test`、`y_test` 等测试集相关变量，严禁在训练阶段对测试集做任何操作。**
+   - `pd.read_csv('data/test.csv')` — 测试数据（**没有目标列 y，只有特征列 X**），**必须读取**
    
-   **【产物阶段】只有系统进入产物生成阶段后，才会恢复 data/test.csv，此时方可读取。**
+   **【重要说明】**
+   - test.csv **没有 ground truth（真值/目标列）**，真值文件不在沙箱中，所以你**无法计算测试集指标**
+   - 没有测试集指标，就**无法用测试集来调参、选模型或做早停**
+   
+   **【测试集使用规范 - 防止数据泄露】**
+   - ✅ **允许且推荐**：对 test.csv 做与 train/validation **完全一致的预处理和特征工程**
+   - ✅ **正确模式**：`scaler.fit(X_train); X_train_t = scaler.transform(X_train); X_val_t = scaler.transform(X_val); X_test_t = scaler.transform(X_test)`
+   - ❌ **严禁**：用 test 数据 fit 任何模型、编码器、归一化器、imputer 等（会导致数据泄露）
+   - ❌ **严禁**：用 test 数据做验证、调参、早停（会导致数据泄露）
+   - ❌ **严禁**：在训练阶段对 test 集做预测并基于 test 结果调整模型（会导致数据泄露）
+   - **模型训练（fit）只允许在训练集上进行，验证只允许在验证集上进行。**
    
    - **【绝对禁止】不要自己用 train_test_split 或其他方式重新切分验证集。data/validation.csv 已经由系统预先切分好，直接使用即可。**
    - **【时序任务特别约束】如果是时序任务（is_time_series=true），data/validation.csv 已经按时间顺序切分（前80%为训练集，后20%为验证集）。严禁重新切分或打乱顺序，必须保持时间连续性。**
-   - 严禁使用绝对路径（如 `D:\...` 或 `/home/...`），不要直接使用文件名（如 `pd.read_csv('train.csv')` 会找不到文件），也不要使用原始 `.xlsx` 文件名（沙箱内不存在 `.xlsx` 文件）。
+   - 严禁使用绝对路径（如 `D:\\...` 或 `/home/...`），不要直接使用文件名（如 `pd.read_csv('train.csv')` 会找不到文件），也不要使用原始 `.xlsx` 文件名（沙箱内不存在 `.xlsx` 文件）。
 
 6. 【编码错误经验知识库 - 常见 TypeError/SyntaxError 预防指南】
    以下错误在历次运行中高频出现，生成代码时必须主动避免：
@@ -245,15 +316,15 @@ Action Guidelines & State Machine
 状态 1: INIT (初始无代码及结果)
 - 动作要求：
   1. 规划（Plan）：提出包含"数据清洗 -> 特征工程 -> 模型训练 -> 验证集运行"的完整 Pipeline 规划。
-  2. 编码（Code）：依据规划编写完整代码。
+  2. 编码（Code）：依据规划编写三个函数（preprocess, feature_engineering, build_model）。
 状态 2: DEBUG (上次运行代码报错)
 - 动作要求：
   1. 规划（Plan）：仔细分析 Context Payload 中的 traceback 报错信息，精确定位 bug 原因，提出极简的修复计划。
-  2. 编码（Code）：基于历史代码进行修改，修复 bug 使得代码能跑通，尽量不推翻原有的核心 Pipeline。
+  2. 编码（Code）：基于历史函数进行修改，修复 bug 使得代码能跑通，尽量不推翻原有的核心策略。
 状态 3: OPTIMIZE (评估Agent或用户提出优化信号)
 - 动作要求：
-  1. 规划（Plan）：仔细阅读 Context Payload 传来的调优建议（可能是系统评估Agent给出的超参调整/换模型建议，也可能是用户直接用自然语言下达的强干预指令）。将建议转化为具体的代码调整策略。
-  2. 编码（Code）：编写修改后的完整代码。
+  1. 规划（Plan）：仔细阅读 Context Payload 传来的调优建议。将建议转化为具体的代码调整策略。
+  2. 编码（Code）：编写修改后的三个函数。
 
 Output Format
 你必须严格按以下标签格式输出，务必"先规划，后编码"：
@@ -262,48 +333,33 @@ Output Format
 </plan>
 <code>
 ```python
-import pandas as pd
-import json
-... 你的机器学习 Pipeline 代码 ...
+# 只写这三个函数，不要写 import、数据加载、训练循环、保存逻辑
 
-# ========== 【关键新增】预测准备函数 ==========
-# 如果在 Pipeline 外部做了任何特征工程（如添加新列、删除列、变换等），
-# 必须定义此函数，确保预测阶段能复现完全相同的预处理。
-# 【重要】此函数必须是"自包含"的：所有需要的信息（列名列表、参数等）必须在函数内部定义，
-# 不能依赖函数外部的全局变量。因为预测阶段只会注入这个函数本身，不会注入外部变量。
-def prepare_for_prediction(df):
-    # 对输入 DataFrame 执行与训练阶段完全一致的预处理。
-    # 此函数将在预测阶段被直接调用。
-    # 【必须自包含】把所有需要的列名、参数都在函数内部重新定义
-    # 示例：
-    # feature_cols = ['col1', 'col2', 'col3']  # 在函数内部重新定义
-    # df = df[feature_cols].copy()
-    # df = add_features(df)  # 如果在训练时调用了自定义特征工程
-    # df = df.drop(columns=['leakage_col'])  # 如果在训练时删除了某些列
-    # ... 所有训练时对 X 做的变换 ...
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    # 你的实现
     return df
 
-# 保存模型（【关键】优先使用 dill，它能序列化含自定义函数的 Pipeline）
-try:
-    import dill
-    with open('data/best_model.pkl', 'wb') as f:
-        dill.dump(pipeline, f)
-    print("Model saved with dill")
-except Exception as e:
-    print(f"dill save failed: {e}, falling back to pickle")
-    import pickle
-    with open('data/best_model.pkl', 'wb') as f:
-        pickle.dump(pipeline, f)
-    print("Model saved with pickle")
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    '''
+    # 你的实现
+    return df
 
-# 输出验证集指标
-print(json.dumps({
-    "metric_name": "accuracy",
-    "val_accuracy": float(valid_acc),
-    "train_score": float(train_acc),
-    "val_auc": float(val_auc),
-    "overfit_ratio": float(train_acc / valid_acc) if valid_acc > 0 else 1.0
-}))
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    '''
+    # 你的实现
+    return model
 ```
 </code>"""
 
@@ -486,8 +542,10 @@ class PlanCodingAgent(BaseAgent):
         run_state: str = "INIT",
         context_payload: str = "",
         previous_code: str = "",
-        prebuilt_plan: Optional[str] = None,
-        evaluation_history: Optional[List[Dict[str, Any]]] = None
+        evaluation_history: Optional[List[Dict[str, Any]]] = None,
+        best_evaluation: Optional[Any] = None,
+        best_metrics: Optional[Any] = None,
+        optimization_history: Optional[List[Dict[str, Any]]] = None
     ) -> CodeOutput:
         """
         生成建模计划与代码
@@ -497,9 +555,9 @@ class PlanCodingAgent(BaseAgent):
             run_state: 当前运行状态（INIT / DEBUG / OPTIMIZE）
             context_payload: 上下文载荷（报错信息 / 优化建议 / 用户反馈）
             previous_code: 历史代码（DEBUG/OPTIMIZE 状态时传入）
-            prebuilt_plan: 【新增】预构建的结构化计划（由 EvaluationAgent.evaluate() 在 AUTO_OPTIMIZE 时返回的 replan_output）。
-                          如果传入，复杂任务在 OPTIMIZE 状态下将跳过 PlanAgent，直接使用此计划。
-            evaluation_history: 【新增】历史评估记录（用户反馈路径传入 PlanAgent，避免重复犯错）
+            evaluation_history: 历史评估记录（避免重复犯错）
+            best_evaluation: 当前最优代码的评估结果（OPTIMIZE 时传入 PlanAgent）
+            best_metrics: 当前最优代码的指标（OPTIMIZE 时传入 PlanAgent）
             
         Returns:
             CodeOutput: 包含 plan（规划文本）和 code（Python 代码）
@@ -508,7 +566,8 @@ class PlanCodingAgent(BaseAgent):
         
         if is_complex:
             result = self._generate_complex(
-                task_config, run_state, context_payload, previous_code, prebuilt_plan, evaluation_history
+                task_config, run_state, context_payload, previous_code, evaluation_history,
+                best_evaluation, best_metrics, optimization_history
             )
         else:
             result = self._generate_simple(
@@ -565,8 +624,10 @@ class PlanCodingAgent(BaseAgent):
         run_state: str,
         context_payload: str,
         previous_code: str,
-        prebuilt_plan: Optional[str] = None,
-        evaluation_history: Optional[List[Dict[str, Any]]] = None
+        evaluation_history: Optional[List[Dict[str, Any]]] = None,
+        best_evaluation: Optional[Any] = None,
+        best_metrics: Optional[Any] = None,
+        optimization_history: Optional[List[Dict[str, Any]]] = None
     ) -> CodeOutput:
         """复杂任务：Plan + Coding 分离"""
         
@@ -614,48 +675,33 @@ class PlanCodingAgent(BaseAgent):
             return CodeOutput(plan=combined_plan, code=code_output.code, raw_response=code_output.raw_response)
         
         # OPTIMIZE 状态：
-        # 【架构变更】系统自动优化时，如果传入了 prebuilt_plan（由 EvaluationAgent.evaluate() 返回的 replan_output），
-        # 则跳过 PlanAgent，直接使用此计划。只有当用户反馈优化（prebuilt_plan=None）时才调用 PlanAgent。
+        # 【架构变更 v3】PlanAgent 专门负责生成优化计划，EvaluationAgent 只负责评估+决策
         if run_state == "OPTIMIZE":
-            if prebuilt_plan:
-                # 【新路径】EvaluationAgent 已生成重新规划，直接使用
-                logger.info("[PlanCodingAgent] 复杂任务 OPTIMIZE：使用 EvaluationAgent 预构建计划，跳过 PlanAgent...")
-                formatted_plan = prebuilt_plan
-                logger.info(f"[PlanCodingAgent] 预构建计划:\n{formatted_plan[:500]}...")
-                
-                code_output = self._get_coding_agent().generate(
-                    task_config=task_config,
-                    structured_plan=formatted_plan,
-                    run_state=run_state,
-                    context_payload="",  # 计划已包含所有优化方向
-                    previous_code=previous_code
-                )
-                
-                combined_plan = f"{formatted_plan}\n\n{'='*60}\n【Coding Agent OPTIMIZE 计划】\n{'='*60}\n{code_output.plan}"
-                return CodeOutput(plan=combined_plan, code=code_output.code, raw_response=code_output.raw_response)
-            else:
-                # 【旧路径】用户反馈优化，需要 PlanAgent 重新规划
-                logger.info("[PlanCodingAgent] 复杂任务 OPTIMIZE（用户反馈）：调用 PlanAgent 重新规划...")
-                plan_result = self._get_plan_agent().generate(
-                    task_config=task_config,
-                    context_payload=context_payload,
-                    evaluation_history=evaluation_history
-                )
-                self._structured_plan = plan_result
-                
-                formatted_plan = self._get_plan_agent().format_plan_for_coding(plan_result)
-                logger.info(f"[PlanCodingAgent] PlanAgent 优化完成，调用 CodingAgent...")
-                
-                code_output = self._get_coding_agent().generate(
-                    task_config=task_config,
-                    structured_plan=formatted_plan,
-                    run_state=run_state,
-                    context_payload="",  # 优化建议已传给 PlanAgent，CodingAgent 只需基于新计划写代码
-                    previous_code=previous_code
-                )
-                
-                combined_plan = f"{formatted_plan}\n\n{'='*60}\n【Coding Agent OPTIMIZE 计划】\n{'='*60}\n{code_output.plan}"
-                return CodeOutput(plan=combined_plan, code=code_output.code, raw_response=code_output.raw_response)
+            logger.info("[PlanCodingAgent] 复杂任务 OPTIMIZE：调用 PlanAgent 生成优化计划...")
+            plan_result = self._get_plan_agent().generate(
+                task_config=task_config,
+                run_state="OPTIMIZE",
+                best_code=previous_code,
+                best_evaluation=best_evaluation,
+                best_metrics=best_metrics,
+                evaluation_history=evaluation_history,
+                optimization_history=optimization_history
+            )
+            self._structured_plan = plan_result
+            
+            formatted_plan = self._get_plan_agent().format_plan_for_coding(plan_result)
+            logger.info(f"[PlanCodingAgent] PlanAgent 优化计划完成，调用 CodingAgent...")
+            
+            code_output = self._get_coding_agent().generate(
+                task_config=task_config,
+                structured_plan=formatted_plan,
+                run_state=run_state,
+                context_payload="",  # 优化计划已包含所有方向
+                previous_code=previous_code
+            )
+            
+            combined_plan = f"{formatted_plan}\n\n{'='*60}\n【Coding Agent OPTIMIZE 计划】\n{'='*60}\n{code_output.plan}"
+            return CodeOutput(plan=combined_plan, code=code_output.code, raw_response=code_output.raw_response)
         
         # 其他状态（fallback）：复用已有计划
         if self._structured_plan is None:
@@ -975,7 +1021,21 @@ class PlanCodingAgent(BaseAgent):
             time_cols = [c["name"] for c in cols if c["name"] in ["year", "month", "day", "hour", "minute", "second", "weekday"]]
             if time_cols:
                 preprocessing_checklist += f"\n- 检测到时间列 {time_cols}，建议在 Pipeline 内增加周期性编码（如 sin/cos 变换：np.sin(2*np.pi*month/12)），以提升时序建模效果。"
-        
+            
+            # 6. 数据类型检查（数值列被误识别为 object/string 时）
+            suspicious_numeric = [c for c in cols if c.get("type") == "categorical" and c["name"] != target_col and any(kw in c["name"].lower() for kw in ["age", "amount", "price", "value", "ratio", "rate", "score", "income", "debt", "fee", "count", "number", "turnover", "day", "year", "hour", "pm", "median", "mean", "max", "min", "std"])]
+            if suspicious_numeric:
+                sus_names = [c["name"] for c in suspicious_numeric]
+                preprocessing_checklist += f"\n- 列 {sus_names} 名称看起来像数值但类型被识别为 categorical/object，必须在 preprocess() 中用 `pd.to_numeric(df[col], errors='coerce')` 强制转换，然后再填充缺失值。严禁对 string 列调用 .median()。"
+            
+            # 7. 特征名清洗提醒（列名包含特殊字符时）
+            special_char_cols = [c for c in cols if c["name"] != target_col and any(ch in c["name"] for ch in ['"', "'", '{', '}', '[', ']', '(', ')', '/', '\\', '<', '>', ',', '.', ':', ';', ' ', '-', '+', '*', '=', '&', '%', '$', '#', '@', '!', '?', '~', '`', '^', '|'])]
+            if special_char_cols:
+                sp_names = [c["name"] for c in special_char_cols]
+                preprocessing_checklist += f"\n- 列名 {sp_names} 包含特殊字符，LightGBM/XGBoost 不支持。必须在 preprocess() 或 feature_engineering() 中用 df.columns = [re.sub('[^\\\\w]', '_', str(c)) for c in df.columns] 清洗为纯字母数字下划线。"
+            
+            # 8. 目标列保留提醒
+            preprocessing_checklist += f"\n- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 {target_col}。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['{target_col}'], errors='ignore')。"
         if not preprocessing_checklist:
             preprocessing_checklist = "（数据画像中未发现明显的预处理问题，但仍请按规范检查）"
         
@@ -1007,6 +1067,21 @@ class PlanCodingAgent(BaseAgent):
 
 """
         
+        # 【动态错误知识库】注入相关历史错误提醒（可通过配置关闭）
+        error_kb_section = ""
+        if settings.DYNAMIC_ERROR_KB_ENABLED:
+            try:
+                from app.knowledge_base.dynamic_error_kb import dynamic_error_kb
+                task_type_str = slots.task_type.value if slots.task_type else ""
+                error_kb_section = dynamic_error_kb.to_prompt_section(
+                    task_type=task_type_str,
+                    limit=3,
+                )
+                if error_kb_section:
+                    logger.info(f"[PlanCodingAgent] 注入动态错误知识库，长度={len(error_kb_section)}")
+            except Exception as e:
+                logger.warning(f"[PlanCodingAgent] 动态错误知识库加载失败: {e}")
+        
         prompt = f"""【当前运行状态 Run State】: {run_state}
 
 【意图澄清与任务配置 Task Config】:
@@ -1019,7 +1094,7 @@ class PlanCodingAgent(BaseAgent):
 
 【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
 {preprocessing_checklist}
-{kb_section}
+{kb_section}{error_kb_section}
 【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
 {user_suggestions}
 
@@ -1234,41 +1309,24 @@ class PlanCodingAgent(BaseAgent):
     
     def _sanitize_training_code(self, code: str) -> str:
         """
-        清理训练代码中训练阶段不应该出现的模式。
-        训练阶段 data/test.csv 不存在，任何读取都会导致 FileNotFoundError。
+        清理训练代码中可能导致数据泄露的危险模式。
+        训练阶段 test.csv 已可见，允许读取用于预处理/特征工程，但严禁用于训练/fit/验证。
         """
         import re
         
         if not code:
             return code
         
-        lines = code.split('\n')
-        result = []
+        # 仅做日志记录，不再删除 test.csv 的读取
+        # 数据泄露的防止主要依靠 prompt 约束和 AST 安全检查
         test_csv_patterns = [
             r"pd\.read_csv\(['\"]data/test\.csv['\"]\)",
             r"pd\.read_csv\(['\"]\.\/data\/test\.csv['\"]\)",
         ]
-        removed_count = 0
-        
-        for line in lines:
-            stripped = line.strip()
-            should_remove = False
-            for pattern in test_csv_patterns:
-                if re.search(pattern, stripped):
-                    logger.warning(f"[PlanCodingAgent] 自动删除训练代码中的 test.csv 读取: {stripped[:80]}")
-                    should_remove = True
-                    removed_count += 1
-                    break
-            if not should_remove:
-                result.append(line)
-        
-        if removed_count > 0:
-            code = '\n'.join(result)
-            if 'test_df' in code and 'test_df = ' not in code and 'test_df=' not in code:
-                logger.warning("[PlanCodingAgent] 代码中仍有 test_df 使用但无定义，添加安全占位")
-                code = "# test.csv 在训练阶段不存在\ntest_df = None\n\n" + code
-        else:
-            code = '\n'.join(result)
+        for pattern in test_csv_patterns:
+            if re.search(pattern, code):
+                logger.info("[PlanCodingAgent] 训练代码中检测到 test.csv 读取（已允许，用于预处理/特征工程一致性）")
+                break
         
         return code
     
