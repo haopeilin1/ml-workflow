@@ -2016,7 +2016,7 @@ if '_label_encoder' in globals() and _label_encoder is not None:
             default_eval_code = """val_preds = model.predict(X_val_fe)
 from sklearn.metrics import f1_score
 metrics = {'val_accuracy': float(accuracy_score(y_val, val_preds)), 'val_f1_macro': float(f1_score(y_val, val_preds, average='macro'))}"""
-        elif task_type == "regression":
+        elif task_type in ("regression", "time_series_forecasting"):
             test_pred_code = """test_preds = model.predict(X_test_fe)
 test_probs = test_preds"""
             prob_col_code = "result_df['probability'] = test_probs"
@@ -2038,14 +2038,16 @@ metrics = {'val_auc': float(roc_auc_score(y_val, val_probs))}"""
         
         # 【系统】目标变换逆变换代码：只在 regression 任务中插入，防止分类任务预测值被错误变换
         inverse_transform_code = ""
-        if task_type == "regression":
+        if task_type in ("regression", "time_series_forecasting"):
             inverse_transform_code = """
 # 【系统】目标变换逆变换（如 LLM 在 PREPROCESS_STATE 中声明了 target_transform）
-if PREPROCESS_STATE.get('target_transform') == 'log1p':
+# 兼容多种常见键名: target_transform, target_log_transformer
+_test_tform = PREPROCESS_STATE.get('target_transform') or PREPROCESS_STATE.get('target_log_transformer')
+if _test_tform == 'log1p':
     test_preds = np.expm1(test_preds)
-elif PREPROCESS_STATE.get('target_transform') == 'log':
+elif _test_tform == 'log':
     test_preds = np.exp(test_preds)
-elif PREPROCESS_STATE.get('target_transform') == 'sqrt':
+elif _test_tform == 'sqrt':
     test_preds = np.square(test_preds)
 """
         
@@ -2164,7 +2166,7 @@ except Exception as e:
             metrics = {{'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}}
         elif task_type == "multiclass_classification":
             metrics = {{'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}}
-        elif task_type == "regression":
+        elif task_type in ("regression", "time_series_forecasting"):
             metrics = {{'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}}
     except Exception as e2:
         print(f"[EVAL_FALLBACK_ERROR] {{e2}}")
