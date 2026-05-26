@@ -2105,11 +2105,24 @@ else:
 # 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
 # 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
 _label_encoder = None
-if target_col in train.columns and (train[target_col].dtype == object or str(train[target_col].dtype) == 'category'):
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
     from sklearn.preprocessing import LabelEncoder
     _label_encoder = LabelEncoder()
     y_train = _label_encoder.fit_transform(train[target_col])
-    y_val = _label_encoder.transform(val[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
 
 X_test = test_clean.drop(columns=[target_col], errors='ignore')
 if X_test is test_clean:
