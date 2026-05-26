@@ -110,16 +110,21 @@
 - 共享单车 EvaluationAgent 给 82.0 分（验证集），Judge 测试集 R²=-1.21
 - 电商顾客退货 EvaluationAgent 给 58.8 分，Judge 拒绝（AUC=0.58）
 
-**根因**：EvaluationAgent 只看**验证集**表现，Judge 看**测试集**表现。两者评估逻辑和数据路径不一致。
+**根因**：EvaluationAgent 只看**验证集**表现，Judge 看**测试集**表现。由于测试集 ground truth 在训练阶段不可见，EvaluationAgent 无法直接评估测试集泛化能力。两者的信息不对等导致优化方向偏离。
 
 **修复方案**：
-1. **引入 Test-set Sanity Check**：在 sandbox 执行成功后，系统用**训练好的模型**对 `test.csv` 做一次"盲测"（走与训练相同的 feature engineering + predict 路径），计算测试集指标的粗略估计。如果测试集指标与验证集差距过大（如相对差距 >50%），在提交给 Judge 前触发内部 REPLAN
-2. **EvaluationAgent 评估维度扩充**：除了验证集指标，增加以下维度到 EvaluationAgent 的 prompt：
-   - 测试集预测分布 vs 训练集目标分布的 KL 散度/均值差异
-   - 测试集预测值是否在合理范围（如分类任务预测类别是否覆盖了全部类别）
-   - 特征工程在 test 上的可复现性（列名、列数是否与 train 一致）
-3. **Judge 标准前置**：在 EvaluationAgent 的评分权重中，增加"测试集泛化风险"项（权重 0.2-0.3）。让 EvaluationAgent 在优化阶段就意识到"不能只看 validation，要看 test 泛化"
-4. **测试集切分一致性校验**：对于时序任务，EvaluationAgent 明确检查 `data_splitter` 是否使用了时间切分（非随机切分）。如果不是，直接扣分并提示时序泄漏风险
+1. **预测分布合理性检查（无需 ground truth）**：EvaluationAgent 读取 `test_predictions.csv`，检查以下明显异常（无需测试集标签即可发现）：
+   - 预测值是否全为同一常量（如全 0 或全 1）→ 极可能是 feature engineering 不一致
+   - 分类任务预测的类别集合是否是训练集类别集合的子集 → 若不是，说明标签映射出错
+   - 回归任务预测值的数量级是否与训练集目标列相差 10 倍以上 → 极可能是目标变换未逆变换
+   - 预测列是否存在大量 NaN
+2. **特征工程可复现性检查（无需 ground truth）**：在 sandbox 中，系统在保存 model 前，用 `feature_engineering()` 分别处理 train 和 test 的原始数据，对比输出特征的列名和列数。如果不一致，说明 test 上的特征工程与 train 不同（如 test 多了/少了某些列），立即标记为高风险
+3. **时序切分合规性检查（从代码推断）**：EvaluationAgent 检查 LLM 生成的代码中是否存在 `shuffle=True`、`train_test_split(..., shuffle=True)`、`random_state` 等关键词。时序任务中若存在这些关键词，说明可能使用了随机切分，直接扣分并提示时序泄漏风险
+4. **评估权重调整**：在 EvaluationAgent 的评分权重中，增加"代码鲁棒性"维度（权重 0.15-0.2），包括：
+   - 是否正确使用 sklearn Pipeline（而非手动分步执行）
+   - 是否正确处理类别不平衡（class_weight / sample_weight）
+   - 是否避免了数据泄漏（如时序任务中的未来信息）
+   让 EvaluationAgent 不只关注验证集数字，也关注代码结构上的抗风险能力
 
 ---
 
@@ -163,7 +168,7 @@
 | **Issue 2** 目标变换逆变换 | 启发式检测可能误判，给不需要逆变换的任务也加了变换 | **元数据显式优先**：<br>① 优先读取 LLM 在 `PREPROCESS_STATE` 中显式声明的 `target_transform`（如 `log1p`）<br>② 如果没有显式声明，系统不做任何猜测/启发式检测，保持现有兜底代码不变<br>③ 逆变换只在 `target_transform` 字段存在时生效 |
 | **Issue 3** predict.py 自动生成 | 自动提取函数可能因函数名变化、全局变量依赖而失败 | **生成 + 预检 + fallback**：<br>① 系统尝试从 `code_best.py` AST 提取函数自动生成 predict.py<br>② 生成后在 sandbox 中执行 `python predict.py test.csv /tmp/verify.csv` 预检<br>③ 预检失败则 **静默回退**到现有 PlanCodingAgent 生成逻辑，不中断流程 |
 | **Issue 4** Fallback 鲁棒性 | 增加 try-catch 和重试可能掩盖真正需要暴露的代码错误 | **异常粒度控制**：<br>① 只对 EvaluationAgent **网络/IO 类异常**做重试（HTTPError、Timeout）<br>② 对代码执行错误（SyntaxError、ValueError）不重试，保持现有行为<br>③ fallback 产物保存走与正常路径**相同的 `save_artifacts()` 函数**，确保元数据一致性 |
-| **Issue 5** Eval-Judge 对齐 | 测试集 sanity check 可能误杀本来能过的任务 | **软约束先行**：<br>① sanity check 只打 warning log，**不触发 REPLAN 或扣分**<br>② 收集 3-5 轮 benchmark 数据后，根据统计数据（如"val/test 差距 >50% 的任务中，Judge 拒绝率是否显著更高"）再决定是否提升为硬约束 |
+| **Issue 5** Eval-Judge 对齐 | 预测分布检查可能误报（如任务本身预测值就应高度集中） | **分层处理**：<br>① **预测全常量 / 存在 NaN / 类别越界**：这些是客观规则，误报率极低，可直接触发 warning<br>② **特征工程列数不一致**：同样是客观规则，train/test 列数不一致必定有问题，可直接标记高风险<br>③ **时序切分关键词检查**：可能因注释/字符串匹配误报，只作为 soft 提示，不扣分<br>④ **代码鲁棒性评分权重**：纯 prompt 层面调整，不影响代码执行逻辑，风险为 0 |
 
 ### 5.3 实施顺序建议
 
