@@ -2184,24 +2184,6 @@ result_df = pd.DataFrame({{
 result_df.to_csv('data/test_predictions.csv', index=False)
 
 # ========== 模型保存（系统保证可序列化）==========
-# 【系统】自动包装 Pipeline：如果 model 不是 Pipeline 且存在 feature_engineering，自动包装以保持预测一致性
-try:
-    from sklearn.pipeline import Pipeline
-    from sklearn.preprocessing import FunctionTransformer
-    if 'feature_engineering' in globals() and not isinstance(model, Pipeline):
-        _fe_fn = feature_engineering
-        _wrapped_model = Pipeline([
-            ('feature_engineering', FunctionTransformer(_fe_fn, validate=False)),
-            ('model', model)
-        ])
-        # 验证包装后的 Pipeline 在验证集上能正常预测
-        _val_pred_check = _wrapped_model.predict(X_val_fe)
-        if len(_val_pred_check) == len(y_val):
-            model = _wrapped_model
-            print("[PIPELINE_WRAPPER] 已将 feature_engineering 自动包装进 Pipeline")
-except Exception as e:
-    print(f"[PIPELINE_WRAPPER_WARNING] 自动包装失败，保留原始 model: {e}")
-
 with open('data/best_model.pkl', 'wb') as f:
     dill.dump(model, f)
 
