@@ -1324,6 +1324,101 @@ class BenchmarkEvaluator:
         }
 
     @staticmethod
+    def _extract_function_source(code: str, func_name: str) -> Optional[str]:
+        """从代码字符串中提取指定函数的源码（基于缩进）"""
+        import re
+        lines = code.splitlines()
+        start_idx = None
+        for i, line in enumerate(lines):
+            if re.match(rf'^\s*def\s+{re.escape(func_name)}\s*\(', line):
+                start_idx = i
+                break
+        if start_idx is None:
+            return None
+        base_indent = len(lines[start_idx]) - len(lines[start_idx].lstrip())
+        end_idx = start_idx + 1
+        while end_idx < len(lines):
+            line = lines[end_idx]
+            if line.strip() == '':
+                end_idx += 1
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= base_indent and not line.strip().startswith('#'):
+                break
+            end_idx += 1
+        return '\n'.join(lines[start_idx:end_idx])
+    
+    def _wrap_model_if_needed(self, data_dir: Path) -> Optional[Path]:
+        """
+        【系统修复 Issue 1】如果 best_model.pkl 不是 Pipeline，自动从 code_best.py 提取
+        feature_engineering 函数，创建包装后的 Pipeline 并保存为 best_model_wrapped.pkl。
+        返回包装后的 model 路径（如果成功），否则返回原始路径。
+        """
+        model_path = data_dir / "best_model.pkl"
+        if not model_path.exists():
+            return None
+        
+        try:
+            import dill
+            with open(model_path, 'rb') as f:
+                model = dill.load(f)
+            
+            from sklearn.pipeline import Pipeline
+            if isinstance(model, Pipeline):
+                return model_path  # 已经是 Pipeline，不需要包装
+            
+            # 查找 code_best.py
+            code_best_path = data_dir.parent / "code_best.py"
+            if not code_best_path.exists():
+                result_dirs = list(data_dir.parent.glob("run_*"))
+                if result_dirs:
+                    code_best_path = result_dirs[0] / "code_best.py"
+            
+            if not code_best_path.exists():
+                return model_path
+            
+            with open(code_best_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+            
+            fe_src = self._extract_function_source(code, 'feature_engineering')
+            if not fe_src:
+                return model_path
+            
+            # 在局部命名空间中执行 feature_engineering 定义
+            local_ns = {}
+            exec(fe_src, local_ns)
+            fe_fn = local_ns.get('feature_engineering')
+            if not fe_fn:
+                return model_path
+            
+            from sklearn.preprocessing import FunctionTransformer
+            wrapped = Pipeline([
+                ('feature_engineering', FunctionTransformer(fe_fn, validate=False)),
+                ('model', model)
+            ])
+            
+            # 验证：尝试用原始 test 数据预测（允许失败，失败则回退）
+            test_path = data_dir / "test.csv"
+            if test_path.exists():
+                try:
+                    test_raw = pd.read_csv(test_path)
+                    _ = wrapped.predict(test_raw)
+                except Exception as e:
+                    logger.warning(f"[BenchmarkEvaluator] 包装后的 Pipeline 验证失败: {e}，保留原始 model")
+                    return model_path
+            
+            wrapped_path = data_dir / "best_model_wrapped.pkl"
+            with open(wrapped_path, 'wb') as f:
+                dill.dump(wrapped, f)
+            
+            logger.info(f"[BenchmarkEvaluator] 已自动包装 Pipeline: {wrapped_path}")
+            return wrapped_path
+            
+        except Exception as e:
+            logger.warning(f"[BenchmarkEvaluator] 自动包装 Pipeline 失败: {e}")
+            return model_path
+    
+    @staticmethod
     def _extract_definitions_from_code(code: str) -> str:
         """
         从训练代码中提取所有顶层 class/function 定义 + "安全"赋值语句 + import 语句，用于注入预测脚本。
@@ -1485,8 +1580,17 @@ class BenchmarkEvaluator:
         
         logger.warning(f"[BenchmarkEvaluator][DEBUG] 策略0失败: 未找到 best_test_predictions.csv 或 test_predictions.csv")
         
-        model_path = data_dir / "best_model.pkl"
-        # 如果 data_dir 中没有 best_model.pkl，尝试从 artifacts 复制
+        # 【系统修复 Issue 1】如果 model 不是 Pipeline，自动包装 feature_engineering
+        wrapped_path = self._wrap_model_if_needed(data_dir)
+        if wrapped_path:
+            logger.info(f"[BenchmarkEvaluator] model 包装结果: {wrapped_path.name}")
+        
+        # 优先使用系统包装的 Pipeline（包含 feature engineering）
+        model_path = data_dir / "best_model_wrapped.pkl"
+        if not model_path.exists():
+            model_path = data_dir / "best_model.pkl"
+        
+        # 如果 data_dir 中没有 model，尝试从 artifacts 复制
         if not model_path.exists():
             artifacts_model = data_dir.parent / "artifacts" / "model.pkl"
             if artifacts_model.exists():
