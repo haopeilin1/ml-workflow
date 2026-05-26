@@ -1059,17 +1059,30 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             self._set_phase(FastTaskPhase.EVALUATING)
             
             self._start_timing("evaluation_seconds")
-            evaluation = self.evaluation_agent.evaluate(
-                task_target=f"{tc.extracted_slots.task_type.value} - target={tc.extracted_slots.target_column}",
-                metrics=result.metrics,
-                optimize_round=self.state.optimize_round,
-                max_optimize_rounds=settings.FAST_MAX_OPTIMIZE_ROUNDS,
-                execution_output=result.stdout,
-                user_modeling_suggestions=tc.extracted_slots.user_modeling_suggestions,
-                eval_metric=tc.extracted_slots.eval_metric,
-                evaluation_history=self._evaluation_history,
-                current_code=self.state.code or ""
-            )
+            try:
+                evaluation = self.evaluation_agent.evaluate(
+                    task_target=f"{tc.extracted_slots.task_type.value} - target={tc.extracted_slots.target_column}",
+                    metrics=result.metrics,
+                    optimize_round=self.state.optimize_round,
+                    max_optimize_rounds=settings.FAST_MAX_OPTIMIZE_ROUNDS,
+                    execution_output=result.stdout,
+                    user_modeling_suggestions=tc.extracted_slots.user_modeling_suggestions,
+                    eval_metric=tc.extracted_slots.eval_metric,
+                    evaluation_history=self._evaluation_history,
+                    current_code=self.state.code or ""
+                )
+            except Exception as eval_err:
+                # 【修复】EvaluationAgent 异常隔离：网络/IO/解析异常不应中断主流程
+                logger.error(f"[FastEngine] EvaluationAgent 调用失败: {eval_err}")
+                self._append_log(f"[WARN] EvaluationAgent 调用失败: {eval_err}，使用默认评估结果继续")
+                evaluation = EvaluationResult(
+                    evaluation_analysis=f"EvaluationAgent 调用失败: {eval_err}",
+                    decision=DecisionType.YIELD_TO_USER,
+                    score=0,
+                    suggestions_for_coding_agent="",
+                    method_summary="评估阶段异常，建议检查代码正确性",
+                    dimension_scores=[]
+                )
             self._end_timing("evaluation_seconds")
             self.state.evaluation = evaluation
             
@@ -2023,6 +2036,19 @@ if '_label_encoder' in globals() and _label_encoder is not None:
             default_eval_code = """val_probs = model.predict_proba(X_val_fe)[:, 1]
 metrics = {'val_auc': float(roc_auc_score(y_val, val_probs))}"""
         
+        # 【系统】目标变换逆变换代码：只在 regression 任务中插入，防止分类任务预测值被错误变换
+        inverse_transform_code = ""
+        if task_type == "regression":
+            inverse_transform_code = """
+# 【系统】目标变换逆变换（如 LLM 在 PREPROCESS_STATE 中声明了 target_transform）
+if PREPROCESS_STATE.get('target_transform') == 'log1p':
+    test_preds = np.expm1(test_preds)
+elif PREPROCESS_STATE.get('target_transform') == 'log':
+    test_preds = np.exp(test_preds)
+elif PREPROCESS_STATE.get('target_transform') == 'sqrt':
+    test_preds = np.square(test_preds)
+"""
+        
         skeleton = f'''import pandas as pd
 import numpy as np
 import dill
@@ -2148,6 +2174,7 @@ except Exception as e:
 # 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
 # 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
 {test_pred_code.strip()}
+{inverse_transform_code}
 
 result_df = pd.DataFrame({{
     'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
@@ -2157,6 +2184,24 @@ result_df = pd.DataFrame({{
 result_df.to_csv('data/test_predictions.csv', index=False)
 
 # ========== 模型保存（系统保证可序列化）==========
+# 【系统】自动包装 Pipeline：如果 model 不是 Pipeline 且存在 feature_engineering，自动包装以保持预测一致性
+try:
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import FunctionTransformer
+    if 'feature_engineering' in globals() and not isinstance(model, Pipeline):
+        _fe_fn = feature_engineering
+        _wrapped_model = Pipeline([
+            ('feature_engineering', FunctionTransformer(_fe_fn, validate=False)),
+            ('model', model)
+        ])
+        # 验证包装后的 Pipeline 在验证集上能正常预测
+        _val_pred_check = _wrapped_model.predict(X_val_fe)
+        if len(_val_pred_check) == len(y_val):
+            model = _wrapped_model
+            print("[PIPELINE_WRAPPER] 已将 feature_engineering 自动包装进 Pipeline")
+except Exception as e:
+    print(f"[PIPELINE_WRAPPER_WARNING] 自动包装失败，保留原始 model: {e}")
+
 with open('data/best_model.pkl', 'wb') as f:
     dill.dump(model, f)
 

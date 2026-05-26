@@ -1160,10 +1160,15 @@ class BenchmarkEvaluator:
         
         def _check_file(filename: str) -> bool:
             """检查文件是否存在于 primary_dir 或 fallback 目录"""
-            for check_dir in [primary_dir, artifact_dir, output_dir]:
+            for check_dir in [primary_dir, artifact_dir, output_dir, data_dir]:
                 fpath = check_dir / filename
                 if fpath.exists() and fpath.stat().st_size > 0:
                     return True
+            # 【修复】model_file 同时检测 best_model.pkl（训练阶段保存的模型）
+            if filename == "model.pkl":
+                for check_dir in [primary_dir, artifact_dir, output_dir, data_dir]:
+                    if (check_dir / "best_model.pkl").exists():
+                        return True
             return False
         
         files = {

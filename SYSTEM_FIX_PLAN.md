@@ -185,5 +185,17 @@
 
 ---
 
+## 六、实施状态
+
+| Issue | 状态 | 对应 Commit |
+|-------|------|-------------|
+| Issue 1（AutoPipelineWrapper） | ✅ 已实施 | `7d3ce4f` |
+| Issue 2（目标变换逆变换） | ✅ 已实施 | `7d3ce4f` |
+| Issue 3（predict.py 自动生成） | ✅ 已实施 | `7d3ce4f` |
+| Issue 4（Fallback 鲁棒性） | ✅ 已实施 | `7d3ce4f` |
+| Issue 5（Eval-Judge 对齐） | ⏸️ 待实施 | — |
+
+---
+
 *文档生成时间：2026-05-26*
 *对应基准版本：v0.9.0-benchmark-20tasks*

@@ -862,6 +862,146 @@ class PlanCodingAgent(BaseAgent):
         
         return CodeOutput(plan=plan, code=code, raw_response=response)
     
+    def _extract_function_source(self, code: str, func_name: str) -> Optional[str]:
+        """从代码字符串中提取指定函数的源码（基于缩进）"""
+        lines = code.splitlines()
+        start_idx = None
+        for i, line in enumerate(lines):
+            if re.match(rf'^\s*def\s+{re.escape(func_name)}\s*\(', line):
+                start_idx = i
+                break
+        if start_idx is None:
+            return None
+        base_indent = len(lines[start_idx]) - len(lines[start_idx].lstrip())
+        end_idx = start_idx + 1
+        while end_idx < len(lines):
+            line = lines[end_idx]
+            if line.strip() == '':
+                end_idx += 1
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= base_indent and not line.strip().startswith('#'):
+                break
+            end_idx += 1
+        return '\n'.join(lines[start_idx:end_idx])
+    
+    def _get_function_params(self, code: str, func_name: str) -> List[str]:
+        """提取函数参数名列表"""
+        src = self._extract_function_source(code, func_name)
+        if not src:
+            return []
+        match = re.search(rf'def\s+{re.escape(func_name)}\s*\((.*?)\)\s*:', src, re.DOTALL)
+        if not match:
+            return []
+        params_str = match.group(1)
+        params = []
+        for p in params_str.split(','):
+            p = p.strip().split('=')[0].split(':')[0].strip()
+            if p and p != 'self':
+                params.append(p)
+        return params
+    
+    def _generate_predict_script_auto(self, best_code: str, task_config: TaskConfig) -> Optional[str]:
+        """
+        【系统】从 best_code 自动生成 predict.py
+        
+        通过正则提取 preprocess/feature_engineering 函数，组装成预测脚本。
+        如果提取失败或 AST 检查不通过，返回 None，让上层 fallback 到 LLM 生成。
+        """
+        try:
+            preprocess_src = self._extract_function_source(best_code, 'preprocess')
+            feature_engineering_src = self._extract_function_source(best_code, 'feature_engineering')
+            
+            if not preprocess_src and not feature_engineering_src:
+                return None
+            
+            slots = task_config.extracted_slots
+            target_col = slots.target_column or 'target'
+            id_col = slots.id_column or 'id'
+            
+            # 构建函数调用（根据函数签名调整参数）
+            preprocess_call = "test_clean = preprocess(test)"
+            if preprocess_src:
+                params = self._get_function_params(best_code, 'preprocess')
+                if 'mode' in params:
+                    preprocess_call = "test_clean = preprocess(test, mode='test')"
+            
+            fe_call = "X_test_fe = feature_engineering(X_test)"
+            if feature_engineering_src:
+                params = self._get_function_params(best_code, 'feature_engineering')
+                if 'mode' in params:
+                    fe_call = "X_test_fe = feature_engineering(X_test, mode='test')"
+            
+            parts = [
+                "import pandas as pd",
+                "import numpy as np",
+                "import dill",
+                "import re",
+                "import os",
+                "",
+            ]
+            if preprocess_src:
+                parts.append(preprocess_src)
+                parts.append("")
+            if feature_engineering_src:
+                parts.append(feature_engineering_src)
+                parts.append("")
+            
+            parts.extend([
+                "# === 加载模型 ===",
+                "with open('data/best_model.pkl', 'rb') as f:",
+                "    model = dill.load(f)",
+                "",
+                "# === 加载测试集 ===",
+                "test = pd.read_csv('data/test.csv')",
+                "",
+                "# === 预处理 ===",
+                preprocess_call,
+                "",
+                "# === 分离目标列 ===",
+                f"target_col = '{target_col}'",
+                "if target_col in test_clean.columns:",
+                "    X_test = test_clean.drop(columns=[target_col])",
+                "else:",
+                "    X_test = test_clean",
+                "",
+                "# === 特征工程 ===",
+                fe_call,
+                "if isinstance(X_test_fe, np.ndarray):",
+                "    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)",
+                "",
+                "# === 清洗特征名 ===",
+                "X_test_fe.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X_test_fe.columns]",
+                "if X_test_fe.columns.duplicated().any():",
+                "    X_test_fe.columns = [f'{c}_{i}' if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]",
+                "",
+                "# === 预测 ===",
+                "test_preds = model.predict(X_test_fe)",
+                "",
+                "# === 保存结果 ===",
+                f"id_col = '{id_col}'",
+                "if id_col not in test.columns:",
+                "    id_col = test.columns[0]",
+                "result_df = pd.DataFrame({",
+                "    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),",
+                "    'prediction': test_preds,",
+                "})",
+                "result_df.to_csv('output/eval_predictions.csv', index=False)",
+                "print('EVAL_PREDICTIONS_SAVED')",
+            ])
+            
+            code = '\n'.join(parts)
+            
+            # AST 预检
+            import ast
+            ast.parse(code)
+            
+            logger.info(f"[PlanCodingAgent] 自动生成 predict.py 成功, code长度={len(code)}")
+            return code
+        except Exception as e:
+            logger.warning(f"[PlanCodingAgent] 自动生成 predict.py 失败: {e}")
+            return None
+    
     def generate_predict_script(
         self,
         task_config: TaskConfig,
@@ -871,13 +1011,17 @@ class PlanCodingAgent(BaseAgent):
         """
         专门生成配套预测脚本 predict.py
         
-        由于训练代码已将所有特征工程放入 Pipeline，predict.py 只需：
-        1. 加载 data/best_model.pkl
-        2. 加载 data/test.csv
-        3. 调用 pipeline.predict() 直接预测
-        4. 保存 output/eval_predictions.csv
+        策略：
+        1. 先尝试从 best_code 自动生成（保证 feature engineering 与训练完全一致）
+        2. 自动生成失败时 fallback 到 LLM 生成
         """
         slots = task_config.extracted_slots
+        
+        # 【系统修复】优先尝试自动生成，确保 predict.py 中的特征工程与训练代码 100% 一致
+        auto_code = self._generate_predict_script_auto(best_code, task_config)
+        if auto_code:
+            logger.info("[PlanCodingAgent] 使用自动生成的 predict.py")
+            return CodeOutput(plan="自动生成的 predict.py", code=auto_code, raw_response="")
         
         has_saved_model = False
         model_hint = ""

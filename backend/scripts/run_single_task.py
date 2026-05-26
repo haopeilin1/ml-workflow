@@ -26,6 +26,11 @@ def build_llm_config(which: str) -> LLMConfig:
 
 
 def main():
+    import sys
+    # 【修复】Windows GBK 编码问题：强制 stdout 使用 utf-8，避免 emoji 等字符导致 UnicodeEncodeError
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--benchmark-dir", required=True, help="任务目录（单任务模式）")
