@@ -1,0 +1,203 @@
+<plan>
+## 优化策略分析
+
+当前处于 **OPTIMIZE** 状态，Context Payload 建议：
+1. 增加 n_estimators 至 200-300（当前已设为 500，建议调整）
+2. 设置 learning_rate=0.05 配合 early_stopping_rounds=50（当前已设 0.05，但 fit 时未传 eval_set 和 callbacks）
+3. 增大 max_depth 至 6-10（当前已设 6）
+4. 尝试调整 scale_pos_weight 为 1.5-2.5 区间搜索
+
+**关键问题诊断**：
+- 当前代码在 `build_model()` 中设置了 `n_estimators=500`，但 `model.fit()` 时**没有传入 `eval_set` 和 `callbacks`**，导致无法使用 early stopping，模型会训练满 500 轮，容易过拟合。
+- 系统框架中 `model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])` 尝试传入 eval_set，但 LightGBM 4.6.0 需要 `callbacks=[lgb.early_stopping(stopping_rounds=50)]` 才能生效。
+- 当前 `max_depth=6` 和 `num_leaves=31` 的配置合理，但可以微调。
+
+**优化方案**：
+1. **在 `build_model()` 中设置 `n_estimators=300`**（建议范围 200-300），配合 early stopping 实际训练轮数由验证集决定。
+2. **保持 `learning_rate=0.05`**，配合 early stopping 效果更好。
+3. **保持 `max_depth=6`**（建议范围 6-10，6 已足够且防止过拟合）。
+4. **调整 `scale_pos_weight` 为 2.0**（在 1.5-2.5 区间内，接近实际比例 1.96）。
+5. **增加 `min_gain_to_split=0.1`** 防止分裂过于激进。
+6. **在 `build_model()` 中返回模型时，确保 fit 时能正确使用 early stopping**——但注意，系统框架的 `model.fit()` 调用会尝试传入 `eval_set`，我们需要确保模型能正确响应。LightGBM 的 sklearn 接口在 fit 时接受 `eval_set` 和 `callbacks` 参数。
+
+**注意**：由于 `build_model()` 只返回模型对象，不执行 fit，early stopping 的 callbacks 需要在系统框架的 fit 调用中传入。但系统框架的 fit 调用是固定的，我们需要确保模型在 fit 时能自动使用 early stopping。
+
+**解决方案**：在 `build_model()` 中返回一个包装后的模型，或者利用 LightGBM 的 `fit()` 参数默认值。但更简单的方式是：在 `build_model()` 中设置 `n_estimators=300`，并让系统框架的 fit 调用传入 `eval_set` 和 `callbacks`。由于系统框架的 fit 调用是：
+```python
+model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+```
+这不会自动触发 early stopping。我们需要修改 `build_model()` 返回一个自定义包装器，或者修改系统框架——但系统框架不允许修改。
+
+**最佳方案**：利用 LightGBM 的 `fit()` 方法支持 `**kwargs` 的特性，在 `build_model()` 中设置 `callbacks` 参数为默认值。但 `build_model()` 只返回模型对象，不执行 fit。
+
+**替代方案**：在 `build_model()` 中创建一个自定义类，重写 `fit` 方法，自动添加 early stopping callbacks。但这样可能破坏 sklearn 兼容性。
+
+**最简洁方案**：保持现有结构，但调整超参数，并确保系统框架的 fit 调用能正常工作。系统框架的 fit 调用会尝试 `model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])`，如果模型是 LGBMClassifier，这个调用是有效的（LightGBM 4.6.0 的 sklearn 接口支持 eval_set 参数，但 early_stopping_rounds 已移除，需要用 callbacks）。系统框架没有传入 callbacks，所以 early stopping 不会生效。
+
+**改进方案**：在 `build_model()` 中返回一个 `LGBMClassifier` 子类，重写 `fit` 方法，自动添加 early stopping callbacks。或者更简单：在 `build_model()` 中设置 `n_estimators=300`，并接受模型训练满 300 轮（配合 `learning_rate=0.05` 和正则化，过拟合风险可控）。
+
+**最终决定**：
+1. 设置 `n_estimators=300`（配合 learning_rate=0.05）
+2. 保持 `max_depth=6`
+3. 设置 `scale_pos_weight=2.0`
+4. 增加 `min_gain_to_split=0.1`
+5. 增加 `min_sum_hessian_in_leaf=1e-3`
+6. 在 `feature_engineering` 中，确保所有特征列都是数值型，避免因特征工程引入非数值列导致模型报错
+7. 在 `preprocess` 中，确保 test 模式不丢弃目标列（当前代码已正确处理）
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    - 丢弃id列
+    - 将医学指标中的0值视为缺失值（Glucose, BloodPressure, SkinThickness, Insulin, BMI）
+    - 用中位数填充缺失值
+    """
+    df = df.copy()
+    
+    # 丢弃id列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 医学指标中0值不合理的列（这些列的正常值应该>0）
+    zero_invalid_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+    
+    if mode == 'train':
+        # 在训练集上拟合参数
+        # 将0值替换为NaN
+        for col in zero_invalid_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(0, np.nan)
+        
+        # 计算各列的中位数（用于填充）
+        median_values = {}
+        for col in df.columns:
+            if col != 'Outcome' and df[col].dtype in ['int64', 'float64']:
+                median_values[col] = df[col].median()
+        
+        # 保存状态
+        PREPROCESS_STATE['median_values'] = median_values
+        PREPROCESS_STATE['zero_invalid_cols'] = zero_invalid_cols
+        
+        # 用中位数填充NaN
+        for col, median_val in median_values.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    else:  # mode == 'test'
+        # 应用训练集拟合的参数
+        median_values = PREPROCESS_STATE.get('median_values', {})
+        zero_invalid_cols = PREPROCESS_STATE.get('zero_invalid_cols', [])
+        
+        # 将0值替换为NaN
+        for col in zero_invalid_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(0, np.nan)
+        
+        # 用训练集的中位数填充
+        for col, median_val in median_values.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    - 创建交互特征、多项式特征、比率特征
+    - 丢弃目标列Outcome
+    - 返回纯数值特征矩阵
+    """
+    df = df.copy()
+    
+    # 分离目标列（如果存在）
+    target_col = 'Outcome'
+    y = None
+    if target_col in df.columns:
+        y = df[target_col]
+        df = df.drop(columns=[target_col])
+    
+    # 确保所有特征都是数值型
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # 创建交互特征
+    # BMI与Glucose的交互
+    if 'BMI' in numeric_cols and 'Glucose' in numeric_cols:
+        df['BMI_Glucose_interaction'] = df['BMI'] * df['Glucose']
+    
+    # Age与Pregnancies的交互
+    if 'Age' in numeric_cols and 'Pregnancies' in numeric_cols:
+        df['Age_Pregnancies_interaction'] = df['Age'] * df['Pregnancies']
+    
+    # 创建比率特征（避免除零）
+    if 'Glucose' in numeric_cols and 'BMI' in numeric_cols:
+        df['Glucose_per_BMI'] = df['Glucose'] / (df['BMI'] + 1e-6)
+    
+    if 'Insulin' in numeric_cols and 'Glucose' in numeric_cols:
+        df['Insulin_per_Glucose'] = df['Insulin'] / (df['Glucose'] + 1e-6)
+    
+    # 创建多项式特征
+    if 'BMI' in numeric_cols:
+        df['BMI_squared'] = df['BMI'] ** 2
+    
+    if 'Glucose' in numeric_cols:
+        df['Glucose_squared'] = df['Glucose'] ** 2
+    
+    if 'Age' in numeric_cols:
+        df['Age_squared'] = df['Age'] ** 2
+    
+    # 创建对数变换特征（处理偏态分布）
+    skewed_cols = ['Insulin', 'DiabetesPedigreeFunction']
+    for col in skewed_cols:
+        if col in numeric_cols:
+            df[f'{col}_log'] = np.log1p(df[col])
+    
+    # 如果之前分离了目标列，重新加回去（用于后续训练）
+    if y is not None:
+        df[target_col] = y
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用LightGBM，优化参数以提升AUC。
+    - n_estimators=300 配合 learning_rate=0.05
+    - max_depth=6 防止过拟合
+    - scale_pos_weight=2.0 处理类别不平衡
+    - 增加正则化参数
+    """
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=2.0,  # 接近实际比例 1.96
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=300,  # 配合 learning_rate=0.05，足够收敛
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        min_sum_hessian_in_leaf=1e-3,  # 防止过拟合
+        min_gain_to_split=0.1,  # 防止分裂过于激进
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

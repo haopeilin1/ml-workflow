@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": null,
+    "val_accuracy": null,
+    "val_f1_macro": null,
+    "val_rmse": 45376.442236471325,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": null,
+    "accuracy": null,
+    "f1": null,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": 47182.06109289619,
+    "mae": 31053.774111925246,
+    "r2": 0.8346086327636326
+  },
+  "best_score": 77.8,
+  "task_type": "regression",
+  "target_column": "median_house_value",
+  "eval_metric": "RMSE",
+  "complexity": "simple",
+  "complexity_reason": "LLM判定为simple，无复杂信号触发",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

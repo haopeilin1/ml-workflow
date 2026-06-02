@@ -1,0 +1,302 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于北京美国大使馆2010-2014年的气象与空气质量监测数据，预测PM2.5浓度。特征包括年份、月份、小时、露点温度、温度、气压、风向、风速、累计雪/雨量等。数据中存在缺失值，任务为回归预测，评估指标采用RMSE。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 35059,
+  "col_count": 13,
+  "columns": [
+    {
+      "name": "No",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 35059,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0
+      ],
+      "min": 1.0,
+      "max": 35059.0,
+      "mean": 17530.0,
+      "std": 10120.80588029761,
+      "median": 17530.0,
+      "skewness": 0.0,
+      "isMonotonic": true
+    },
+    {
+      "name": "year",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        2010.0,
+        2010.0,
+        2010.0,
+        2010.0,
+        2010.0
+      ],
+      "min": 2010.0,
+      "max": 2013.0,
+      "mean": 2011.5001283550587,
+      "std": 1.117679935440161,
+      "median": 2012.0,
+      "skewness": -0.0006280188083054876
+    },
+    {
+      "name": "month",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 12,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 12.0,
+      "mean": 6.52214837844776,
+      "std": 3.448377903530598,
+      "median": 7.0,
+      "skewness": -0.009190470377332154
+    },
+    {
+      "name": "day",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 31,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 31.0,
+      "mean": 15.727459425539804,
+      "std": 8.798955167376988,
+      "median": 16.0,
+      "skewness": 0.006760720233373198
+    },
+    {
+      "name": "hour",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 24,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "min": 0.0,
+      "max": 23.0,
+      "mean": 11.498645141047948,
+      "std": 6.92182842594194,
+      "median": 11.0,
+      "skewness": 0.00019399425753060035
+    },
+    {
+      "name": "pm2.5",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 563,
+      "missingCount": 1968,
+      "missingRate": 5.61,
+      "sampleValues": [
+        129.0,
+        148.0,
+        159.0,
+        181.0,
+        138.0
+      ],
+      "min": 0.0,
+      "max": 994.0,
+      "mean": 98.85488501405216,
+      "std": 91.66082299423556,
+      "median": 73.0,
+      "skewness": 1.8061465157346839
+    },
+    {
+      "name": "DEWP",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 62,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        -21.0,
+        -21.0,
+        -21.0,
+        -21.0,
+        -20.0
+      ],
+      "min": -33.0,
+      "max": 28.0,
+      "mean": 1.7617159645169571,
+      "std": 14.49854703944481,
+      "median": 2.0,
+      "skewness": -0.11376851783850835
+    },
+    {
+      "name": "TEMP",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 61,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        -11.0,
+        -12.0,
+        -11.0,
+        -14.0,
+        -12.0
+      ],
+      "min": -19.0,
+      "max": 41.0,
+      "mean": 12.141732508057846,
+      "std": 12.313818236011569,
+      "median": 13.0,
+      "skewness": -0.16246584119929647
+    },
+    {
+      "name": "PRES",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 60,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1021.0,
+        1020.0,
+        1019.0,
+        1019.0,
+        1018.0
+      ],
+      "min": 991.0,
+      "max": 1046.0,
+      "mean": 1016.4005818762657,
+      "std": 10.383467536143629,
+      "median": 1016.0,
+      "skewness": 0.10545282629939147
+    },
+    {
+      "name": "cbwd",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "NW",
+        "NW",
+        "NW",
+        "NW",
+        "NW"
+      ],
+      "mostCommon": "SE",
+      "mostCommonFreq": 12068,
+      "cardinality": "low"
+    },
+    {
+      "name": "Iws",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2585,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.79,
+        4.92,
+        6.71,
+        9.84,
+        12.97
+      ],
+      "min": 0.45,
+      "max": 585.6,
+      "mean": 24.94166661912775,
+      "std": 51.28973563450097,
+      "median": 5.81,
+      "skewness": 4.18941700368152
+    },
+    {
+      "name": "Is",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 28,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 27.0,
+      "mean": 0.0574460195670156,
+      "std": 0.7736294898816762,
+      "median": 0.0,
+      "skewness": 18.45099993535152
+    },
+    {
+      "name": "Ir",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 37,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 36.0,
+      "mean": 0.20976068912404802,
+      "std": 1.4895323801488274,
+      "median": 0.0,
+      "skewness": 11.386358271194142
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

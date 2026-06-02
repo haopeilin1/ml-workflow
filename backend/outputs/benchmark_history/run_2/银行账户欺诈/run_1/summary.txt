@@ -1,0 +1,62 @@
+============================================================
+  任务运行摘要: 银行账户欺诈 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: fraud_bool
+  评估指标: ROC-AUC
+  复杂度判定: complex (LLM直接判定为complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 40.50
+  总耗时: 0.0s
+  测试集 AUC: 0.8026
+
+【各阶段耗时】
+  意图识别: 1.6s
+  代码生成: 339.5s
+  沙箱执行: 13.3s
+  评估优化: 9.6s
+  产物生成: 153.3s
+  测试预测: 0.0s
+  总计: 587.3s
+
+【Token 消耗】
+  Plan/Coding 调用: 2 次, 22789 tokens
+  Evaluation 调用: 2 次, 4493 tokens
+  总计: 4 次, 27282 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 9246tokens | 1.2s
+    - qwen3.5-flash@openai: 1 calls, 9246 tokens, 1.2s
+  plan_coding : deepseek-v4-pro@openai | 2calls | 22789tokens | 140.9s
+    - deepseek-v4-pro@openai: 2 calls, 22789 tokens, 140.9s
+  evaluation  : deepseek-v4-flash@openai | 2calls | 4493tokens | 9.6s
+    - deepseek-v4-flash@openai: 2 calls, 4493 tokens, 9.6s
+  judge       : qwen3.5-flash@openai | 1calls | 1492tokens | 2.2s
+    - qwen3.5-flash@openai: 1 calls, 1492 tokens, 2.2s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：ROC-AUC】为核心标准。测试集 AUC 为 0.8026，该数值显著高于二分类任务通常可接受的基线（AUC > 0.7），表明模型具有良好的区分正负样本的能力。虽然验证集指标数据缺失，无法计算具体的相对差距，但测试集表现本身已达到高质量交付水平，且未出现接近随机猜测（AUC < 0.6）的情况。预测策略显示为“未知”而非明确的“通用回退模板”，因此假设特征工程一致性得到保障。综合来看，模型在核心指标上表现优异，符合交付标准。...
+
+【维度评分】
+  unknown: 0.0 (weight=0.3)
+  unknown: 50.0 (weight=0.25)
+  unknown: 70.0 (weight=0.2)
+  unknown: 60.0 (weight=0.15)
+  unknown: 50.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 12:27:50 UTC
+============================================================

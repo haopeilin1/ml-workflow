@@ -1,0 +1,3 @@
+METRICS_JSON_START
+{"val_auc": 0.8750485710927317, "val_accuracy": 0.79}
+METRICS_JSON_END

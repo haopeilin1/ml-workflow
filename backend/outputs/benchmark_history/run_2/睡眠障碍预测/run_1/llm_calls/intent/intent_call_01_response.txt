@@ -1,0 +1,7 @@
+{
+  "target_column": "Sleep Disorder",
+  "task_type": "multiclass_classification",
+  "eval_metric": "Macro F1 Score",
+  "complexity": "simple",
+  "is_time_series": false
+}

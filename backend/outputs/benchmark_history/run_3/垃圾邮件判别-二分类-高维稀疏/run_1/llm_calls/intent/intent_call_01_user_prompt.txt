@@ -1,0 +1,1271 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+Spambase 数据集包含 4601 封邮件的 57 维连续特征（词频、字符频率、大写序列长度等），目标为二分类判定邮件是否为垃圾邮件（spam=1）。需基于训练集构建模型，对测试集进行预测，并通过 id 与真实标签比对验证效果。评估指标仅采用 ROC-AUC
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 3680,
+  "col_count": 59,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 3680,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        2940.0,
+        1303.0,
+        3468.0,
+        3181.0,
+        794.0
+      ],
+      "min": 1.0,
+      "max": 4600.0,
+      "mean": 2296.84375,
+      "std": 1323.8117472048577,
+      "median": 2277.5,
+      "skewness": 0.0008369057105845788,
+      "isMonotonic": false
+    },
+    {
+      "name": "f0",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 135,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.05,
+        0.17,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4.54,
+      "mean": 0.10822010869565217,
+      "std": 0.31781089087246595,
+      "median": 0.0,
+      "skewness": 5.73291767439543
+    },
+    {
+      "name": "f1",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 159,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.26,
+        0.0,
+        0.0,
+        0.56
+      ],
+      "min": 0.0,
+      "max": 14.28,
+      "mean": 0.21818478260869564,
+      "std": 1.3120940640554524,
+      "median": 0.0,
+      "skewness": 9.930170720565263
+    },
+    {
+      "name": "f2",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 205,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.45,
+        1.21,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 5.1,
+      "mean": 0.27372554347826084,
+      "std": 0.4961764713596177,
+      "median": 0.0,
+      "skewness": 3.080834155929096
+    },
+    {
+      "name": "f3",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 38,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 42.81,
+      "mean": 0.06988586956521739,
+      "std": 1.4125981868242627,
+      "median": 0.0,
+      "skewness": 25.38222212994098
+    },
+    {
+      "name": "f4",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 240,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.15,
+        0.43,
+        0.0,
+        0.0,
+        0.56
+      ],
+      "min": 0.0,
+      "max": 9.09,
+      "mean": 0.3161440217391304,
+      "std": 0.668992049660099,
+      "median": 0.0,
+      "skewness": 4.458955948943523
+    },
+    {
+      "name": "f5",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 139,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.1,
+        0.6,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 5.88,
+      "mean": 0.09904891304347826,
+      "std": 0.2875236951818357,
+      "median": 0.0,
+      "skewness": 6.103469389486955
+    },
+    {
+      "name": "f6",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 166,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.43,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 7.27,
+      "mean": 0.11579347826086957,
+      "std": 0.40149445040468057,
+      "median": 0.0,
+      "skewness": 7.0080639493377115
+    },
+    {
+      "name": "f7",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 151,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.26,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4.68,
+      "mean": 0.10109510869565216,
+      "std": 0.3497131534191361,
+      "median": 0.0,
+      "skewness": 6.177419467161029
+    },
+    {
+      "name": "f8",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 142,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.55,
+        0.69,
+        0.0,
+        0.0,
+        1.01
+      ],
+      "min": 0.0,
+      "max": 5.26,
+      "mean": 0.09198913043478261,
+      "std": 0.28533164042909526,
+      "median": 0.0,
+      "skewness": 5.2617380521358985
+    },
+    {
+      "name": "f9",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 231,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.52,
+        0.0,
+        0.0,
+        0.56
+      ],
+      "min": 0.0,
+      "max": 18.18,
+      "mean": 0.2365951086956522,
+      "std": 0.6347483972272303,
+      "median": 0.0,
+      "skewness": 9.04436074397641
+    },
+    {
+      "name": "f10",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 107,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.26,
+        0.0,
+        0.0,
+        0.11
+      ],
+      "min": 0.0,
+      "max": 2.61,
+      "mean": 0.06296195652173912,
+      "std": 0.2125059292292183,
+      "median": 0.0,
+      "skewness": 5.471353818643424
+    },
+    {
+      "name": "f11",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 299,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.15,
+        1.3,
+        3.63,
+        0.0,
+        1.79
+      ],
+      "min": 0.0,
+      "max": 9.67,
+      "mean": 0.5440163043478261,
+      "std": 0.8487679443651406,
+      "median": 0.13,
+      "skewness": 2.7636006874758055
+    },
+    {
+      "name": "f12",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 147,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.17,
+        0.0,
+        0.0,
+        0.22
+      ],
+      "min": 0.0,
+      "max": 5.55,
+      "mean": 0.0937282608695652,
+      "std": 0.3068366816199059,
+      "median": 0.0,
+      "skewness": 7.463148934749466
+    },
+    {
+      "name": "f13",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 124,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.11
+      ],
+      "min": 0.0,
+      "max": 10.0,
+      "mean": 0.06162228260869565,
+      "std": 0.3512916464532734,
+      "median": 0.0,
+      "skewness": 11.776617656895441
+    },
+    {
+      "name": "f14",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 103,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.6,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 2.86,
+      "mean": 0.04745380434782608,
+      "std": 0.2513896372170487,
+      "median": 0.0,
+      "skewness": 6.612637681536238
+    },
+    {
+      "name": "f15",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 236,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.78,
+        0.0,
+        0.0,
+        0.11
+      ],
+      "min": 0.0,
+      "max": 20.0,
+      "mean": 0.2444809782608696,
+      "std": 0.8453362146250364,
+      "median": 0.0,
+      "skewness": 11.683711390182623
+    },
+    {
+      "name": "f16",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 186,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.17,
+        0.0,
+        0.0,
+        0.22
+      ],
+      "min": 0.0,
+      "max": 7.14,
+      "mean": 0.14504619565217391,
+      "std": 0.4501717204737632,
+      "median": 0.0,
+      "skewness": 5.735952436854659
+    },
+    {
+      "name": "f17",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 217,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.05,
+        1.39,
+        0.0,
+        0.0,
+        0.89
+      ],
+      "min": 0.0,
+      "max": 9.09,
+      "mean": 0.18744836956521738,
+      "std": 0.5446743668079388,
+      "median": 0.0,
+      "skewness": 5.429326366505405
+    },
+    {
+      "name": "f18",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 554,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.2,
+        2.43,
+        0.0,
+        0.0,
+        1.79
+      ],
+      "min": 0.0,
+      "max": 18.75,
+      "mean": 1.6533070652173913,
+      "std": 1.7758628140065675,
+      "median": 1.29,
+      "skewness": 1.6107985857444211
+    },
+    {
+      "name": "f19",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 136,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.17,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 18.18,
+      "mean": 0.09021739130434783,
+      "std": 0.540077518040247,
+      "median": 0.0,
+      "skewness": 14.68857144836753
+    },
+    {
+      "name": "f20",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 374,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.15,
+        1.13,
+        0.0,
+        0.0,
+        2.8
+      ],
+      "min": 0.0,
+      "max": 9.52,
+      "mean": 0.8007853260869565,
+      "std": 1.1729496033759048,
+      "median": 0.22,
+      "skewness": 2.3461512709954904
+    },
+    {
+      "name": "f21",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 79,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 17.1,
+      "mean": 0.10525,
+      "std": 0.916721644220201,
+      "median": 0.0,
+      "skewness": 10.343629655694212
+    },
+    {
+      "name": "f22",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 147,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.95,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 5.45,
+      "mean": 0.10329891304347825,
+      "std": 0.3540095928706289,
+      "median": 0.0,
+      "skewness": 5.77443179197418
+    },
+    {
+      "name": "f23",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 134,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.17,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 9.75,
+      "mean": 0.09670380434782609,
+      "std": 0.4362254757690163,
+      "median": 0.0,
+      "skewness": 12.764025420804892
+    },
+    {
+      "name": "f24",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 366,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.65,
+        0.0,
+        0.9,
+        16.66,
+        0.11
+      ],
+      "min": 0.0,
+      "max": 20.83,
+      "mean": 0.5562038043478262,
+      "std": 1.68493499689887,
+      "median": 0.0,
+      "skewness": 5.698860520420624
+    },
+    {
+      "name": "f25",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 263,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.7,
+        0.0,
+        3.63,
+        0.0,
+        0.11
+      ],
+      "min": 0.0,
+      "max": 16.66,
+      "mean": 0.26923641304347823,
+      "std": 0.9081631477255787,
+      "median": 0.0,
+      "skewness": 6.537111708203964
+    },
+    {
+      "name": "f26",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 222,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 33.33,
+      "mean": 0.7650027173913043,
+      "std": 3.3479040759170426,
+      "median": 0.0,
+      "skewness": 5.7360881231065886
+    },
+    {
+      "name": "f27",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 187,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 9.09,
+      "mean": 0.1343559782608696,
+      "std": 0.5733950795731843,
+      "median": 0.0,
+      "skewness": 6.416023358023796
+    },
+    {
+      "name": "f28",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 137,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 14.28,
+      "mean": 0.09983423913043478,
+      "std": 0.598980060639069,
+      "median": 0.0,
+      "skewness": 11.222339783116022
+    },
+    {
+      "name": "f29",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 165,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 5.88,
+      "mean": 0.10380434782608695,
+      "std": 0.4639186701536234,
+      "median": 0.0,
+      "skewness": 6.6275855762251235
+    },
+    {
+      "name": "f30",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 118,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 12.5,
+      "mean": 0.0673179347826087,
+      "std": 0.4249046478636223,
+      "median": 0.0,
+      "skewness": 12.69954243897226
+    },
+    {
+      "name": "f31",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 93,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4.76,
+      "mean": 0.04844565217391304,
+      "std": 0.3402402733867022,
+      "median": 0.0,
+      "skewness": 10.329493074744704
+    },
+    {
+      "name": "f32",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 163,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.16,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 18.18,
+      "mean": 0.09638858695652175,
+      "std": 0.5620364731022485,
+      "median": 0.0,
+      "skewness": 14.224113439147256
+    },
+    {
+      "name": "f33",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 95,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4.76,
+      "mean": 0.04883695652173913,
+      "std": 0.3405737696482431,
+      "median": 0.0,
+      "skewness": 10.300553897955385
+    },
+    {
+      "name": "f34",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 166,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 20.0,
+      "mean": 0.1119945652173913,
+      "std": 0.570641132371905,
+      "median": 0.0,
+      "skewness": 15.100826626060265
+    },
+    {
+      "name": "f35",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 149,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 7.69,
+      "mean": 0.10012228260869564,
+      "std": 0.42318048065783037,
+      "median": 0.0,
+      "skewness": 7.680188260839811
+    },
+    {
+      "name": "f36",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 180,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.81,
+        0.0,
+        1.81,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 6.89,
+      "mean": 0.14128260869565215,
+      "std": 0.4373855913272266,
+      "median": 0.0,
+      "skewness": 5.3972087479984285
+    },
+    {
+      "name": "f37",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 47,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 8.33,
+      "mean": 0.014527173913043478,
+      "std": 0.24056277299868245,
+      "median": 0.0,
+      "skewness": 26.762280513252247
+    },
+    {
+      "name": "f38",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 140,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 8.69,
+      "mean": 0.0747038043478261,
+      "std": 0.3960481179794011,
+      "median": 0.0,
+      "skewness": 9.62420485429737
+    },
+    {
+      "name": "f39",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 114,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.08,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4.76,
+      "mean": 0.06713858695652175,
+      "std": 0.3635264780219784,
+      "median": 0.0,
+      "skewness": 9.012947293123917
+    },
+    {
+      "name": "f40",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 84,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 7.14,
+      "mean": 0.0355,
+      "std": 0.31041234664947326,
+      "median": 0.0,
+      "skewness": 14.05379724876515
+    },
+    {
+      "name": "f41",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 169,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 14.28,
+      "mean": 0.14258152173913044,
+      "std": 0.792862574206565,
+      "median": 0.0,
+      "skewness": 9.033801655751667
+    },
+    {
+      "name": "f42",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 120,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 3.57,
+      "mean": 0.04488858695652174,
+      "std": 0.22382000344961078,
+      "median": 0.0,
+      "skewness": 8.171439918084623
+    },
+    {
+      "name": "f43",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 144,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 16.66,
+      "mean": 0.07458967391304348,
+      "std": 0.5110245267859357,
+      "median": 0.0,
+      "skewness": 15.705711682603917
+    },
+    {
+      "name": "f44",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 222,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.08,
+        0.0,
+        8.33,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 20.0,
+      "mean": 0.3047663043478261,
+      "std": 1.001093748014441,
+      "median": 0.0,
+      "skewness": 8.460400618310583
+    },
+    {
+      "name": "f45",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 199,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 16.7,
+      "mean": 0.16702717391304348,
+      "std": 0.8634027634658583,
+      "median": 0.0,
+      "skewness": 9.351651108192023
+    },
+    {
+      "name": "f46",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 30,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 2.12,
+      "mean": 0.004402173913043478,
+      "std": 0.0678142514907328,
+      "median": 0.0,
+      "skewness": 21.56629918112251
+    },
+    {
+      "name": "f47",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 91,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 10.0,
+      "mean": 0.03203260869565218,
+      "std": 0.30162538579963943,
+      "median": 0.0,
+      "skewness": 20.028502007051348
+    },
+    {
+      "name": "f48",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 273,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.203,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4.385,
+      "mean": 0.03828369565217391,
+      "std": 0.2489030032652265,
+      "median": 0.0,
+      "skewness": 13.586853293668902
+    },
+    {
+      "name": "f49",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 602,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.195,
+        0.108,
+        0.0,
+        0.0,
+        0.186
+      ],
+      "min": 0.0,
+      "max": 9.752,
+      "mean": 0.14346983695652174,
+      "std": 0.28877591271817366,
+      "median": 0.066,
+      "skewness": 13.754723963569068
+    },
+    {
+      "name": "f50",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 198,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4.081,
+      "mean": 0.017058967391304348,
+      "std": 0.11744918016862513,
+      "median": 0.0,
+      "skewness": 20.86349417264173
+    },
+    {
+      "name": "f51",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 876,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.271,
+        0.153,
+        0.0,
+        0.056
+      ],
+      "min": 0.0,
+      "max": 32.478,
+      "mean": 0.2667521739130435,
+      "std": 0.8433708453035156,
+      "median": 0.0,
+      "skewness": 20.363392123828675
+    },
+    {
+      "name": "f52",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 459,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.014,
+        0.243,
+        0.0,
+        0.0,
+        0.056
+      ],
+      "min": 0.0,
+      "max": 6.003,
+      "mean": 0.07725543478260868,
+      "std": 0.25907394403567835,
+      "median": 0.0,
+      "skewness": 11.522217208288453
+    },
+    {
+      "name": "f53",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 280,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.013,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 19.829,
+      "mean": 0.0398695652173913,
+      "std": 0.43237632834763956,
+      "median": 0.0,
+      "skewness": 35.12108203976588
+    },
+    {
+      "name": "f54",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1863,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        2.88,
+        6.395,
+        1.933,
+        4.333,
+        2.153
+      ],
+      "min": 1.0,
+      "max": 1102.5,
+      "mean": 5.256164130434783,
+      "std": 33.01180298601239,
+      "median": 2.2775,
+      "skewness": 23.90103029602321
+    },
+    {
+      "name": "f55",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 254,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        45.0,
+        583.0,
+        7.0,
+        20.0,
+        53.0
+      ],
+      "min": 1.0,
+      "max": 9989.0,
+      "mean": 51.90135869565217,
+      "std": 206.30098664270713,
+      "median": 15.0,
+      "skewness": 31.97159631015041
+    },
+    {
+      "name": "f56",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 826,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1080.0,
+        1375.0,
+        58.0,
+        26.0,
+        532.0
+      ],
+      "min": 1.0,
+      "max": 15841.0,
+      "mean": 278.13152173913045,
+      "std": 581.0213042611213,
+      "median": 94.0,
+      "skewness": 9.027823888337121
+    },
+    {
+      "name": "spam",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.39402173913043476,
+      "std": 0.48870595313850745,
+      "median": 0.0,
+      "skewness": 0.43394555924345135
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

@@ -1,0 +1,264 @@
+<plan>
+## 优化规划
+
+### 当前状态分析
+当前处于 OPTIMIZE 阶段，上下文载荷建议：
+1. 使用 GridSearchCV 或 Optuna 搜索超参数（num_leaves, learning_rate, min_child_samples）
+2. 增加特征工程（多项式特征或交互特征）
+3. 考虑使用 XGBoost 或 CatBoost 作为替代模型
+
+### 优化策略
+
+**1. 超参数调优（核心优化）**
+- 使用 Optuna 进行贝叶斯超参数搜索（比 GridSearchCV 更高效）
+- 搜索空间：num_leaves(15-50)、learning_rate(0.01-0.1)、min_child_samples(5-30)、subsample(0.6-0.9)、feature_fraction(0.6-0.9)、reg_alpha(0-1.0)、reg_lambda(0-1.0)
+- 使用验证集 RMSE 作为优化目标
+- 设置 n_trials=30 以平衡搜索质量和时间
+
+**2. 特征工程增强**
+- 保留现有特征（已有较好的物理意义特征）
+- 增加更多交互特征：f×alpha（频率与攻角）、c×U_infinity（弦长与速度，与雷诺数相关）
+- 增加多项式特征：f×delta_squared、alpha×delta_squared
+- 增加对数比值特征：log(f/U_infinity)、log(c/delta)
+- 注意：所有特征工程在 feature_engineering 中完成，preprocess 只做标准化
+
+**3. 模型选择**
+- 继续使用 LightGBM（对中小数据集表现优秀，训练速度快）
+- 通过 Optuna 找到最佳超参数组合
+- 使用 early stopping 防止过拟合（stopping_rounds=50）
+
+**4. 过拟合控制**
+- 限制 max_depth=8（已在代码中设置）
+- 设置 min_child_samples≥5
+- 使用 subsample=0.8 和 feature_fraction=0.8
+- 添加 L1/L2 正则化（reg_alpha, reg_lambda）
+- 使用 early stopping
+
+### 代码修改要点
+1. `build_model()`：移除固定超参数，改为 Optuna 搜索逻辑
+2. `feature_engineering()`：增加更多交互特征
+3. `preprocess()`：保持不变（当前实现已正确）
+</plan>
+<code>
+```python
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from lightgbm import LGBMRegressor
+import lightgbm as lgb
+import optuna
+
+# 全局状态存储
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    global PREPROCESS_STATE
+    
+    # 复制数据避免修改原始数据
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 分离特征列和目标列
+    feature_cols = ['f', 'alpha', 'c', 'U_infinity', 'delta']
+    target_col = 'SSPL'
+    
+    # 确保特征列都存在
+    available_features = [col for col in feature_cols if col in df.columns]
+    
+    if mode == 'train':
+        # 拟合 StandardScaler
+        scaler = StandardScaler()
+        scaler.fit(df[available_features])
+        PREPROCESS_STATE['scaler'] = scaler
+    else:
+        # 应用已拟合的 scaler
+        scaler = PREPROCESS_STATE.get('scaler')
+        if scaler is None:
+            raise ValueError("PREPROCESS_STATE 中未找到 scaler，请先运行 mode='train'")
+    
+    # 应用标准化
+    df[available_features] = scaler.transform(df[available_features])
+    
+    return df
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 复制数据
+    df = df.copy()
+    
+    # 特征列列表
+    feature_cols = ['f', 'alpha', 'c', 'U_infinity', 'delta']
+    target_col = 'SSPL'
+    
+    # 确保特征列都存在
+    available_features = [col for col in feature_cols if col in df.columns]
+    
+    # 创建交叉特征（物理意义相关）
+    df['f_delta'] = df['f'] * df['delta']
+    df['alpha_U_infinity'] = df['alpha'] * df['U_infinity']
+    df['f_c'] = df['f'] * df['c']  # 与 Strouhal 数相关
+    df['alpha_delta'] = df['alpha'] * df['delta']  # 攻角与位移厚度交互
+    df['U_infinity_delta'] = df['U_infinity'] * df['delta']  # 速度与位移厚度交互
+    df['f_alpha'] = df['f'] * df['alpha']  # 频率与攻角交互
+    df['c_U_infinity'] = df['c'] * df['U_infinity']  # 弦长与速度交互（与雷诺数相关）
+    
+    # 创建比值特征
+    df['U_infinity_over_c'] = df['U_infinity'] / (df['c'] + 1e-8)  # 避免除零
+    df['f_over_U_infinity'] = df['f'] / (df['U_infinity'] + 1e-8)  # 频率/速度，与波长相关
+    df['c_over_delta'] = df['c'] / (df['delta'] + 1e-8)  # 弦长/位移厚度，与相对厚度相关
+    df['f_over_c'] = df['f'] / (df['c'] + 1e-8)  # 频率/弦长，与 Strouhal 数相关
+    df['alpha_over_U_infinity'] = df['alpha'] / (df['U_infinity'] + 1e-8)  # 攻角/速度
+    
+    # 创建多项式特征
+    df['f_squared'] = df['f'] ** 2
+    df['delta_squared'] = df['delta'] ** 2
+    df['alpha_squared'] = df['alpha'] ** 2
+    df['U_infinity_squared'] = df['U_infinity'] ** 2
+    df['c_squared'] = df['c'] ** 2
+    
+    # 创建高阶交互特征
+    df['f_delta_squared'] = df['f'] * df['delta_squared']
+    df['alpha_delta_squared'] = df['alpha'] * df['delta_squared']
+    df['f_alpha_delta'] = df['f'] * df['alpha'] * df['delta']
+    
+    # 创建对数变换特征（声压级常与对数相关）
+    df['log_f'] = np.log1p(df['f'])
+    df['log_delta'] = np.log1p(df['delta'] * 1000)  # 放大后取对数，避免负值
+    df['log_U_infinity'] = np.log1p(df['U_infinity'])
+    df['log_c'] = np.log1p(df['c'] * 100)  # 放大后取对数
+    df['log_f_over_U'] = np.log1p(df['f'] / (df['U_infinity'] + 1e-8))
+    df['log_c_over_delta'] = np.log1p(df['c'] / (df['delta'] + 1e-8))
+    
+    # 选择所有特征列（包括新创建的）
+    all_feature_cols = available_features + [
+        'f_delta', 'alpha_U_infinity', 'f_c', 'alpha_delta', 'U_infinity_delta',
+        'f_alpha', 'c_U_infinity',
+        'U_infinity_over_c', 'f_over_U_infinity', 'c_over_delta', 'f_over_c', 'alpha_over_U_infinity',
+        'f_squared', 'delta_squared', 'alpha_squared', 'U_infinity_squared', 'c_squared',
+        'f_delta_squared', 'alpha_delta_squared', 'f_alpha_delta',
+        'log_f', 'log_delta', 'log_U_infinity', 'log_c', 'log_f_over_U', 'log_c_over_delta'
+    ]
+    
+    # 分离目标列
+    if target_col in df.columns:
+        X = df[all_feature_cols]
+    else:
+        X = df[all_feature_cols]
+    
+    return X
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用 Optuna 进行超参数搜索，返回优化后的模型。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 加载数据用于 Optuna 优化
+    train = pd.read_csv('data/train.csv')
+    val = pd.read_csv('data/validation.csv')
+    
+    # 预处理
+    train_clean = preprocess(train, mode='train')
+    val_clean = preprocess(val, mode='test')
+    
+    # 特征工程
+    target_col = 'SSPL'
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+    
+    X_train_fe = feature_engineering(X_train)
+    X_val_fe = feature_engineering(X_val)
+    
+    # 清洗特征名
+    import re
+    for _df in [X_train_fe, X_val_fe]:
+        _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+        if _df.columns.duplicated().any():
+            _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+    
+    def objective(trial):
+        params = {
+            'objective': 'regression',
+            'num_leaves': trial.suggest_int('num_leaves', 15, 50),
+            'max_depth': trial.suggest_int('max_depth', 4, 10),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+            'n_estimators': 1000,
+            'subsample': trial.suggest_float('subsample', 0.6, 0.9),
+            'subsample_freq': 1,
+            'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 0.9),
+            'min_child_samples': trial.suggest_int('min_child_samples', 5, 30),
+            'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 1.0, log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True),
+            'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 0.1),
+            'random_state': 42,
+            'verbose': -1
+        }
+        
+        model = LGBMRegressor(**params)
+        model.fit(
+            X_train_fe, y_train,
+            eval_set=[(X_val_fe, y_val)],
+            callbacks=[lgb.early_stopping(stopping_rounds=50)]
+        )
+        
+        val_preds = model.predict(X_val_fe)
+        rmse = float(np.sqrt(mean_squared_error(y_val, val_preds)))
+        return rmse
+    
+    # 运行 Optuna 优化
+    study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=30, show_progress_bar=False)
+    
+    # 使用最佳超参数构建最终模型
+    best_params = study.best_params
+    best_params['objective'] = 'regression'
+    best_params['n_estimators'] = 1000
+    best_params['random_state'] = 42
+    best_params['verbose'] = -1
+    
+    model = LGBMRegressor(**best_params)
+    
+    # 保存最佳参数到全局状态（供评估时参考）
+    PREPROCESS_STATE['best_params'] = best_params
+    PREPROCESS_STATE['best_rmse'] = study.best_value
+    
+    return model
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    """
+    val_preds = model.predict(X_val)
+    
+    rmse = float(np.sqrt(mean_squared_error(y_val, val_preds)))
+    mae = float(mean_absolute_error(y_val, val_preds))
+    r2 = float(r2_score(y_val, val_preds))
+    
+    # 如果有 Optuna 的最佳结果，也输出
+    result = {
+        'val_rmse': rmse,
+        'val_mae': mae,
+        'val_r2': r2
+    }
+    
+    if 'best_rmse' in PREPROCESS_STATE:
+        result['optuna_best_rmse'] = PREPROCESS_STATE['best_rmse']
+    
+    return result
+```
+</code>

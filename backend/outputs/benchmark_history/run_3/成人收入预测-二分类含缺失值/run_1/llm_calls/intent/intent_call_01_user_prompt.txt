@@ -1,0 +1,341 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于1994年美国人口普查数据，预测个人年收入是否超过5万美元。数据包含年龄、工作类别、教育程度、婚姻状况、职业、种族、性别、资本收益等特征。存在缺失值和大量类别特征，为二分类任务，评估指标采用AUC。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 26048,
+  "col_count": 16,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 26048,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "min": 0.0,
+      "max": 26047.0,
+      "mean": 13023.5,
+      "std": 7519.554242107706,
+      "median": 13023.5,
+      "skewness": 0.0,
+      "isMonotonic": true
+    },
+    {
+      "name": "age",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 72,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        27.0,
+        45.0,
+        29.0,
+        30.0,
+        29.0
+      ],
+      "min": 17.0,
+      "max": 90.0,
+      "mean": 38.59098587223587,
+      "std": 13.659950492438126,
+      "median": 37.0,
+      "skewness": 0.5577819536419097
+    },
+    {
+      "name": "workclass",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 8,
+      "missingCount": 1459,
+      "missingRate": 5.6,
+      "sampleValues": [
+        "Private",
+        "State-gov",
+        "Private",
+        "Private",
+        "Self-emp-not-inc"
+      ],
+      "mostCommon": "Private",
+      "mostCommonFreq": 18203,
+      "cardinality": "low"
+    },
+    {
+      "name": "fnlwgt",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 18417,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        160178.0,
+        50567.0,
+        185908.0,
+        190040.0,
+        189346.0
+      ],
+      "min": 12285.0,
+      "max": 1484705.0,
+      "mean": 189429.28366861178,
+      "std": 105239.7688450475,
+      "median": 178114.5,
+      "skewness": 1.449449337929679
+    },
+    {
+      "name": "education",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 16,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Some-college",
+        "HS-grad",
+        "Bachelors",
+        "Bachelors",
+        "Some-college"
+      ],
+      "mostCommon": "HS-grad",
+      "mostCommonFreq": 8410,
+      "cardinality": "medium"
+    },
+    {
+      "name": "education_num",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 16,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        10.0,
+        9.0,
+        13.0,
+        13.0,
+        10.0
+      ],
+      "min": 1.0,
+      "max": 16.0,
+      "mean": 10.06833538083538,
+      "std": 2.574377253782477,
+      "median": 10.0,
+      "skewness": -0.31945137815435726
+    },
+    {
+      "name": "marital_status",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 7,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Divorced",
+        "Married-civ-spouse",
+        "Married-civ-spouse",
+        "Never-married",
+        "Divorced"
+      ],
+      "mostCommon": "Married-civ-spouse",
+      "mostCommonFreq": 12000,
+      "cardinality": "low"
+    },
+    {
+      "name": "occupation",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 14,
+      "missingCount": 1463,
+      "missingRate": 5.62,
+      "sampleValues": [
+        "Adm-clerical",
+        "Exec-managerial",
+        "Exec-managerial",
+        "Machine-op-inspct",
+        "Craft-repair"
+      ],
+      "mostCommon": "Prof-specialty",
+      "mostCommonFreq": 3317,
+      "cardinality": "medium"
+    },
+    {
+      "name": "relationship",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 6,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Not-in-family",
+        "Wife",
+        "Husband",
+        "Not-in-family",
+        "Not-in-family"
+      ],
+      "mostCommon": "Husband",
+      "mostCommonFreq": 10566,
+      "cardinality": "low"
+    },
+    {
+      "name": "race",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 5,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "White",
+        "White",
+        "Black",
+        "White",
+        "White"
+      ],
+      "mostCommon": "White",
+      "mostCommonFreq": 22297,
+      "cardinality": "low"
+    },
+    {
+      "name": "sex",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Female",
+        "Female",
+        "Male",
+        "Female",
+        "Male"
+      ],
+      "mostCommon": "Male",
+      "mostCommonFreq": 17473,
+      "cardinality": "low"
+    },
+    {
+      "name": "capital_gain",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 117,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2202.0
+      ],
+      "min": 0.0,
+      "max": 99999.0,
+      "mean": 1059.3704315110565,
+      "std": 7292.059672711447,
+      "median": 0.0,
+      "skewness": 12.11049177445951
+    },
+    {
+      "name": "capital_loss",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 88,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4356.0,
+      "mean": 85.699785012285,
+      "std": 399.77674089222074,
+      "median": 0.0,
+      "skewness": 4.6513410042665395
+    },
+    {
+      "name": "hours_per_week",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 93,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        38.0,
+        40.0,
+        55.0,
+        40.0,
+        50.0
+      ],
+      "min": 1.0,
+      "max": 99.0,
+      "mean": 40.40291001228501,
+      "std": 12.3440375237615,
+      "median": 40.0,
+      "skewness": 0.23570950832075083
+    },
+    {
+      "name": "native_country",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 41,
+      "missingCount": 462,
+      "missingRate": 1.77,
+      "sampleValues": [
+        "United-States",
+        "United-States",
+        "United-States",
+        "United-States",
+        "United-States"
+      ],
+      "mostCommon": "United-States",
+      "mostCommonFreq": 23363,
+      "cardinality": "medium"
+    },
+    {
+      "name": "income",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "<=50K",
+        "<=50K",
+        ">50K",
+        "<=50K",
+        "<=50K"
+      ],
+      "mostCommon": "<=50K",
+      "mostCommonFreq": 19775,
+      "cardinality": "low"
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

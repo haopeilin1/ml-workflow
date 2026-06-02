@@ -1,0 +1,837 @@
+<plan>
+产物生成计划：
+1. 加载已存在的 data/best_model.pkl 模型文件
+2. 对测试集 data/test.csv 进行预测
+3. 生成所有必需产物：model.pkl、feature_importance.csv、feature_importance.png、report.html、test_predictions.csv、predict.py、report_fig.png（ROC曲线）
+4. 由于是二分类任务，生成 ROC 曲线图、混淆矩阵、分类报告
+5. 输出摘要 JSON
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import os
+import json
+import warnings
+import re
+from pathlib import Path
+
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 1. 加载已保存的最佳模型 ==========
+print("Loading best model from data/best_model.pkl...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Model loaded successfully.")
+except Exception as e:
+    print(f"Failed to load model: {e}")
+    print("Attempting to retrain...")
+    
+    # 回退：重新训练模型
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from lightgbm import LGBMClassifier
+    
+    train = pd.read_csv('data/train.csv')
+    val = pd.read_csv('data/validation.csv')
+    
+    target_col = 'income'
+    
+    # 预处理函数
+    def preprocess(df, mode='train', state={}):
+        df = df.copy()
+        if 'id' in df.columns:
+            df = df.drop(columns=['id'])
+        if 'income' in df.columns:
+            df['income'] = df['income'].map({'<=50K': 0, '>50K': 1}).astype(int)
+        
+        cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                    'relationship', 'race', 'sex', 'native_country']
+        num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 'capital_loss', 'hours_per_week']
+        
+        if mode == 'train':
+            cat_transformer = Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ])
+            num_transformer = Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ])
+            state['cat_cols'] = cat_cols
+            state['num_cols'] = num_cols
+            state['cat_transformer'] = cat_transformer
+            state['num_transformer'] = num_transformer
+            
+            cat_data = cat_transformer.fit_transform(df[cat_cols])
+            num_data = num_transformer.fit_transform(df[num_cols])
+            
+            cat_feature_names = []
+            for i, col in enumerate(cat_cols):
+                encoder = cat_transformer.named_steps['encoder']
+                if hasattr(encoder, 'categories_'):
+                    categories = encoder.categories_[i]
+                    for cat in categories:
+                        cat_feature_names.append(f"{col}_{cat}")
+            
+            processed_df = pd.DataFrame(
+                np.hstack([cat_data, num_data]),
+                columns=cat_feature_names + num_cols,
+                index=df.index
+            )
+            if 'income' in df.columns:
+                processed_df['income'] = df['income'].values
+            state['feature_names'] = processed_df.columns.tolist()
+        else:
+            cat_transformer = state['cat_transformer']
+            num_transformer = state['num_transformer']
+            cat_data = cat_transformer.transform(df[cat_cols])
+            num_data = num_transformer.transform(df[num_cols])
+            
+            cat_feature_names = []
+            for i, col in enumerate(cat_cols):
+                encoder = cat_transformer.named_steps['encoder']
+                if hasattr(encoder, 'categories_'):
+                    categories = encoder.categories_[i]
+                    for cat in categories:
+                        cat_feature_names.append(f"{col}_{cat}")
+            
+            processed_df = pd.DataFrame(
+                np.hstack([cat_data, num_data]),
+                columns=cat_feature_names + num_cols,
+                index=df.index
+            )
+            if 'income' in df.columns:
+                processed_df['income'] = df['income'].values
+        
+        return processed_df
+    
+    def feature_engineering(df):
+        if 'income' in df.columns:
+            X = df.drop(columns=['income'])
+        else:
+            X = df.copy()
+        
+        for col in X.columns:
+            if X[col].dtype == 'object':
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+        X = X.fillna(0)
+        
+        if 'capital_gain' in X.columns:
+            X['capital_gain_log'] = np.log1p(X['capital_gain'])
+        if 'capital_loss' in X.columns:
+            X['capital_loss_log'] = np.log1p(X['capital_loss'])
+        if 'age' in X.columns:
+            X['age_squared'] = X['age'] ** 2
+        if 'capital_gain' in X.columns and 'hours_per_week' in X.columns:
+            X['capital_gain_hours_interaction'] = X['capital_gain'] * X['hours_per_week']
+        if 'education_num' in X.columns and 'hours_per_week' in X.columns:
+            X['education_hours_interaction'] = X['education_num'] * X['hours_per_week']
+        if 'capital_gain' in X.columns and 'capital_loss' in X.columns:
+            X['capital_net'] = X['capital_gain'] - X['capital_loss']
+        
+        X = X.fillna(0)
+        return X
+    
+    state = {}
+    train_clean = preprocess(train, mode='train', state=state)
+    val_clean = preprocess(val, mode='test', state=state)
+    
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col].map({'<=50K': 0, '>50K': 1}).astype(int)
+        X_train = train_clean
+    
+    if target_col in val_clean.columns:
+        y_val = val_clean[target_col]
+        X_val = val_clean.drop(columns=[target_col])
+    else:
+        y_val = val[target_col].map({'<=50K': 0, '>50K': 1}).astype(int)
+        X_val = val_clean
+    
+    X_train_fe = feature_engineering(X_train)
+    X_val_fe = feature_engineering(X_val)
+    
+    for _df in [X_train_fe, X_val_fe]:
+        _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+    for _df in [X_train_fe, X_val_fe]:
+        if _df.columns.duplicated().any():
+            _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=3.17,
+        num_leaves=24,
+        max_depth=6,
+        learning_rate=0.03,
+        n_estimators=800,
+        subsample=0.8,
+        subsample_freq=1,
+        colsample_bytree=0.8,
+        min_child_samples=30,
+        min_child_weight=5.0,
+        min_split_gain=0.01,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1,
+        importance_type='gain'
+    )
+    
+    try:
+        model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+    except Exception:
+        model.fit(X_train_fe, y_train)
+    
+    # 保存特征名用于后续
+    feature_names_retrain = X_train_fe.columns.tolist()
+    print("Model retrained successfully.")
+
+# ========== 2. 加载测试数据并预处理 ==========
+print("Loading test data...")
+test = pd.read_csv('data/test.csv')
+
+# 检查模型是否是 Pipeline（包含预处理步骤）
+is_pipeline = hasattr(model, 'named_steps') or hasattr(model, 'transform')
+
+# 如果模型不是 Pipeline，需要手动预处理测试数据
+if not is_pipeline:
+    print("Model is not a Pipeline, preprocessing test data manually...")
+    # 尝试从 best_model.pkl 同级加载预处理状态
+    try:
+        with open('data/preprocess_state.pkl', 'rb') as f:
+            state = pickle.load(f)
+        print("Loaded preprocess state.")
+    except:
+        # 如果没有保存的状态，重新拟合
+        print("No preprocess state found, fitting from training data...")
+        train = pd.read_csv('data/train.csv')
+        from sklearn.compose import ColumnTransformer
+        from sklearn.preprocessing import OneHotEncoder, StandardScaler
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+        
+        state = {}
+        train_copy = train.copy()
+        if 'id' in train_copy.columns:
+            train_copy = train_copy.drop(columns=['id'])
+        if 'income' in train_copy.columns:
+            train_copy['income'] = train_copy['income'].map({'<=50K': 0, '>50K': 1}).astype(int)
+        
+        cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                    'relationship', 'race', 'sex', 'native_country']
+        num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 'capital_loss', 'hours_per_week']
+        
+        cat_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        num_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        state['cat_cols'] = cat_cols
+        state['num_cols'] = num_cols
+        state['cat_transformer'] = cat_transformer
+        state['num_transformer'] = num_transformer
+        
+        cat_transformer.fit(train_copy[cat_cols])
+        num_transformer.fit(train_copy[num_cols])
+    
+    # 预处理测试数据
+    test_copy = test.copy()
+    if 'id' in test_copy.columns:
+        test_id = test_copy['id']
+        test_copy = test_copy.drop(columns=['id'])
+    else:
+        test_id = pd.Series(range(len(test_copy)))
+    
+    cat_cols = state['cat_cols']
+    num_cols = state['num_cols']
+    cat_transformer = state['cat_transformer']
+    num_transformer = state['num_transformer']
+    
+    cat_data = cat_transformer.transform(test_copy[cat_cols])
+    num_data = num_transformer.transform(test_copy[num_cols])
+    
+    cat_feature_names = []
+    for i, col in enumerate(cat_cols):
+        encoder = cat_transformer.named_steps['encoder']
+        if hasattr(encoder, 'categories_'):
+            categories = encoder.categories_[i]
+            for cat in categories:
+                cat_feature_names.append(f"{col}_{cat}")
+    
+    test_processed = pd.DataFrame(
+        np.hstack([cat_data, num_data]),
+        columns=cat_feature_names + num_cols,
+        index=test_copy.index
+    )
+    
+    # 特征工程
+    X_test = test_processed.copy()
+    for col in X_test.columns:
+        if X_test[col].dtype == 'object':
+            X_test[col] = pd.to_numeric(X_test[col], errors='coerce')
+    X_test = X_test.fillna(0)
+    
+    if 'capital_gain' in X_test.columns:
+        X_test['capital_gain_log'] = np.log1p(X_test['capital_gain'])
+    if 'capital_loss' in X_test.columns:
+        X_test['capital_loss_log'] = np.log1p(X_test['capital_loss'])
+    if 'age' in X_test.columns:
+        X_test['age_squared'] = X_test['age'] ** 2
+    if 'capital_gain' in X_test.columns and 'hours_per_week' in X_test.columns:
+        X_test['capital_gain_hours_interaction'] = X_test['capital_gain'] * X_test['hours_per_week']
+    if 'education_num' in X_test.columns and 'hours_per_week' in X_test.columns:
+        X_test['education_hours_interaction'] = X_test['education_num'] * X_test['hours_per_week']
+    if 'capital_gain' in X_test.columns and 'capital_loss' in X_test.columns:
+        X_test['capital_net'] = X_test['capital_gain'] - X_test['capital_loss']
+    
+    X_test = X_test.fillna(0)
+    
+    # 清洗特征名
+    X_test.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_test.columns]
+    if X_test.columns.duplicated().any():
+        X_test.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test.columns)]
+    
+    # 确保特征列与训练时一致
+    if hasattr(model, 'feature_name_'):
+        expected_features = model.feature_name_
+    elif hasattr(model, 'feature_names_in_'):
+        expected_features = model.feature_names_in_
+    else:
+        expected_features = None
+    
+    if expected_features is not None:
+        # 只保留模型期望的特征
+        missing_cols = set(expected_features) - set(X_test.columns)
+        extra_cols = set(X_test.columns) - set(expected_features)
+        for col in missing_cols:
+            X_test[col] = 0
+        X_test = X_test[list(expected_features)]
+else:
+    # Pipeline 模型，直接使用原始测试数据
+    X_test = test.copy()
+    if 'id' in X_test.columns:
+        test_id = X_test['id']
+        X_test = X_test.drop(columns=['id'])
+    else:
+        test_id = pd.Series(range(len(X_test)))
+    if 'income' in X_test.columns:
+        X_test = X_test.drop(columns=['income'])
+
+# ========== 3. 测试集预测 ==========
+print("Making predictions on test set...")
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test)[:, 1]
+else:
+    test_probs = model.predict(X_test).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+# 保存测试预测
+result_df = pd.DataFrame({
+    'id': test_id.values if hasattr(test_id, 'values') else test_id,
+    'prediction': test_preds,
+    'probability': test_probs
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 4. 保存模型到 output/model.pkl ==========
+print("Saving model to output/model.pkl...")
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+
+# ========== 5. 特征重要性 ==========
+print("Generating feature importance...")
+
+# 获取特征名
+if hasattr(model, 'feature_name_'):
+    feature_names = model.feature_name_
+elif hasattr(model, 'feature_names_in_'):
+    feature_names = model.feature_names_in_
+elif hasattr(model, 'named_steps'):
+    # Pipeline，获取最终估计器的特征名
+    final_estimator = model.steps[-1][1]
+    if hasattr(final_estimator, 'feature_name_'):
+        feature_names = final_estimator.feature_name_
+    elif hasattr(final_estimator, 'feature_names_in_'):
+        feature_names = final_estimator.feature_names_in_
+    else:
+        feature_names = [f'feature_{i}' for i in range(len(X_test.columns))]
+else:
+    feature_names = X_test.columns.tolist()
+
+# 获取特征重要性值
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'named_steps'):
+    final_estimator = model.steps[-1][1]
+    if hasattr(final_estimator, 'feature_importances_'):
+        importances = final_estimator.feature_importances_
+    else:
+        importances = np.ones(len(feature_names)) / len(feature_names)
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度一致
+if len(importances) != len(feature_names):
+    min_len = min(len(importances), len(feature_names))
+    feature_names = feature_names[:min_len]
+    importances = importances[:min_len]
+
+# 保存特征重要性 CSV
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# 生成特征重要性图（仅当特征数 <= 100 时生成图，避免大图）
+if len(feature_names) <= 100:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    
+    top_n = min(30, len(importance_df))
+    top_features = importance_df.head(top_n)
+    
+    plt.figure(figsize=(10, 8))
+    plt.barh(range(len(top_features)), top_features['importance'].values)
+    plt.yticks(range(len(top_features)), top_features['name'].values)
+    plt.xlabel('Importance')
+    plt.title('Feature Importance (Top {})'.format(top_n))
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("Feature importance plot saved to output/feature_importance.png")
+else:
+    print("Too many features, skipping feature_importance.png")
+
+# ========== 6. 生成 ROC 曲线图 (report_fig.png) ==========
+print("Generating ROC curve...")
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, auc, confusion_matrix, classification_report
+
+# 如果有验证集，计算验证集指标用于报告
+try:
+    val = pd.read_csv('data/validation.csv')
+    if 'income' in val.columns:
+        y_val_true = val['income'].map({'<=50K': 0, '>50K': 1}).astype(int)
+        
+        # 对验证集做同样的预处理
+        if not is_pipeline:
+            val_copy = val.copy()
+            if 'id' in val_copy.columns:
+                val_copy = val_copy.drop(columns=['id'])
+            
+            cat_data_val = cat_transformer.transform(val_copy[cat_cols])
+            num_data_val = num_transformer.transform(val_copy[num_cols])
+            
+            val_processed = pd.DataFrame(
+                np.hstack([cat_data_val, num_data_val]),
+                columns=cat_feature_names + num_cols,
+                index=val_copy.index
+            )
+            
+            X_val_fe = val_processed.copy()
+            for col in X_val_fe.columns:
+                if X_val_fe[col].dtype == 'object':
+                    X_val_fe[col] = pd.to_numeric(X_val_fe[col], errors='coerce')
+            X_val_fe = X_val_fe.fillna(0)
+            
+            if 'capital_gain' in X_val_fe.columns:
+                X_val_fe['capital_gain_log'] = np.log1p(X_val_fe['capital_gain'])
+            if 'capital_loss' in X_val_fe.columns:
+                X_val_fe['capital_loss_log'] = np.log1p(X_val_fe['capital_loss'])
+            if 'age' in X_val_fe.columns:
+                X_val_fe['age_squared'] = X_val_fe['age'] ** 2
+            if 'capital_gain' in X_val_fe.columns and 'hours_per_week' in X_val_fe.columns:
+                X_val_fe['capital_gain_hours_interaction'] = X_val_fe['capital_gain'] * X_val_fe['hours_per_week']
+            if 'education_num' in X_val_fe.columns and 'hours_per_week' in X_val_fe.columns:
+                X_val_fe['education_hours_interaction'] = X_val_fe['education_num'] * X_val_fe['hours_per_week']
+            if 'capital_gain' in X_val_fe.columns and 'capital_loss' in X_val_fe.columns:
+                X_val_fe['capital_net'] = X_val_fe['capital_gain'] - X_val_fe['capital_loss']
+            
+            X_val_fe = X_val_fe.fillna(0)
+            X_val_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_val_fe.columns]
+            if X_val_fe.columns.duplicated().any():
+                X_val_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_val_fe.columns)]
+            
+            if expected_features is not None:
+                missing_cols_val = set(expected_features) - set(X_val_fe.columns)
+                for col in missing_cols_val:
+                    X_val_fe[col] = 0
+                X_val_fe = X_val_fe[list(expected_features)]
+        else:
+            X_val_fe = val.copy()
+            if 'id' in X_val_fe.columns:
+                X_val_fe = X_val_fe.drop(columns=['id'])
+            if 'income' in X_val_fe.columns:
+                X_val_fe = X_val_fe.drop(columns=['income'])
+        
+        if hasattr(model, 'predict_proba'):
+            val_probs = model.predict_proba(X_val_fe)[:, 1]
+        else:
+            val_probs = model.predict(X_val_fe).astype(float)
+        val_preds = (val_probs >= 0.5).astype(int)
+        
+        # 计算指标
+        from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
+        val_auc = float(roc_auc_score(y_val_true, val_probs))
+        val_accuracy = float(accuracy_score(y_val_true, val_preds))
+        val_precision = float(precision_score(y_val_true, val_preds, zero_division=0))
+        val_recall = float(recall_score(y_val_true, val_preds, zero_division=0))
+        val_f1 = float(f1_score(y_val_true, val_preds, zero_division=0))
+        
+        # ROC 曲线
+        fpr, tpr, _ = roc_curve(y_val_true, val_probs)
+        roc_auc = auc(fpr, tpr)
+        
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label='ROC curve (AUC = {:.4f})'.format(roc_auc))
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Receiver Operating Characteristic (ROC) Curve')
+        plt.legend(loc="lower right")
+        plt.tight_layout()
+        plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+        plt.close()
+        print("ROC curve saved to output/report_fig.png")
+        
+        # 混淆矩阵
+        cm = confusion_matrix(y_val_true, val_preds)
+        cm_dict = {
+            'tn': int(cm[0, 0]),
+            'fp': int(cm[0, 1]),
+            'fn': int(cm[1, 0]),
+            'tp': int(cm[1, 1])
+        }
+        
+        # 分类报告
+        cr = classification_report(y_val_true, val_preds, target_names=['<=50K', '>50K'], output_dict=True)
+        
+        has_val_metrics = True
+    else:
+        has_val_metrics = False
+        val_auc = None
+        val_accuracy = None
+        val_precision = None
+        val_recall = None
+        val_f1 = None
+        cm_dict = None
+        cr = None
+except Exception as e:
+    print(f"Could not compute validation metrics: {e}")
+    has_val_metrics = False
+    val_auc = None
+    val_accuracy = None
+    val_precision = None
+    val_recall = None
+    val_f1 = None
+    cm_dict = None
+    cr = None
+
+# ========== 7. 生成 HTML 报告 ==========
+print("Generating HTML report...")
+
+# 构建特征重要性表格 HTML
+importance_html_rows = ""
+for i, row in importance_df.head(20).iterrows():
+    importance_html_rows += f"<tr><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>"
+
+# 测试预测预览
+test_preview_rows = ""
+for i in range(min(10, len(result_df))):
+    test_preview_rows += f"<tr><td>{result_df.iloc[i]['id']}</td><td>{result_df.iloc[i]['prediction']}</td><td>{result_df.iloc[i]['probability']:.4f}</td></tr>"
+
+# 指标摘要
+metrics_html = ""
+if has_val_metrics:
+    metrics_html = f"""
+    <h2>Model Performance Metrics (Validation Set)</h2>
+    <table>
+        <tr><th>Metric</th><th>Value</th></tr>
+        <tr><td>AUC</td><td>{val_auc:.4f}</td></tr>
+        <tr><td>Accuracy</td><td>{val_accuracy:.4f}</td></tr>
+        <tr><td>Precision</td><td>{val_precision:.4f}</td></tr>
+        <tr><td>Recall</td><td>{val_recall:.4f}</td></tr>
+        <tr><td>F1 Score</td><td>{val_f1:.4f}</td></tr>
+    </table>
+    
+    <h2>Confusion Matrix</h2>
+    <table>
+        <tr><th></th><th>Predicted <=50K</th><th>Predicted >50K</th></tr>
+        <tr><td>Actual <=50K</td><td>{cm_dict['tn']}</td><td>{cm_dict['fp']}</td></tr>
+        <tr><td>Actual >50K</td><td>{cm_dict['fn']}</td><td>{cm_dict['tp']}</td></tr>
+    </table>
+    
+    <h2>Classification Report</h2>
+    <table>
+        <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>
+        <tr><td><=50K</td><td>{cr['<=50K']['precision']:.4f}</td><td>{cr['<=50K']['recall']:.4f}</td><td>{cr['<=50K']['f1-score']:.4f}</td><td>{cr['<=50K']['support']}</td></tr>
+        <tr><td>>50K</td><td>{cr['>50K']['precision']:.4f}</td><td>{cr['>50K']['recall']:.4f}</td><td>{cr['>50K']['f1-score']:.4f}</td><td>{cr['>50K']['support']}</td></tr>
+    </table>
+    """
+
+html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Model Report - Binary Classification</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        h1 {{ color: #333; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .section {{ margin-bottom: 40px; }}
+    </style>
+</head>
+<body>
+    <h1>Binary Classification Model Report</h1>
+    <p>Task: Predict income (>50K vs <=50K)</p>
+    <p>Model: LightGBM Classifier</p>
+    
+    {metrics_html}
+    
+    <div class="section">
+        <h2>Feature Importance (Top 20)</h2>
+        <table>
+            <tr><th>Feature</th><th>Importance</th></tr>
+            {importance_html_rows}
+        </table>
+    </div>
+    
+    <div class="section">
+        <h2>Test Set Predictions Preview (First 10)</h2>
+        <table>
+            <tr><th>ID</th><th>Prediction</th><th>Probability</th></tr>
+            {test_preview_rows}
+        </table>
+        <p>Total test predictions: {len(result_df)}</p>
+    </div>
+    
+    <div class="section">
+        <h2>Output Files</h2>
+        <ul>
+            <li>output/model.pkl - Trained model</li>
+            <li>output/feature_importance.csv - Feature importance scores</li>
+            <li>output/feature_importance.png - Feature importance plot</li>
+            <li>output/report_fig.png - ROC curve</li>
+            <li>output/test_predictions.csv - Test set predictions</li>
+            <li>output/predict.py - Standalone prediction script</li>
+        </ul>
+    </div>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 8. 生成独立预测脚本 ==========
+print("Generating predict.py...")
+predict_script = '''
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+import sys
+
+def load_model(model_path='model.pkl'):
+    """Load the trained model."""
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    return model
+
+def preprocess_data(df, state_path='preprocess_state.pkl'):
+    """Preprocess new data using saved state."""
+    # Try to load preprocessing state
+    cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                'relationship', 'race', 'sex', 'native_country']
+    num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 'capital_loss', 'hours_per_week']
+    
+    df = df.copy()
+    if 'id' in df.columns:
+        ids = df['id']
+        df = df.drop(columns=['id'])
+    else:
+        ids = pd.Series(range(len(df)))
+    
+    # Load state if available
+    if os.path.exists(state_path):
+        with open(state_path, 'rb') as f:
+            state = pickle.load(f)
+        cat_transformer = state['cat_transformer']
+        num_transformer = state['num_transformer']
+    else:
+        # Fallback: fit on the fly (not recommended for production)
+        from sklearn.compose import ColumnTransformer
+        from sklearn.preprocessing import OneHotEncoder, StandardScaler
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+        
+        # This requires training data - in production, always use saved state
+        raise FileNotFoundError(f"Preprocessing state not found at {state_path}")
+    
+    cat_data = cat_transformer.transform(df[cat_cols])
+    num_data = num_transformer.transform(df[num_cols])
+    
+    cat_feature_names = []
+    for i, col in enumerate(cat_cols):
+        encoder = cat_transformer.named_steps['encoder']
+        if hasattr(encoder, 'categories_'):
+            categories = encoder.categories_[i]
+            for cat in categories:
+                cat_feature_names.append(f"{col}_{cat}")
+    
+    processed = pd.DataFrame(
+        np.hstack([cat_data, num_data]),
+        columns=cat_feature_names + num_cols,
+        index=df.index
+    )
+    
+    # Feature engineering
+    X = processed.copy()
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    X = X.fillna(0)
+    
+    if 'capital_gain' in X.columns:
+        X['capital_gain_log'] = np.log1p(X['capital_gain'])
+    if 'capital_loss' in X.columns:
+        X['capital_loss_log'] = np.log1p(X['capital_loss'])
+    if 'age' in X.columns:
+        X['age_squared'] = X['age'] ** 2
+    if 'capital_gain' in X.columns and 'hours_per_week' in X.columns:
+        X['capital_gain_hours_interaction'] = X['capital_gain'] * X['hours_per_week']
+    if 'education_num' in X.columns and 'hours_per_week' in X.columns:
+        X['education_hours_interaction'] = X['education_num'] * X['hours_per_week']
+    if 'capital_gain' in X.columns and 'capital_loss' in X.columns:
+        X['capital_net'] = X['capital_gain'] - X['capital_loss']
+    
+    X = X.fillna(0)
+    X.columns = [re.sub('[^\\\\w]', '_', str(c)) for c in X.columns]
+    
+    return X, ids
+
+def predict(data_path, model_path='model.pkl', output_path='predictions.csv'):
+    """Make predictions on new data."""
+    # Load model
+    model = load_model(model_path)
+    
+    # Load and preprocess data
+    df = pd.read_csv(data_path)
+    X, ids = preprocess_data(df)
+    
+    # Align features with model expectations
+    if hasattr(model, 'feature_name_'):
+        expected_features = model.feature_name_
+    elif hasattr(model, 'feature_names_in_'):
+        expected_features = model.feature_names_in_
+    else:
+        expected_features = X.columns.tolist()
+    
+    missing_cols = set(expected_features) - set(X.columns)
+    for col in missing_cols:
+        X[col] = 0
+    X = X[list(expected_features)]
+    
+    # Predict
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X)[:, 1]
+    else:
+        probs = model.predict(X).astype(float)
+    preds = (probs >= 0.5).astype(int)
+    
+    # Save results
+    result = pd.DataFrame({
+        'id': ids,
+        'prediction': preds,
+        'probability': probs
+    })
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    return result
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv_path> [output_csv_path]")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+    predict(input_path, output_path=output_path)
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 9. 保存预处理状态（供 predict.py 使用）==========
+if not is_pipeline:
+    try:
+        with open('output/preprocess_state.pkl', 'wb') as f:
+            pickle.dump(state, f)
+        print("Preprocessing state saved to output/preprocess_state.pkl")
+    except Exception as e:
+        print(f"Could not save preprocessing state: {e}")
+
+# ========== 10. 输出摘要 ==========
+summary = {
+    "status": "success",
+    "task_type": "binary_classification",
+    "target_col": "income",
+    "test_samples": len(result_df),
+    "test_positive_rate": float(test_preds.mean()),
+    "output_files": [
+        "output/model.pkl",
+        "output/feature_importance.csv",
+        "output/feature_importance.png",
+        "output/report_fig.png",
+        "output/report.html",
+        "output/test_predictions.csv",
+        "output/predict.py"
+    ]
+}
+
+if has_val_metrics:
+    summary["validation_metrics"] = {
+        "auc": val_auc,
+        "accuracy": val_accuracy,
+        "precision": val_precision,
+        "recall": val_recall,
+        "f1": val_f1
+    }
+
+print("METRICS_JSON_START")
+print(json.dumps(summary))
+print("METRICS_JSON_END")
+```
+</code>

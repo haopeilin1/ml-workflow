@@ -1,0 +1,1 @@
+cat_features = encoder.get_feature_names_out([col])

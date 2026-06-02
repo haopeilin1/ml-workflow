@@ -1,0 +1,1 @@
+quality为有序多分类，建议尝试Ordinal Regression或视为普通多分类处理。free sulfur dioxide和total sulfur dioxide存在相关性，建议构造比例特征。类别分布不平衡，建议设置class_weight=balanced。

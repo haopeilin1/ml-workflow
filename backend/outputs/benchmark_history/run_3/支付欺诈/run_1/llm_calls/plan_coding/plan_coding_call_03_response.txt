@@ -1,0 +1,644 @@
+<plan>
+产物生成计划：
+1. 加载 data/best_model.pkl（已存在的最佳模型）
+2. 加载测试集 data/test.csv，应用与训练时相同的预处理和特征工程
+3. 关键修复：确保特征工程后所有列都是数值类型（修复报错中的 paymentMethod 和 Category 字符串问题）
+4. 对测试集进行预测，生成 test_predictions.csv（含 prediction 和 probability 列）
+5. 保存模型到 output/model.pkl
+6. 生成特征重要性 CSV 和 PNG（从模型属性直接获取）
+7. 生成 HTML 报告（含指标摘要、特征重要性表格、测试集预测预览）
+8. 生成 ROC 曲线图（二分类任务）
+9. 生成独立的 predict.py 脚本
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, confusion_matrix, classification_report
+from sklearn.preprocessing import OrdinalEncoder, LabelEncoder
+from lightgbm import LGBMClassifier
+
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局预处理状态（与训练时保持一致）==========
+PREPROCESS_STATE = {
+    'isWeekend_median': None,
+    'ordinal_encoder': None,
+    'cat_cols': ['paymentMethod', 'Category'],
+    'log_transform_cols': ['numItems', 'localTime', 'paymentMethodAgeDays'],
+    'drop_cols': ['id'],
+    'target_col': 'label',
+    'existing_cat_cols': [],
+    'best_threshold': 0.5,
+    'label_encoder': None
+}
+
+# ========== 预处理函数（与训练时一致）==========
+def preprocess(df, mode='test'):
+    global PREPROCESS_STATE
+    target_col = PREPROCESS_STATE['target_col']
+    drop_cols = PREPROCESS_STATE['drop_cols']
+    cat_cols = PREPROCESS_STATE['cat_cols']
+    log_transform_cols = PREPROCESS_STATE['log_transform_cols']
+    
+    df = df.copy()
+    
+    # 1. 丢弃ID列
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    # 2. 处理Category缺失值
+    if 'Category' in df.columns:
+        df['Category'] = df['Category'].fillna('Unknown')
+    
+    # 3. 处理isWeekend缺失值
+    if 'isWeekend' in df.columns:
+        if mode == 'train':
+            PREPROCESS_STATE['isWeekend_median'] = df['isWeekend'].median()
+        median_val = PREPROCESS_STATE.get('isWeekend_median', 0)
+        if median_val is None:
+            median_val = 0
+        df['isWeekend'] = df['isWeekend'].fillna(median_val)
+    
+    # 4. log1p变换
+    for col in log_transform_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            min_val = df[col].min()
+            if pd.notna(min_val) and min_val < -1:
+                df[col] = df[col] - min_val
+            df[col] = np.log1p(df[col].clip(lower=-1))
+    
+    # 5. 编码类别特征
+    if mode == 'train':
+        encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+        existing_cat_cols = [c for c in cat_cols if c in df.columns]
+        if existing_cat_cols:
+            df[existing_cat_cols] = encoder.fit_transform(df[existing_cat_cols].astype(str))
+            PREPROCESS_STATE['ordinal_encoder'] = encoder
+            PREPROCESS_STATE['existing_cat_cols'] = existing_cat_cols
+    else:
+        encoder = PREPROCESS_STATE.get('ordinal_encoder')
+        existing_cat_cols = PREPROCESS_STATE.get('existing_cat_cols', cat_cols)
+        if encoder is not None:
+            existing_cat_cols_in_df = [c for c in existing_cat_cols if c in df.columns]
+            if existing_cat_cols_in_df:
+                df[existing_cat_cols_in_df] = encoder.transform(df[existing_cat_cols_in_df].astype(str))
+    
+    # 6. 确保所有非目标列是数值类型
+    for col in df.columns:
+        if col != target_col and df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    return df
+
+
+def feature_engineering(df):
+    target_col = PREPROCESS_STATE['target_col']
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    # 确保所有列都是数值类型（修复报错关键）
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    X = X.fillna(0)
+    
+    # 清洗特征名
+    X.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X.columns]
+    if X.columns.duplicated().any():
+        X.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X.columns)]
+    
+    return X
+
+
+# ========== 加载已保存的最佳模型 ==========
+print("正在加载最佳模型...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("模型加载成功！")
+except Exception as e:
+    print(f"加载模型失败: {e}")
+    print("尝试重新训练模型...")
+    
+    # 加载训练数据
+    train = pd.read_csv('data/train.csv')
+    val = pd.read_csv('data/validation.csv')
+    
+    target_col = 'label'
+    
+    # 预处理
+    train_clean = preprocess(train, mode='train')
+    val_clean = preprocess(val, mode='test')
+    
+    # 分离特征和目标
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train = train_clean
+    
+    if target_col in val_clean.columns:
+        y_val = val_clean[target_col]
+        X_val = val_clean.drop(columns=[target_col])
+    else:
+        y_val = val[target_col]
+        X_val = val_clean
+    
+    # 处理字符串目标列
+    if y_train.dtype == object or str(y_train.dtype) == 'category':
+        le = LabelEncoder()
+        y_train = le.fit_transform(y_train.astype(str))
+        y_val = le.transform(y_val.astype(str))
+        PREPROCESS_STATE['label_encoder'] = le
+    
+    # 特征工程
+    X_train_fe = feature_engineering(X_train)
+    X_val_fe = feature_engineering(X_val)
+    
+    # 训练模型
+    model = LGBMClassifier(
+        objective='binary',
+        boosting_type='gbdt',
+        learning_rate=0.05,
+        num_leaves=31,
+        max_depth=6,
+        min_child_samples=20,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_estimators=500,
+        random_state=42,
+        verbose=-1
+    )
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+    print("模型重新训练完成！")
+
+# ========== 加载测试集 ==========
+print("正在加载测试集...")
+test = pd.read_csv('data/test.csv')
+id_col = 'id' if 'id' in test.columns else test.columns[0]
+
+# 预处理和特征工程
+test_clean = preprocess(test, mode='test')
+X_test_fe = feature_engineering(test_clean)
+
+# 确保测试集特征列与模型训练时的特征列一致
+# 如果是Pipeline则不需要，但这里是裸模型，需要对齐列
+if hasattr(model, 'feature_name_'):
+    expected_features = model.feature_name_
+    # 只保留模型需要的特征
+    missing_cols = set(expected_features) - set(X_test_fe.columns)
+    extra_cols = set(X_test_fe.columns) - set(expected_features)
+    for col in missing_cols:
+        X_test_fe[col] = 0
+    X_test_fe = X_test_fe[expected_features]
+
+# ========== 测试集预测 ==========
+print("正在进行测试集预测...")
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+
+# 获取最优阈值
+best_threshold = PREPROCESS_STATE.get('best_threshold', 0.5)
+test_preds = (test_probs >= best_threshold).astype(int)
+
+# 如果有标签编码器，反编码预测结果
+label_encoder = PREPROCESS_STATE.get('label_encoder')
+if label_encoder is not None:
+    test_preds_decoded = label_encoder.inverse_transform(test_preds)
+else:
+    test_preds_decoded = test_preds
+
+# 保存测试集预测结果
+result_df = test.copy()
+result_df['prediction'] = test_preds_decoded
+result_df['probability'] = test_probs
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("测试集预测结果已保存到 output/test_predictions.csv")
+
+# ========== 保存模型到 output/ ==========
+print("正在保存模型...")
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("模型已保存到 output/model.pkl")
+
+# ========== 特征重要性 ==========
+print("正在生成特征重要性...")
+feature_names = X_test_fe.columns.tolist()
+
+# 获取特征重要性
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    importances = np.abs(model.coef_).flatten()
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    importances = importances[:len(feature_names)]
+
+# 保存特征重要性CSV
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("特征重要性已保存到 output/feature_importance.csv")
+
+# 生成特征重要性图
+plt.figure(figsize=(10, 8))
+top_n = min(20, len(importance_df))
+top_features = importance_df.head(top_n)
+plt.barh(range(top_n), top_features['importance'].values)
+plt.yticks(range(top_n), top_features['name'].values)
+plt.xlabel('Importance')
+plt.title('Feature Importance (Top {})'.format(top_n))
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("特征重要性图已保存到 output/feature_importance.png")
+
+# ========== 生成ROC曲线图（二分类任务）==========
+print("正在生成ROC曲线图...")
+# 如果有验证集，使用验证集绘制ROC曲线
+val_data_exists = os.path.exists('data/validation.csv')
+if val_data_exists:
+    val = pd.read_csv('data/validation.csv')
+    val_clean = preprocess(val, mode='test')
+    target_col = PREPROCESS_STATE['target_col']
+    if target_col in val_clean.columns:
+        y_val = val_clean[target_col]
+        X_val = val_clean.drop(columns=[target_col])
+    else:
+        y_val = val[target_col]
+        X_val = val_clean
+    
+    # 处理字符串标签
+    if y_val.dtype == object or str(y_val.dtype) == 'category':
+        if label_encoder is not None:
+            y_val = label_encoder.transform(y_val.astype(str))
+        else:
+            y_val = pd.factorize(y_val)[0]
+    
+    X_val_fe = feature_engineering(X_val)
+    
+    # 对齐特征列
+    if hasattr(model, 'feature_name_'):
+        expected_features = model.feature_name_
+        missing_cols = set(expected_features) - set(X_val_fe.columns)
+        for col in missing_cols:
+            X_val_fe[col] = 0
+        X_val_fe = X_val_fe[expected_features]
+    
+    if hasattr(model, 'predict_proba'):
+        val_probs = model.predict_proba(X_val_fe)[:, 1]
+    else:
+        val_probs = model.predict(X_val_fe).astype(float)
+    
+    # 计算ROC曲线
+    fpr, tpr, thresholds = roc_curve(y_val, val_probs)
+    auc_score = roc_auc_score(y_val, val_probs)
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, label=f'ROC Curve (AUC = {auc_score:.4f})', linewidth=2)
+    plt.plot([0, 1], [0, 1], 'k--', label='Random Classifier')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("ROC曲线图已保存到 output/report_fig.png")
+    
+    # 计算验证集指标
+    val_preds = (val_probs >= best_threshold).astype(int)
+    val_accuracy = accuracy_score(y_val, val_preds)
+    val_precision = precision_score(y_val, val_preds, zero_division=0)
+    val_recall = recall_score(y_val, val_preds, zero_division=0)
+    val_f1 = f1_score(y_val, val_preds, zero_division=0)
+    
+    metrics = {
+        'val_accuracy': float(val_accuracy),
+        'val_precision': float(val_precision),
+        'val_recall': float(val_recall),
+        'val_f1': float(val_f1),
+        'val_auc': float(auc_score),
+        'val_best_threshold': float(best_threshold)
+    }
+    
+    # 混淆矩阵
+    cm = confusion_matrix(y_val, val_preds)
+    cm_dict = {
+        'tn': int(cm[0, 0]) if cm.shape[0] > 1 else 0,
+        'fp': int(cm[0, 1]) if cm.shape[0] > 1 else 0,
+        'fn': int(cm[1, 0]) if cm.shape[0] > 1 else 0,
+        'tp': int(cm[1, 1]) if cm.shape[0] > 1 else 0
+    }
+    
+    # 分类报告
+    cr = classification_report(y_val, val_preds, output_dict=True, zero_division=0)
+else:
+    metrics = {}
+    cm_dict = {'tn': 0, 'fp': 0, 'fn': 0, 'tp': 0}
+    cr = {}
+    auc_score = 0.0
+
+# ========== 生成HTML报告 ==========
+print("正在生成HTML报告...")
+# 构建特征重要性表格HTML
+importance_html_rows = ""
+for _, row in importance_df.head(20).iterrows():
+    importance_html_rows += f"<tr><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>"
+
+# 构建测试集预览表格
+test_preview = result_df.head(10)
+test_preview_html = test_preview.to_html(index=False, classes='table table-striped', max_rows=10)
+
+# 构建指标摘要
+metrics_html = ""
+if metrics:
+    for key, value in metrics.items():
+        metrics_html += f"<tr><td>{key}</td><td>{value:.4f}</td></tr>"
+
+# 混淆矩阵HTML
+cm_html = ""
+if cm_dict:
+    cm_html = f"""
+    <h3>Confusion Matrix</h3>
+    <table class='table table-bordered' style='width:300px'>
+        <tr><th></th><th>Predicted 0</th><th>Predicted 1</th></tr>
+        <tr><th>Actual 0</th><td>{cm_dict['tn']}</td><td>{cm_dict['fp']}</td></tr>
+        <tr><th>Actual 1</th><td>{cm_dict['fn']}</td><td>{cm_dict['tp']}</td></tr>
+    </table>
+    """
+
+# 分类报告HTML
+cr_html = ""
+if cr:
+    cr_html = "<h3>Classification Report</h3><table class='table table-striped'><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>"
+    for cls, vals in cr.items():
+        if isinstance(vals, dict):
+            cr_html += f"<tr><td>{cls}</td><td>{vals['precision']:.4f}</td><td>{vals['recall']:.4f}</td><td>{vals['f1-score']:.4f}</td><td>{vals['support']}</td></tr>"
+    cr_html += "</table>"
+
+html_content = f"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型报告 - 二分类任务</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        h3 {{ color: #666; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metric-value {{ font-weight: bold; color: #2196F3; }}
+        img {{ max-width: 100%; height: auto; margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>二分类模型报告</h1>
+        
+        <h2>模型信息</h2>
+        <p>模型类型: {type(model).__name__}</p>
+        <p>任务类型: 二分类 (Binary Classification)</p>
+        <p>目标列: {PREPROCESS_STATE['target_col']}</p>
+        <p>最优阈值: {best_threshold:.4f}</p>
+        
+        <h2>验证集指标摘要</h2>
+        <table>
+            <tr><th>指标</th><th>值</th></tr>
+            {metrics_html}
+        </table>
+        
+        {cm_html}
+        {cr_html}
+        
+        <h2>特征重要性 (Top 20)</h2>
+        <table>
+            <tr><th>特征名</th><th>重要性</th></tr>
+            {importance_html_rows}
+        </table>
+        
+        <h2>特征重要性图</h2>
+        <img src="feature_importance.png" alt="Feature Importance">
+        
+        <h2>ROC曲线</h2>
+        <img src="report_fig.png" alt="ROC Curve">
+        
+        <h2>测试集预测预览 (前10条)</h2>
+        {test_preview_html}
+        
+        <h2>预测统计</h2>
+        <p>测试集总样本数: {len(result_df)}</p>
+        <p>预测为正类(1)的数量: {int(test_preds.sum())}</p>
+        <p>预测为负类(0)的数量: {int(len(test_preds) - test_preds.sum())}</p>
+        <p>正类比例: {test_preds.mean():.4f}</p>
+    </div>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML报告已保存到 output/report.html")
+
+# ========== 生成独立的预测脚本 ==========
+predict_script = '''
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+from sklearn.preprocessing import OrdinalEncoder
+
+# 预处理状态（与训练时一致）
+PREPROCESS_STATE = {
+    'isWeekend_median': None,
+    'ordinal_encoder': None,
+    'cat_cols': ['paymentMethod', 'Category'],
+    'log_transform_cols': ['numItems', 'localTime', 'paymentMethodAgeDays'],
+    'drop_cols': ['id'],
+    'target_col': 'label',
+    'existing_cat_cols': [],
+    'best_threshold': 0.5,
+    'label_encoder': None
+}
+
+def preprocess(df, mode='test'):
+    global PREPROCESS_STATE
+    target_col = PREPROCESS_STATE['target_col']
+    drop_cols = PREPROCESS_STATE['drop_cols']
+    cat_cols = PREPROCESS_STATE['cat_cols']
+    log_transform_cols = PREPROCESS_STATE['log_transform_cols']
+    
+    df = df.copy()
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    if 'Category' in df.columns:
+        df['Category'] = df['Category'].fillna('Unknown')
+    
+    if 'isWeekend' in df.columns:
+        median_val = PREPROCESS_STATE.get('isWeekend_median', 0)
+        if median_val is None:
+            median_val = 0
+        df['isWeekend'] = df['isWeekend'].fillna(median_val)
+    
+    for col in log_transform_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            min_val = df[col].min()
+            if pd.notna(min_val) and min_val < -1:
+                df[col] = df[col] - min_val
+            df[col] = np.log1p(df[col].clip(lower=-1))
+    
+    encoder = PREPROCESS_STATE.get('ordinal_encoder')
+    existing_cat_cols = PREPROCESS_STATE.get('existing_cat_cols', cat_cols)
+    if encoder is not None:
+        existing_cat_cols_in_df = [c for c in existing_cat_cols if c in df.columns]
+        if existing_cat_cols_in_df:
+            df[existing_cat_cols_in_df] = encoder.transform(df[existing_cat_cols_in_df].astype(str))
+    
+    for col in df.columns:
+        if col != target_col and df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    return df
+
+def feature_engineering(df):
+    target_col = PREPROCESS_STATE['target_col']
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    X = X.fillna(0)
+    X.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X.columns]
+    if X.columns.duplicated().any():
+        X.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X.columns)]
+    
+    return X
+
+def predict(new_data_path, output_path=None):
+    """
+    对新数据进行预测
+    
+    Parameters:
+    - new_data_path: str, 新数据CSV文件路径
+    - output_path: str, 输出文件路径（可选），默认保存到同目录下 predictions.csv
+    
+    Returns:
+    - DataFrame with predictions
+    """
+    # 加载模型
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(new_data_path)
+    original_df = df.copy()
+    
+    # 预处理
+    df_clean = preprocess(df, mode='test')
+    X = feature_engineering(df_clean)
+    
+    # 对齐特征列
+    if hasattr(model, 'feature_name_'):
+        expected_features = model.feature_name_
+        missing_cols = set(expected_features) - set(X.columns)
+        for col in missing_cols:
+            X[col] = 0
+        X = X[expected_features]
+    
+    # 预测
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X)[:, 1]
+    else:
+        probs = model.predict(X).astype(float)
+    
+    best_threshold = PREPROCESS_STATE.get('best_threshold', 0.5)
+    preds = (probs >= best_threshold).astype(int)
+    
+    # 反编码
+    label_encoder = PREPROCESS_STATE.get('label_encoder')
+    if label_encoder is not None:
+        preds = label_encoder.inverse_transform(preds)
+    
+    result = original_df.copy()
+    result['prediction'] = preds
+    result['probability'] = probs
+    
+    if output_path is None:
+        output_path = os.path.join(os.path.dirname(new_data_path), 'predictions.csv')
+    
+    result.to_csv(output_path, index=False)
+    print(f"预测结果已保存到: {output_path}")
+    
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1:
+        input_path = sys.argv[1]
+        output_path = sys.argv[2] if len(sys.argv) > 2 else None
+        predict(input_path, output_path)
+    else:
+        print("用法: python predict.py <输入CSV路径> [输出CSV路径]")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("独立预测脚本已保存到 output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_type': type(model).__name__,
+    'task_type': 'binary_classification',
+    'test_samples': len(result_df),
+    'test_positive_rate': float(test_preds.mean()),
+    'best_threshold': float(best_threshold),
+    'metrics': metrics,
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/report_fig.png',
+        'output/test_predictions.csv',
+        'output/predict.py'
+    ]
+}
+
+print(json.dumps(summary))
+```
+</code>

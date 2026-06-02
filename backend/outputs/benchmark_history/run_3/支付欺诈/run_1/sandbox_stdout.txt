@@ -1,0 +1,3 @@
+METRICS_JSON_START
+{"val_accuracy": 1.0, "val_precision": 1.0, "val_recall": 1.0, "val_f1": 1.0, "val_auc": 1.0, "val_best_threshold": 0.01}
+METRICS_JSON_END

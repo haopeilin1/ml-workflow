@@ -1,0 +1,338 @@
+【任务配置】:
+- 任务类型: TaskType.BINARY_CLASSIFICATION
+- 目标列: smoking
+- 评估指标: ROC-AUC
+- 是否有测试集: 是
+
+【沙箱可用数据文件】（产物代码只能使用以下存在的文件，禁止读取不存在的文件）：
+- data/train.csv（训练数据，一定存在）
+- data/test.csv（测试数据）
+- data/best_model.pkl（已保存的最佳模型）
+
+【用户建模建议】（重要参考，灵活采纳）:
+无
+
+【最佳代码参考】（请基于以下代码的逻辑重新编写产物生成代码，确保模型训练和预处理方式一致）:
+```python
+import pandas as pd
+import numpy as np
+import dill
+import json
+import re
+import warnings
+from sklearn.metrics import accuracy_score, roc_auc_score, root_mean_squared_error, mean_absolute_error, r2_score, f1_score
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态（用于保存预处理参数）==========
+PREPROCESS_STATE = {}
+
+# ========== LLM 填充区（开始）==========
+import re
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+FEATURE_ENG_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 清洗列名：特殊字符替换为下划线
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 4. 数值特征标准化
+    num_cols = X.columns.tolist()
+    
+    if mode == 'train':
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+        PREPROCESS_STATE['num_cols'] = num_cols
+    else:
+        scaler = PREPROCESS_STATE.get('scaler')
+        if scaler is None:
+            raise ValueError("PREPROCESS_STATE 中未找到 scaler，请先运行 train 模式")
+        X_scaled = scaler.transform(X)
+    
+    # 5. 重新构建 DataFrame
+    X_scaled_df = pd.DataFrame(X_scaled, columns=num_cols, index=df.index)
+    
+    if y is not None:
+        X_scaled_df[target_col] = y.values
+    
+    return X_scaled_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    # 创建新特征
+    # BMI
+    if 'weight_kg_' in df.columns and 'height_cm_' in df.columns:
+        df['bmi'] = df['weight_kg_'] / ((df['height_cm_'] / 100) ** 2)
+    
+    # 血压差
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['blood_pressure_diff'] = df['systolic'] - df['relaxation']
+    
+    # 血脂比
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['triglyceride_hdl_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+    
+    # 肝功比
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['ast_alt_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+    
+    # 平均视力
+    if 'eyesight_left_' in df.columns and 'eyesight_right_' in df.columns:
+        df['avg_eyesight'] = (df['eyesight_left_'] + df['eyesight_right_']) / 2
+    
+    # 对偏态特征做对数变换（加1避免log0）
+    skewed_cols = ['triglyceride', 'Gtp', 'ALT', 'fasting_blood_sugar']
+    for col in skewed_cols:
+        if col in df.columns:
+            # 确保非负
+            min_val = df[col].min()
+            shift = 0 if min_val > 0 else abs(min_val) + 1
+            df[f'log_{col}'] = np.log1p(df[col] + shift)
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能出现的NaN（由除零等引起）
+    df = df.fillna(0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（正样本比例约36.6%）
+    scale_pos_weight = (1 - 0.3655) / 0.3655  # ≈ 1.735
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+# ========== LLM 填充区（结束）==========
+
+# ========== 数据加载（系统负责）==========
+train = pd.read_csv('data/train.csv')
+val = pd.read_csv('data/validation.csv')
+test = pd.read_csv('data/test.csv')
+
+# 获取目标列和 id 列
+target_col = 'smoking'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 检查目标列是否存在
+if target_col not in train.columns:
+    raise ValueError(f"目标列 '{target_col}' 不在训练数据中，可用列: {list(train.columns)}")
+
+# ========== 预处理（系统调用 LLM 填充的函数）==========
+train_clean = preprocess(train, mode='train')
+val_clean = preprocess(val, mode='test')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标（兼容 preprocess 是否保留目标列的情况）
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+# 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
+# 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    from sklearn.preprocessing import LabelEncoder
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程（系统调用 LLM 填充的函数）==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# ========== 清洗特征名（LGBM/XGBoost 不支持特殊 JSON 字符）==========
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+# 去重列名
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 模型训练（系统负责）==========
+model = build_model()
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+try:
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+except Exception:
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 验证评估（LLM 可覆盖，系统兜底）==========
+# 如果 LLM 定义了 evaluate_model()，使用 LLM 的评估逻辑；否则使用系统默认指标
+try:
+    if 'evaluate_model' in globals():
+        metrics = evaluate_model(model, X_val_fe, y_val)
+    else:
+        if hasattr(model, 'predict_proba'):
+            val_probs = model.predict_proba(X_val_fe)[:, 1]
+        else:
+            val_probs = model.predict(X_val_fe).astype(float)
+        val_preds = (val_probs >= 0.5).astype(int)
+        metrics = {
+            'val_auc': float(roc_auc_score(y_val, val_probs)),
+            'val_accuracy': float(accuracy_score(y_val, val_preds))
+        }
+except Exception as e:
+    print(f"[EVAL_ERROR] {e}")
+    metrics = {}
+    # 尝试最基本的预测来兜底
+    try:
+        _pred = model.predict(X_val_fe)
+        if task_type == "binary_classification" and hasattr(model, 'predict_proba'):
+            _prob = model.predict_proba(X_val_fe)[:, 1]
+            metrics = {'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}
+        elif task_type == "multiclass_classification":
+            metrics = {'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}
+        elif task_type in ("regression", "time_series_forecasting"):
+            metrics = {'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}
+    except Exception as e2:
+        print(f"[EVAL_FALLBACK_ERROR] {e2}")
+        metrics = {}
+
+# ========== 测试预测（系统保证格式）==========
+# 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
+# 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df['probability'] = test_probs
+result_df.to_csv('data/test_predictions.csv', index=False)
+
+# ========== 模型保存（系统保证可序列化）==========
+with open('data/best_model.pkl', 'wb') as f:
+    dill.dump(model, f)
+
+# ========== 输出指标（系统抓取）==========
+print('METRICS_JSON_START')
+print(json.dumps(metrics))
+print('METRICS_JSON_END')
+
+```
+
+
+【重要提示】：data/best_model.pkl 已经存在（这是之前训练阶段保存的最优模型）。
+请直接在产物代码中加载该模型（`pickle.load(open('data/best_model.pkl', 'rb'))`），**无需重新训练**。
+加载模型后即可进行测试集预测、生成特征重要性和报告。
+如果加载失败，才回退到重新训练。
+
+
+请生成产物代码，要求：
+1. 加载 data/best_model.pkl（优先）或重新训练最终模型
+2. 保存模型到 output/model.pkl
+3. 生成特征重要性图到 output/feature_importance.png
+4. 生成特征重要性 CSV 到 output/feature_importance.csv（直接从模型属性获取，禁止 SHAP）
+5. 生成 HTML 报告到 output/report.html（包含模型指标摘要、特征重要性表格、测试集预测预览）
+6. 对测试集预测并保存到 output/test_predictions.csv
+7. 最后 print(json.dumps(Ellipsis)) 输出摘要

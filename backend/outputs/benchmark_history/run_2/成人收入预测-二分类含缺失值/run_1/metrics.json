@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": 0.9233911383542945,
+    "val_accuracy": 0.8282149712092131,
+    "val_f1_macro": null,
+    "val_rmse": null,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": 0.9265723984234744,
+    "accuracy": 0.8421618301857823,
+    "f1": 0.7198910081743869,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": null,
+    "mae": null,
+    "r2": null
+  },
+  "best_score": 89.2,
+  "task_type": "binary_classification",
+  "target_column": "income",
+  "eval_metric": "AUC",
+  "complexity": "simple",
+  "complexity_reason": "LLM判定为simple，无复杂信号触发",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

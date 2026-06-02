@@ -1,0 +1,294 @@
+【当前运行状态 Run State】: INIT
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.REGRESSION
+- 目标列: median_house_value
+- 评估指标: RMSE
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于加利福尼亚州1990年人口普查数据，预测各街区房价中位数。特征包括地理位置、房龄、房间数、卧室数、人口、家庭收入及距海 proximity。任务为回归预测，评估指标采用RMSE。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- 类别特征列 ['ocean_proximity'] 必须纳入 Pipeline 的 ColumnTransformer 中，使用 OneHotEncoder(handle_unknown='ignore') 或 OrdinalEncoder 编码，严禁直接传入模型。
+- 数值特征列 ['total_bedrooms'] 有缺失值，必须在 ColumnTransformer 中使用 SimpleImputer(strategy='median') 填充。
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 median_house_value。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['median_house_value'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "train.csv",
+  "rowCount": 16512,
+  "columnCount": 11,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 16512,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "min": 0.0,
+      "max": 16511.0,
+      "mean": 8255.5,
+      "std": 4766.74815781157,
+      "median": 8255.5,
+      "skewness": 0.0,
+      "isMonotonic": true
+    },
+    {
+      "name": "longitude",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 812,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        -119.01,
+        -119.46,
+        -122.44,
+        -118.72,
+        -121.93
+      ],
+      "min": -124.35,
+      "max": -114.31,
+      "mean": -119.5651253633721,
+      "std": 2.0005258520814806,
+      "median": -118.49,
+      "skewness": -0.30513760430461506
+    },
+    {
+      "name": "latitude",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 839,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        36.06,
+        35.14,
+        37.8,
+        34.28,
+        36.62
+      ],
+      "min": 32.54,
+      "max": 41.95,
+      "mean": 35.62509387112404,
+      "std": 2.132973433498221,
+      "median": 34.254999999999995,
+      "skewness": 0.46727708111291183
+    },
+    {
+      "name": "housing_median_age",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 52,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        25.0,
+        30.0,
+        52.0,
+        17.0,
+        34.0
+      ],
+      "min": 1.0,
+      "max": 52.0,
+      "mean": 28.657703488372093,
+      "std": 12.590336981741503,
+      "median": 29.0,
+      "skewness": 0.05418165434726784
+    },
+    {
+      "name": "total_rooms",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 5459,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1505.0,
+        2943.0,
+        3830.0,
+        3051.0,
+        2351.0
+      ],
+      "min": 2.0,
+      "max": 39320.0,
+      "mean": 2629.9823764534885,
+      "std": 2183.5384622143592,
+      "median": 2123.0,
+      "skewness": 4.244697694212391
+    },
+    {
+      "name": "total_bedrooms",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1810,
+      "missingCount": 207,
+      "missingRate": 1.25,
+      "sampleValues": [
+        30.0,
+        292.0,
+        668.0,
+        162.0,
+        76.0
+      ],
+      "min": 1.0,
+      "max": 6445.0,
+      "mean": 536.0535418583256,
+      "std": 420.1355366160974,
+      "median": 433.0,
+      "skewness": 3.5365887905356974
+    },
+    {
+      "name": "population",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 3624,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1392.0,
+        1565.0,
+        1310.0,
+        1705.0,
+        1063.0
+      ],
+      "min": 5.0,
+      "max": 28566.0,
+      "mean": 1421.8940164728683,
+      "std": 1109.2469951651944,
+      "median": 1165.0,
+      "skewness": 4.064482099054869
+    },
+    {
+      "name": "households",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1704,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        359.0,
+        584.0,
+        963.0,
+        495.0,
+        428.0
+      ],
+      "min": 1.0,
+      "max": 6082.0,
+      "mean": 498.0920542635659,
+      "std": 380.4608351730444,
+      "median": 409.0,
+      "skewness": 3.4783282500934583
+    },
+    {
+      "name": "median_income",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 10915,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.6812,
+        2.5313,
+        3.4801,
+        5.7376,
+        3.725
+      ],
+      "min": 0.4999,
+      "max": 15.0001,
+      "mean": 3.8704522589631782,
+      "std": 1.8962695972393573,
+      "median": 3.53485,
+      "skewness": 1.6503660194076406
+    },
+    {
+      "name": "median_house_value",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 3662,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        47700.0,
+        45800.0,
+        500001.0,
+        218600.0,
+        278000.0
+      ],
+      "min": 14999.0,
+      "max": 500001.0,
+      "mean": 206773.3808745155,
+      "std": 115239.66617431745,
+      "median": 179850.0,
+      "skewness": 0.9740658982448053
+    },
+    {
+      "name": "ocean_proximity",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 5,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "INLAND",
+        "INLAND",
+        "NEAR BAY",
+        "<1H OCEAN",
+        "NEAR OCEAN"
+      ],
+      "mostCommon": "<1H OCEAN",
+      "mostCommonFreq": 7255,
+      "cardinality": "low"
+    }
+  ],
+  "timeSeriesSignal": {
+    "coherent": true,
+    "column": "id",
+    "intervalStd": 0.0,
+    "intervalMean": 1.0,
+    "reason": "列 'id' 单调递增，相邻间隔稳定（mean=1.00, std=0.00）"
+  },
+  "classBalance": {
+    "targetColumn": "ocean_proximity",
+    "nClasses": 5,
+    "maxClassRatio": 0.4394,
+    "minClassRatio": 0.0002,
+    "imbalanceRatio": 1813.75,
+    "isSeverelyImbalanced": true
+  }
+}
+
+【上下文载荷 Context Payload】:
+无
+
+【历史代码 Previous Code】:
+无（当前为首次生成）
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

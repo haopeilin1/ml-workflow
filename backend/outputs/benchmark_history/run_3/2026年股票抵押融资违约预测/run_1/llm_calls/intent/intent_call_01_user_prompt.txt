@@ -1,0 +1,1200 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于上市公司财务与股权结构数据，构建股权质押违约风险预测模型。数据含54维特征，包括质押比率、偿债能力、盈利能力、股权集中度等。目标为二分类IsDefault，存在类别不平衡。利用训练集建模，对测试集输出违约概率。评估指标仅采用ROC-AUC，衡量模型区分正负样本的排序能力。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 1153,
+  "col_count": 55,
+  "columns": [
+    {
+      "name": "Stock code",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 1153,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        "X01244",
+        "X00513",
+        "X00912",
+        "X01277",
+        "X01196"
+      ],
+      "mostCommon": "X01244",
+      "mostCommonFreq": 1,
+      "cardinality": "high"
+    },
+    {
+      "name": "Z-SCORE",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1153,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        3.2154,
+        0.700132174,
+        2.884324414,
+        8.2395,
+        1.7106
+      ],
+      "min": -35.7194,
+      "max": 350.6227,
+      "mean": 6.378169554918474,
+      "std": 13.672808657113613,
+      "median": 3.357680919,
+      "skewness": 15.370573622843501,
+      "isMonotonic": false
+    },
+    {
+      "name": "Share pledge ratio of controlling shareholders",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 860,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.4845,
+        0.372758111,
+        0.76152381,
+        0.9272,
+        0.6479
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.44594079660971375,
+      "std": 0.34497698708797603,
+      "median": 0.442380649,
+      "skewness": 0.1667331725039933
+    },
+    {
+      "name": "Pledge ratio of limited sale shares",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 191,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.2565,
+        0.0,
+        0.097959284,
+        0.0051,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 0.7599,
+      "mean": 0.023217307075455336,
+      "std": 0.07755742581279944,
+      "median": 0.0,
+      "skewness": 4.6297451256759
+    },
+    {
+      "name": "Pledge ratio of unlimited shares",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 700,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0249,
+        0.0,
+        0.0,
+        0.2982,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 0.706297049,
+      "mean": 0.11090172476235907,
+      "std": 0.13446789314368374,
+      "median": 0.058621395,
+      "skewness": 1.2517053395115065
+    },
+    {
+      "name": "Stock Volatility",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1076,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        38.7515,
+        27.34116929,
+        48.3339746,
+        47.4556,
+        27.2348
+      ],
+      "min": 0.0,
+      "max": 349.6848441,
+      "mean": 47.69656204644405,
+      "std": 30.75494788402035,
+      "median": 43.8896,
+      "skewness": 3.1858858388304165
+    },
+    {
+      "name": "P/E ratio",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 1077,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        "41.3313",
+        "46.86982396",
+        "182.4906302",
+        "41.5008",
+        "73.9413"
+      ],
+      "mostCommon": "0",
+      "mostCommonFreq": 77,
+      "cardinality": "high"
+    },
+    {
+      "name": "P/B ratio",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1042,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        2.47,
+        2.663422014,
+        4.38628951,
+        2.36,
+        7.12
+      ],
+      "min": -388.42,
+      "max": 1329.872846,
+      "mean": 5.17182571794189,
+      "std": 41.99736798678315,
+      "median": 2.732926519,
+      "skewness": 26.811213372036473
+    },
+    {
+      "name": "Stock price rise and fall in the last year",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1073,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0411,
+        -0.158558518,
+        -0.075740319,
+        -0.2596,
+        -0.0788
+      ],
+      "min": -0.897933754,
+      "max": 8.561111111,
+      "mean": 0.1583826328378144,
+      "std": 0.8059264741719735,
+      "median": -0.011958014,
+      "skewness": 4.2062458966686895
+    },
+    {
+      "name": "Annual turnover rate",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1062,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        6.55,
+        2.030781136,
+        17.29202778,
+        4.03,
+        18.53
+      ],
+      "min": 0.0,
+      "max": 51.09718488,
+      "mean": 6.441550062320036,
+      "std": 5.822584658835975,
+      "median": 4.687577369,
+      "skewness": 1.9298101858017445
+    },
+    {
+      "name": "ST",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.006071118820468344,
+      "std": 0.07771420983285536,
+      "median": 0.0,
+      "skewness": 12.73350504830853
+    },
+    {
+      "name": "ROA",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 986,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.08,
+        0.041075,
+        0.012934,
+        0.05,
+        0.06
+      ],
+      "min": -0.646738,
+      "max": 0.695737,
+      "mean": 0.053727483087597575,
+      "std": 0.10114059760090227,
+      "median": 0.053839,
+      "skewness": -0.9928617325336633
+    },
+    {
+      "name": "ROE",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1006,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.09,
+        0.053651,
+        0.022067,
+        0.06,
+        0.23
+      ],
+      "min": -6.44,
+      "max": 1.88,
+      "mean": 0.04628239549002601,
+      "std": 0.30488227741483426,
+      "median": 0.073769,
+      "skewness": -10.132600443380777
+    },
+    {
+      "name": "changes in net assets",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1037,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.08,
+        0.987750916,
+        1.059760927,
+        5.69,
+        1.19
+      ],
+      "min": -0.41,
+      "max": 61.45421183,
+      "mean": 1.3321805363269732,
+      "std": 2.5506519156189555,
+      "median": 1.078059911,
+      "skewness": 20.802117659367795
+    },
+    {
+      "name": "changes in operating income",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1050,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.09,
+        0.055942,
+        -0.568227,
+        0.76,
+        0.11
+      ],
+      "min": -0.91,
+      "max": 11.28,
+      "mean": 0.22108866955767562,
+      "std": 0.7497725325300479,
+      "median": 0.118735,
+      "skewness": 8.699758164521603
+    },
+    {
+      "name": "Gross profit margin on sales",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1013,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.37,
+        0.116466,
+        0.327594,
+        0.85,
+        0.2
+      ],
+      "min": -0.77,
+      "max": 0.959294,
+      "mean": 0.2966825637467476,
+      "std": 0.18695104514444963,
+      "median": 0.271207,
+      "skewness": 0.5451568518420022
+    },
+    {
+      "name": "Net business cycle (days)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1153,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        152.17,
+        60.2775,
+        190.3258,
+        -26.16,
+        16.01
+      ],
+      "min": -755.1908,
+      "max": 18428.86,
+      "mean": 201.2369638334779,
+      "std": 662.235243146414,
+      "median": 109.7618,
+      "skewness": 19.663207375501084,
+      "isMonotonic": false
+    },
+    {
+      "name": "Turnover rate of accounts receivable (Times)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1126,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        2.79,
+        12.3242,
+        0.5638,
+        8.33,
+        0.94
+      ],
+      "min": 0.0,
+      "max": 23415.9145,
+      "mean": 57.68613894189072,
+      "std": 740.7464269082724,
+      "median": 4.51,
+      "skewness": 28.035671085167742
+    },
+    {
+      "name": "Inventory turnover rate (Times)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1115,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        5.31,
+        5.1492,
+        2.1669,
+        28121.32,
+        12.42
+      ],
+      "min": 0.0,
+      "max": 75684.53,
+      "mean": 111.81999306157847,
+      "std": 2385.2662840918706,
+      "median": 3.6055,
+      "skewness": 29.07784382716635
+    },
+    {
+      "name": "Total asset turnover rate (Times)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 986,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.62,
+        0.8527,
+        0.2785,
+        0.13,
+        0.73
+      ],
+      "min": 0.01,
+      "max": 10.6354,
+      "mean": 0.6592072853425845,
+      "std": 0.5883230745821266,
+      "median": 0.5531,
+      "skewness": 7.16273862442829
+    },
+    {
+      "name": "Current ratio",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 935,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.03,
+        0.006257,
+        0.015119,
+        0.01,
+        0.01
+      ],
+      "min": 0.0,
+      "max": 0.65,
+      "mean": 0.023329624457935818,
+      "std": 0.032722496038742936,
+      "median": 0.016358,
+      "skewness": 12.028268860101232
+    },
+    {
+      "name": "Cash ratio",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1040,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        1.15,
+        0.183162417,
+        0.168020812,
+        0.9,
+        0.03
+      ],
+      "min": 0.0,
+      "max": 40.76,
+      "mean": 0.8522220736973114,
+      "std": 1.7491735618003472,
+      "median": 0.420081571,
+      "skewness": 12.863219862044604
+    },
+    {
+      "name": "Asset liability ratio",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1024,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.43,
+        0.92085,
+        0.553113,
+        0.15,
+        0.81
+      ],
+      "min": 0.01,
+      "max": 1.23,
+      "mean": 0.43359817866435385,
+      "std": 0.20202806672968923,
+      "median": 0.428295,
+      "skewness": 0.3671165886196768
+    },
+    {
+      "name": "Asset liability ratio (excluding advance receipts)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1027,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.42,
+        0.9171998,
+        0.5146492,
+        0.14,
+        0.81
+      ],
+      "min": 0.0,
+      "max": 1.24,
+      "mean": 0.41568363179878576,
+      "std": 0.2033016713373039,
+      "median": 0.408284957,
+      "skewness": 0.41889169267280285
+    },
+    {
+      "name": "Asset liability ratio (total liabilities - contract liabilities - advance receipts)/(total assets - goodwill - contract liabilities - advance receipts)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1032,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.42,
+        0.918510759,
+        0.5146492,
+        0.37,
+        0.81
+      ],
+      "min": 0.01,
+      "max": 1.68,
+      "mean": 0.4387369933798786,
+      "std": 0.21532572871622957,
+      "median": 0.431200818,
+      "skewness": 0.6115626263262808
+    },
+    {
+      "name": "Current liabilities/total liabilities",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 969,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.55,
+        0.852507,
+        0.991875,
+        0.97,
+        1.0
+      ],
+      "min": 0.1,
+      "max": 1.0,
+      "mean": 0.8286658560277537,
+      "std": 0.16031634450691812,
+      "median": 0.877611,
+      "skewness": -1.3118621453705515
+    },
+    {
+      "name": "Monetary capital/short-term debt",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 946,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        2.35,
+        0.339675637,
+        1.231568787,
+        5.68,
+        0.95
+      ],
+      "min": 0.01,
+      "max": 9650.618415,
+      "mean": 1213.4108905119194,
+      "std": 3164.9409566485674,
+      "median": 1.373869595,
+      "skewness": 2.2689741609652527
+    },
+    {
+      "name": "EBITDA/interest bearing debt",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 949,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.55,
+        0.141541884,
+        0.231546123,
+        0.0,
+        2.29
+      ],
+      "min": -83.74653688,
+      "max": 3509.13924,
+      "mean": 10.298880649892455,
+      "std": 126.44398956543726,
+      "median": 0.325883188,
+      "skewness": 21.381233311502218
+    },
+    {
+      "name": "EBIT interest cover",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 929,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        8.58,
+        1.2009,
+        1.9269,
+        17.43,
+        52.07
+      ],
+      "min": -374.4545,
+      "max": 13116.7373,
+      "mean": 50.8897195143105,
+      "std": 482.5422414367458,
+      "median": 3.9078,
+      "skewness": 21.161101362159666
+    },
+    {
+      "name": "EBITDA interest cover",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 820,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        10.18,
+        2.181717469,
+        2.392652339,
+        18.6,
+        54.2
+      ],
+      "min": 0.0,
+      "max": 14504.43708,
+      "mean": 65.65380871213702,
+      "std": 539.6335404927664,
+      "median": 5.96,
+      "skewness": 20.39997565091897
+    },
+    {
+      "name": "Net cash flow from operations has been negative for three consecutive years",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.03642671292281006,
+      "std": 0.18743072344563977,
+      "median": 0.0,
+      "skewness": 4.955204701829521
+    },
+    {
+      "name": "Average cash income ratio in recent three years",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1021,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.9,
+        0.975709333,
+        0.943147333,
+        1.13,
+        0.55
+      ],
+      "min": 0.231671,
+      "max": 4.75,
+      "mean": 0.9879964816487423,
+      "std": 0.23196853683369628,
+      "median": 1.0,
+      "skewness": 4.758338111589593
+    },
+    {
+      "name": "Cash income ratio",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1027,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.95,
+        1.017087,
+        1.396143,
+        1.08,
+        0.59
+      ],
+      "min": 0.0,
+      "max": 4.103321,
+      "mean": 0.9964177432784043,
+      "std": 0.2854127443795974,
+      "median": 0.997542,
+      "skewness": 3.7327662855620267
+    },
+    {
+      "name": "Ratio of accounts receivable to operating income",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1150,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.3808,
+        0.054085847,
+        1.642647614,
+        0.2287,
+        1.2566
+      ],
+      "min": 0.0,
+      "max": 7.8214,
+      "mean": 0.3105640446253253,
+      "std": 0.39334349351533004,
+      "median": 0.237209951,
+      "skewness": 9.6202548262984
+    },
+    {
+      "name": "Ratio of prepayments to operating income",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1137,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0708,
+        0.099960412,
+        0.042830433,
+        0.0612,
+        0.0715
+      ],
+      "min": 0.0,
+      "max": 9.021281001,
+      "mean": 0.05614914755420641,
+      "std": 0.2868256735157403,
+      "median": 0.019374255,
+      "skewness": 27.046763106061835
+    },
+    {
+      "name": "Ratio of other receivables to total assets",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1124,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0135,
+        0.017709125,
+        0.034914691,
+        0.002,
+        0.0236
+      ],
+      "min": 0.0,
+      "max": 0.4124,
+      "mean": 0.019500691085862963,
+      "std": 0.03470885827775322,
+      "median": 0.00901778,
+      "skewness": 4.980033462662813
+    },
+    {
+      "name": "Ratio of construction in progress to total assets",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 997,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.21e-05,
+        0.01236261,
+        0.0,
+        0.0,
+        0.000112055
+      ],
+      "min": 0.0,
+      "max": 0.476370733,
+      "mean": 0.03568123309366869,
+      "std": 0.05488541116356501,
+      "median": 0.016196409,
+      "skewness": 3.1338201360214244
+    },
+    {
+      "name": "Minority shareholders' equity/owners' equity",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 806,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.276268188,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": -0.61,
+      "max": 0.62,
+      "mean": 0.04183817769754553,
+      "std": 0.08892680131958296,
+      "median": 0.010904258,
+      "skewness": 2.087991921885047
+    },
+    {
+      "name": "The proportion of goodwill in total assets exceeds",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 575,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.001364348,
+        0.0,
+        0.61,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 0.68,
+      "mean": 0.04481918734128968,
+      "std": 0.09110888918098525,
+      "median": 0.001649755,
+      "skewness": 3.015348136732099
+    },
+    {
+      "name": "Downgrade or negative",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.0199479618386817,
+      "std": 0.1398821331642036,
+      "median": 0.0,
+      "skewness": 6.875591257402171
+    },
+    {
+      "name": "audit opinion ",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 2.0,
+      "mean": 0.0745880312228968,
+      "std": 0.34558905694514563,
+      "median": 0.0,
+      "skewness": 4.818966825897555
+    },
+    {
+      "name": "Company nature (state owned assets 0, others 1)",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.8447528187337381,
+      "std": 0.3622973027083882,
+      "median": 1.0,
+      "skewness": -1.906455639383512
+    },
+    {
+      "name": "High deposit and loan of 90p",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.0026019080659150044,
+      "std": 0.050964604034679596,
+      "median": 0.0,
+      "skewness": 19.553271921807227
+    },
+    {
+      "name": "Company size (LN)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1153,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        3.366600704,
+        6.454516547,
+        2.235632354,
+        3.611835664,
+        4.141163471
+      ],
+      "min": -0.313920924,
+      "max": 8.583529684,
+      "mean": 3.6781464201647873,
+      "std": 1.2539910963958674,
+      "median": 3.579843853,
+      "skewness": 0.5446458023628847,
+      "isMonotonic": false
+    },
+    {
+      "name": "Whether there are four major audits",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.96877710320902,
+      "std": 0.1739950702614355,
+      "median": 1.0,
+      "skewness": -5.397758209137797
+    },
+    {
+      "name": "Proportion of independent directors",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 18,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.428571429,
+        0.363636364,
+        0.428571429,
+        0.428571429,
+        0.555555556
+      ],
+      "min": 0.0,
+      "max": 0.6,
+      "mean": 0.3811251434995664,
+      "std": 0.062163319569561365,
+      "median": 0.363636364,
+      "skewness": 0.20347027592426067
+    },
+    {
+      "name": "Equity checks and balances (2-5 large/1 large)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1140,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.355216404,
+        0.440209725,
+        0.609550742,
+        2.936539327,
+        1.055263149
+      ],
+      "min": 0.018913219,
+      "max": 3.988770045,
+      "mean": 0.8479296759800521,
+      "std": 0.6887399196272977,
+      "median": 0.678941603,
+      "skewness": 1.8697116941475254
+    },
+    {
+      "name": "Two positions in one (1 for the same, 0 for the different)",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.375542064180399,
+      "std": 0.48447269284527206,
+      "median": 0.0,
+      "skewness": 0.5146799734730012
+    },
+    {
+      "name": "Equity concentration (the first largest shareholder)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 994,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.5294,
+        0.467,
+        0.33,
+        0.0984,
+        0.303
+      ],
+      "min": 0.0,
+      "max": 0.8555,
+      "mean": 0.3206582220294883,
+      "std": 0.14222237458655795,
+      "median": 0.2999,
+      "skewness": 0.6201865128264656
+    },
+    {
+      "name": "Total institutional shareholding ratio",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1073,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.421279,
+        0.641516,
+        0.069637,
+        0.186914,
+        0.014086
+      ],
+      "min": 0.0,
+      "max": 0.931748,
+      "mean": 0.3178582046834345,
+      "std": 0.2290729457166961,
+      "median": 0.309256,
+      "skewness": 0.26230530476415725
+    },
+    {
+      "name": "Audit fee",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 211,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        70.0,
+        316.0,
+        70.0,
+        65.0,
+        180.0
+      ],
+      "min": 0.0,
+      "max": 2615.0,
+      "mean": 120.55664959410235,
+      "std": 159.02294358636465,
+      "median": 90.0,
+      "skewness": 9.076293460145404
+    },
+    {
+      "name": "Number of research institutions concerned",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 41,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.693147181,
+        1.386294361,
+        0.0,
+        2.63905733,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 3.784189634,
+      "mean": 1.1373498996227234,
+      "std": 1.112214485690494,
+      "median": 1.098612289,
+      "skewness": 0.4892163500270065
+    },
+    {
+      "name": "Number of research reports (+1 LN)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 106,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.098612289,
+        1.791759469,
+        0.0,
+        3.091042453,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 5.505331536,
+      "mean": 1.5098848292879443,
+      "std": 1.5135242563887803,
+      "median": 1.098612289,
+      "skewness": 0.5431940973602235
+    },
+    {
+      "name": "Financial cycle m2/gdp",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 15,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        -0.06,
+        0.017310869,
+        -0.064161221,
+        0.02,
+        0.1
+      ],
+      "min": -0.07,
+      "max": 0.1,
+      "mean": 0.008649635208152645,
+      "std": 0.06111048413699971,
+      "median": 0.02,
+      "skewness": -0.03543362991938304
+    },
+    {
+      "name": "IsDefault",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.18473547267996532,
+      "std": 0.3882512255820243,
+      "median": 0.0,
+      "skewness": 1.6268452810406135
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

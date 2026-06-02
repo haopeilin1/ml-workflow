@@ -1,0 +1,5 @@
+1. 对类别特征（sex、smoker、region）进行One-Hot或Label编码；
+2. 对数值特征（age、bmi、children）做标准化或归一化；
+3. 尝试线性回归、随机森林、XGBoost及LightGBM等模型；
+4. 使用交叉验证评估，以RMSE为唯一指标调参；
+5. 关注吸烟与BMI的交互效应，可构造交叉特征提升预测精度。

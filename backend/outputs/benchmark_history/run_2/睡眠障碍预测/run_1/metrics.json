@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": null,
+    "val_accuracy": 0.625,
+    "val_f1_macro": null,
+    "val_rmse": null,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": null,
+    "accuracy": 0.75,
+    "f1": 0.38690476190476186,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": null,
+    "mae": null,
+    "r2": null
+  },
+  "best_score": 54.8,
+  "task_type": "multiclass_classification",
+  "target_column": "Sleep Disorder",
+  "eval_metric": "Macro F1 Score",
+  "complexity": "complex",
+  "complexity_reason": "多分类任务强制complex",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

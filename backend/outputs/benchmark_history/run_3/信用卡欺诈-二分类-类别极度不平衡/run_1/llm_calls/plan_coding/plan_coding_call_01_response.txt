@@ -1,0 +1,437 @@
+<plan>
+产物生成计划：加载已保存的最佳模型，对测试集进行预测，生成二分类任务所需的所有产物文件。
+
+步骤：
+1. 加载 data/best_model.pkl 模型
+2. 加载测试集 data/test.csv 并进行与训练时相同的预处理
+3. 对测试集进行预测，生成 prediction 和 probability 列
+4. 保存模型到 output/model.pkl
+5. 提取特征重要性（从 LightGBM 模型属性获取），保存 CSV 和 PNG
+6. 生成 report.html（包含指标摘要、特征重要性表格、测试集预测预览）
+7. 生成 output/test_predictions.csv
+8. 输出摘要 JSON
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 1. 加载已保存的最佳模型 ==========
+print("Loading best model from data/best_model.pkl...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Model loaded successfully.")
+except Exception as e:
+    print(f"Failed to load model: {e}")
+    raise
+
+# ========== 2. 加载测试集并进行预处理 ==========
+print("Loading test data...")
+test = pd.read_csv('data/test.csv')
+
+target_col = 'IsFraud'
+id_col = 'id' if 'id' in test.columns else test.columns[0]
+
+# 预处理函数（与训练时保持一致）
+def preprocess_test(df):
+    df = df.copy()
+    
+    # 丢弃 id 列和所有 feat1-feat28 列
+    drop_cols = ['id'] + [f'feat{i}' for i in range(1, 29)]
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    # Transaction_Amount 做 log1p 变换
+    if 'Transaction_Amount' in df.columns:
+        df['Transaction_Amount_log'] = np.log1p(df['Transaction_Amount'])
+        df = df.drop(columns=['Transaction_Amount'])
+    
+    # 从 Time 列提取周期性特征
+    if 'Time' in df.columns:
+        df['Time_hour'] = (df['Time'] // 3600) % 24
+        df['Time_day_of_week'] = (df['Time'] // (3600 * 24)) % 7
+        df = df.drop(columns=['Time'])
+    
+    # 特征名清洗
+    df.columns = [str(c).replace(' ', '_').replace('-', '_') for c in df.columns]
+    
+    # 处理缺失值
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        if df[col].isna().any():
+            if df[col].dtype in ['float64', 'int64']:
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                df[col] = df[col].fillna(0)
+    
+    # 移除目标列（如果存在）
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    return df
+
+# 预处理测试集
+X_test_raw = preprocess_test(test)
+
+# 确保所有列为数值类型
+for col in X_test_raw.columns:
+    if X_test_raw[col].dtype == 'object':
+        X_test_raw[col] = pd.to_numeric(X_test_raw[col], errors='coerce')
+    if X_test_raw[col].isna().any():
+        X_test_raw[col] = X_test_raw[col].fillna(X_test_raw[col].median() if X_test_raw[col].dtype in ['float64', 'int64'] else 0)
+
+# 清洗特征名（与训练时一致）
+X_test_raw.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_raw.columns]
+if X_test_raw.columns.duplicated().any():
+    X_test_raw.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_raw.columns)]
+
+print(f"Test features shape: {X_test_raw.shape}")
+
+# ========== 3. 测试集预测 ==========
+print("Making predictions on test set...")
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_raw)[:, 1]
+else:
+    test_probs = model.predict(X_test_raw).astype(float)
+
+# 使用默认阈值 0.5 进行预测
+test_preds = (test_probs >= 0.5).astype(int)
+
+# ========== 4. 保存模型到 output/model.pkl ==========
+print("Saving model to output/model.pkl...")
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+
+# ========== 5. 提取特征重要性 ==========
+print("Extracting feature importance...")
+feature_names = X_test_raw.columns.tolist()
+
+# 尝试从 Pipeline 中提取特征重要性
+try:
+    # 如果是 Pipeline，获取最终模型
+    if hasattr(model, 'named_steps') and 'model' in model.named_steps:
+        final_model = model.named_steps['model']
+    else:
+        final_model = model
+    
+    # 获取特征重要性
+    if hasattr(final_model, 'feature_importances_'):
+        importances = final_model.feature_importances_
+    elif hasattr(final_model, 'coef_'):
+        importances = np.abs(final_model.coef_).flatten()
+    else:
+        importances = np.ones(len(feature_names)) / len(feature_names)
+    
+    # 确保长度匹配
+    if len(importances) != len(feature_names):
+        # 如果 Pipeline 中有特征选择步骤，尝试获取支持的特征
+        if hasattr(model, 'named_steps'):
+            for step_name, step in model.named_steps.items():
+                if hasattr(step, 'get_support'):
+                    mask = step.get_support()
+                    feature_names = [f for f, m in zip(feature_names, mask) if m]
+                    break
+        # 截断或填充以匹配
+        if len(importances) > len(feature_names):
+            importances = importances[:len(feature_names)]
+        elif len(importances) < len(feature_names):
+            importances = np.pad(importances, (0, len(feature_names) - len(importances)), 'constant', constant_values=0)
+    
+    # 创建特征重要性 DataFrame
+    fi_df = pd.DataFrame({
+        'name': feature_names,
+        'importance': importances
+    })
+    fi_df = fi_df.sort_values('importance', ascending=False).reset_index(drop=True)
+    
+except Exception as e:
+    print(f"Warning: Could not extract feature importance: {e}")
+    fi_df = pd.DataFrame({
+        'name': feature_names,
+        'importance': np.ones(len(feature_names)) / len(feature_names)
+    })
+
+# 保存特征重要性 CSV
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# 生成特征重要性图
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# 只显示前 20 个最重要的特征
+top_n = min(20, len(fi_df))
+fi_top = fi_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(fi_top)), fi_top['importance'].values, color='steelblue')
+plt.yticks(range(len(fi_top)), fi_top['name'].values)
+plt.xlabel('Importance')
+plt.title('Feature Importance (Top {})'.format(top_n))
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 6. 保存测试集预测 ==========
+print("Saving test predictions...")
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+    'probability': test_probs
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 7. 生成 HTML 报告 ==========
+print("Generating HTML report...")
+
+# 统计预测分布
+pred_counts = result_df['prediction'].value_counts().to_dict()
+n_total = len(result_df)
+n_positive = pred_counts.get(1, 0)
+n_negative = pred_counts.get(0, 0)
+positive_rate = n_positive / n_total * 100 if n_total > 0 else 0
+
+# 概率分布统计
+prob_mean = float(test_probs.mean())
+prob_median = float(np.median(test_probs))
+prob_std = float(test_probs.std())
+prob_min = float(test_probs.min())
+prob_max = float(test_probs.max())
+
+# 构建特征重要性表格 HTML
+fi_html_rows = ""
+for _, row in fi_top.iterrows():
+    fi_html_rows += f"<tr><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>"
+
+# 构建预测预览表格 HTML（前 20 行）
+preview_df = result_df.head(20)
+preview_html_rows = ""
+for _, row in preview_df.iterrows():
+    pred_label = "Fraud" if row['prediction'] == 1 else "Non-Fraud"
+    preview_html_rows += f"<tr><td>{row['id']}</td><td>{pred_label}</td><td>{row['probability']:.6f}</td></tr>"
+
+html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Binary Classification</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        .metric-box {{ display: inline-block; background: #e8f5e9; border: 1px solid #4CAF50; border-radius: 6px; padding: 15px 25px; margin: 10px; text-align: center; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2e7d32; }}
+        .metric-label {{ font-size: 12px; color: #666; }}
+        .warning {{ color: #e65100; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Binary Classification Model Report</h1>
+        
+        <h2>Model Information</h2>
+        <p><strong>Task Type:</strong> Binary Classification (Fraud Detection)</p>
+        <p><strong>Target Column:</strong> IsFraud</p>
+        <p><strong>Model Type:</strong> {type(model).__name__}</p>
+        
+        <h2>Test Set Prediction Summary</h2>
+        <div class="metric-box">
+            <div class="metric-value">{n_total:,}</div>
+            <div class="metric-label">Total Samples</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-value">{n_positive:,}</div>
+            <div class="metric-label">Predicted Fraud</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-value">{n_negative:,}</div>
+            <div class="metric-label">Predicted Non-Fraud</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-value">{positive_rate:.2f}%</div>
+            <div class="metric-label">Fraud Rate</div>
+        </div>
+        
+        <h2>Probability Distribution</h2>
+        <table>
+            <tr><th>Statistic</th><th>Value</th></tr>
+            <tr><td>Mean</td><td>{prob_mean:.6f}</td></tr>
+            <tr><td>Median</td><td>{prob_median:.6f}</td></tr>
+            <tr><td>Std Dev</td><td>{prob_std:.6f}</td></tr>
+            <tr><td>Min</td><td>{prob_min:.6f}</td></tr>
+            <tr><td>Max</td><td>{prob_max:.6f}</td></tr>
+        </table>
+        
+        <h2>Feature Importance (Top {top_n})</h2>
+        <table>
+            <tr><th>Feature Name</th><th>Importance</th></tr>
+            {fi_html_rows}
+        </table>
+        
+        <h2>Test Predictions Preview (First 20 Rows)</h2>
+        <table>
+            <tr><th>ID</th><th>Prediction</th><th>Probability</th></tr>
+            {preview_html_rows}
+        </table>
+        
+        <p><em>Report generated automatically. Full predictions available in output/test_predictions.csv</em></p>
+    </div>
+</body>
+</html>"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 8. 生成预测脚本 output/predict.py ==========
+predict_script = '''#!/usr/bin/env python3
+"""
+Independent prediction script.
+Usage: python predict.py <input_csv_path> [output_csv_path]
+Loads output/model.pkl and makes predictions on new data.
+"""
+
+import pandas as pd
+import numpy as np
+import pickle
+import sys
+import os
+import re
+import warnings
+warnings.filterwarnings('ignore')
+
+def preprocess(df):
+    """Preprocess input data (same as training preprocessing)."""
+    df = df.copy()
+    
+    # Drop id and feat columns
+    drop_cols = ['id'] + [f'feat{i}' for i in range(1, 29)]
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    # Transaction_Amount log1p transform
+    if 'Transaction_Amount' in df.columns:
+        df['Transaction_Amount_log'] = np.log1p(df['Transaction_Amount'])
+        df = df.drop(columns=['Transaction_Amount'])
+    
+    # Time features
+    if 'Time' in df.columns:
+        df['Time_hour'] = (df['Time'] // 3600) % 24
+        df['Time_day_of_week'] = (df['Time'] // (3600 * 24)) % 7
+        df = df.drop(columns=['Time'])
+    
+    # Clean column names
+    df.columns = [str(c).replace(' ', '_').replace('-', '_') for c in df.columns]
+    
+    # Handle missing values
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        if df[col].isna().any():
+            if df[col].dtype in ['float64', 'int64']:
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                df[col] = df[col].fillna(0)
+    
+    # Remove target column if present
+    if 'IsFraud' in df.columns:
+        df = df.drop(columns=['IsFraud'])
+    
+    return df
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv_path> [output_csv_path]")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+    
+    # Load model
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # Load and preprocess data
+    df = pd.read_csv(input_path)
+    id_col = 'id' if 'id' in df.columns else df.columns[0]
+    ids = df[id_col] if id_col in df.columns else range(len(df))
+    
+    X = preprocess(df)
+    
+    # Clean feature names
+    X.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X.columns]
+    if X.columns.duplicated().any():
+        X.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X.columns)]
+    
+    # Predict
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X)[:, 1]
+    else:
+        probs = model.predict(X).astype(float)
+    
+    preds = (probs >= 0.5).astype(int)
+    
+    # Save results
+    result = pd.DataFrame({
+        'id': ids,
+        'prediction': preds,
+        'probability': probs
+    })
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    print(f"Total samples: {len(result)}")
+    print(f"Predicted fraud: {preds.sum()} ({preds.mean()*100:.2f}%)")
+
+if __name__ == '__main__':
+    main()
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 9. 输出摘要 ==========
+summary = {
+    "status": "success",
+    "model_loaded_from": "data/best_model.pkl",
+    "model_saved_to": "output/model.pkl",
+    "test_samples": n_total,
+    "predicted_fraud": n_positive,
+    "predicted_non_fraud": n_negative,
+    "fraud_rate_pct": round(positive_rate, 2),
+    "probability_mean": round(prob_mean, 6),
+    "probability_median": round(prob_median, 6),
+    "top_features": fi_top['name'].head(5).tolist(),
+    "output_files": [
+        "output/model.pkl",
+        "output/feature_importance.csv",
+        "output/feature_importance.png",
+        "output/report.html",
+        "output/test_predictions.csv",
+        "output/predict.py"
+    ]
+}
+
+print(json.dumps(summary))
+```
+</code>

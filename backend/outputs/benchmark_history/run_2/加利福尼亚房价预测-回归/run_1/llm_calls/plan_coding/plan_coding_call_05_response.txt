@@ -1,0 +1,620 @@
+<plan>
+产物生成计划：回归任务产物生成
+
+1. 加载已存在的 data/best_model.pkl 模型（优先），如果加载失败则回退重新训练
+2. 加载测试集 data/test.csv 并进行预测
+3. 生成所有回归任务产物：
+   - output/model.pkl：完整模型文件
+   - output/feature_importance.csv：特征重要性（排除目标列）
+   - output/feature_importance.png：特征重要性图
+   - output/report.html：HTML 报告（含指标摘要、特征重要性表格、测试集预测预览、残差统计、RMSE/MAE/R2）
+   - output/report_fig.png：预测值 vs 真实值散点图（叠加 y=x 对角线）
+   - output/test_predictions.csv：测试集预测结果
+   - output/predict.py：独立预测脚本
+4. 输出 JSON 摘要
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
+
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 1. 加载模型 ==========
+print("Loading model...")
+model = None
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Model loaded from data/best_model.pkl")
+except Exception as e:
+    print(f"Failed to load model from data/best_model.pkl: {e}")
+    print("Will retrain model...")
+
+# ========== 2. 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'median_house_value'
+id_col = 'id' if 'id' in test.columns else test.columns[0]
+
+# ========== 3. 如果模型加载失败，重新训练 ==========
+if model is None:
+    print("Retraining model...")
+    import lightgbm as lgb
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+
+    # 预处理函数
+    PREPROCESS_STATE = {}
+
+    def preprocess(df, mode='train'):
+        global PREPROCESS_STATE
+        df = df.copy()
+        if 'id' in df.columns:
+            df = df.drop(columns=['id'])
+        if target_col in df.columns:
+            y = df[target_col].copy()
+            X = df.drop(columns=[target_col])
+        else:
+            y = None
+            X = df.copy()
+        num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+        cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+        if mode == 'train':
+            preprocessor = ColumnTransformer([
+                ('num', Pipeline([
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler())
+                ]), num_cols),
+                ('cat', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+                ]), cat_cols)
+            ], remainder='passthrough')
+            preprocessor.fit(X)
+            PREPROCESS_STATE['preprocessor'] = preprocessor
+            PREPROCESS_STATE['num_cols'] = num_cols
+            PREPROCESS_STATE['cat_cols'] = cat_cols
+            X_processed = preprocessor.transform(X)
+            feature_names = list(num_cols)
+            if cat_cols:
+                encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+                feature_names.extend(encoder.get_feature_names_out(cat_cols))
+            X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+        else:
+            if 'preprocessor' not in PREPROCESS_STATE:
+                raise ValueError("preprocess() must be called with mode='train' first")
+            preprocessor = PREPROCESS_STATE['preprocessor']
+            X_processed = preprocessor.transform(X)
+            num_cols = PREPROCESS_STATE['num_cols']
+            cat_cols = PREPROCESS_STATE['cat_cols']
+            feature_names = list(num_cols)
+            if cat_cols:
+                encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+                feature_names.extend(encoder.get_feature_names_out(cat_cols))
+            X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+        if y is not None:
+            X_processed[target_col] = y.values
+        return X_processed
+
+    def feature_engineering(df):
+        df = df.copy()
+        if target_col in df.columns:
+            X = df.drop(columns=[target_col])
+        else:
+            X = df.copy()
+        if 'total_rooms' in X.columns and 'households' in X.columns:
+            X['rooms_per_household'] = X['total_rooms'] / (X['households'] + 1e-5)
+        if 'total_bedrooms' in X.columns and 'total_rooms' in X.columns:
+            X['bedrooms_per_room'] = X['total_bedrooms'] / (X['total_rooms'] + 1e-5)
+        if 'population' in X.columns and 'households' in X.columns:
+            X['population_per_household'] = X['population'] / (X['households'] + 1e-5)
+        if 'median_income' in X.columns and 'total_rooms' in X.columns:
+            X['income_per_room'] = X['median_income'] / (X['total_rooms'] + 1e-5)
+        if 'total_bedrooms' in X.columns and 'households' in X.columns:
+            X['bedrooms_per_household'] = X['total_bedrooms'] / (X['households'] + 1e-5)
+        if 'total_rooms' in X.columns and 'population' in X.columns:
+            X['rooms_per_population'] = X['total_rooms'] / (X['population'] + 1e-5)
+        if 'median_income' in X.columns and 'households' in X.columns:
+            X['income_per_household'] = X['median_income'] / (X['households'] + 1e-5)
+        skewed_cols = ['total_rooms', 'total_bedrooms', 'population', 'households']
+        for col in skewed_cols:
+            if col in X.columns:
+                X[f'{col}_log'] = np.log1p(X[col])
+        if 'median_income' in X.columns:
+            X['median_income_sq'] = X['median_income'] ** 2
+            X['median_income_cub'] = X['median_income'] ** 3
+        if 'longitude' in X.columns and 'latitude' in X.columns:
+            X['longitude_latitude_interaction'] = X['longitude'] * X['latitude']
+            X['longitude_sq'] = X['longitude'] ** 2
+            X['latitude_sq'] = X['latitude'] ** 2
+        if 'population' in X.columns and 'total_rooms' in X.columns:
+            X['density'] = X['population'] / (X['total_rooms'] + 1e-5)
+        if 'housing_median_age' in X.columns:
+            X['age_squared'] = X['housing_median_age'] ** 2
+        X = X.select_dtypes(include=[np.number])
+        X = X.replace([np.inf, -np.inf], np.nan)
+        X = X.fillna(0)
+        return X
+
+    # 预处理训练数据
+    train_clean = preprocess(train, mode='train')
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train = train_clean
+
+    # 特征工程
+    X_train_fe = feature_engineering(X_train)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+
+    # 清洗特征名
+    X_train_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_train_fe.columns]
+    if X_train_fe.columns.duplicated().any():
+        X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+
+    # 训练模型
+    model = lgb.LGBMRegressor(
+        objective='regression', n_estimators=1000, max_depth=12, num_leaves=80,
+        learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, min_child_samples=10,
+        reg_alpha=0.1, reg_lambda=0.1, random_state=42, n_jobs=-1, verbose=-1,
+        min_split_gain=0.0, min_child_weight=1e-3, subsample_freq=1
+    )
+    model.fit(X_train_fe, y_train)
+    print("Model retrained successfully.")
+
+# ========== 4. 预处理测试数据 ==========
+print("Processing test data...")
+# 重新执行预处理以获取 PREPROCESS_STATE（如果模型是从文件加载的，需要重新拟合）
+PREPROCESS_STATE = {}
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+
+def preprocess_for_test(df):
+    global PREPROCESS_STATE
+    df = df.copy()
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    preprocessor = ColumnTransformer([
+        ('num', Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ]), num_cols),
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ]), cat_cols)
+    ], remainder='passthrough')
+    preprocessor.fit(X)
+    PREPROCESS_STATE['preprocessor'] = preprocessor
+    PREPROCESS_STATE['num_cols'] = num_cols
+    PREPROCESS_STATE['cat_cols'] = cat_cols
+    X_processed = preprocessor.transform(X)
+    feature_names = list(num_cols)
+    if cat_cols:
+        encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        feature_names.extend(encoder.get_feature_names_out(cat_cols))
+    X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    if y is not None:
+        X_processed[target_col] = y.values
+    return X_processed
+
+def feature_engineering_for_test(df):
+    df = df.copy()
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    if 'total_rooms' in X.columns and 'households' in X.columns:
+        X['rooms_per_household'] = X['total_rooms'] / (X['households'] + 1e-5)
+    if 'total_bedrooms' in X.columns and 'total_rooms' in X.columns:
+        X['bedrooms_per_room'] = X['total_bedrooms'] / (X['total_rooms'] + 1e-5)
+    if 'population' in X.columns and 'households' in X.columns:
+        X['population_per_household'] = X['population'] / (X['households'] + 1e-5)
+    if 'median_income' in X.columns and 'total_rooms' in X.columns:
+        X['income_per_room'] = X['median_income'] / (X['total_rooms'] + 1e-5)
+    if 'total_bedrooms' in X.columns and 'households' in X.columns:
+        X['bedrooms_per_household'] = X['total_bedrooms'] / (X['households'] + 1e-5)
+    if 'total_rooms' in X.columns and 'population' in X.columns:
+        X['rooms_per_population'] = X['total_rooms'] / (X['population'] + 1e-5)
+    if 'median_income' in X.columns and 'households' in X.columns:
+        X['income_per_household'] = X['median_income'] / (X['households'] + 1e-5)
+    skewed_cols = ['total_rooms', 'total_bedrooms', 'population', 'households']
+    for col in skewed_cols:
+        if col in X.columns:
+            X[f'{col}_log'] = np.log1p(X[col])
+    if 'median_income' in X.columns:
+        X['median_income_sq'] = X['median_income'] ** 2
+        X['median_income_cub'] = X['median_income'] ** 3
+    if 'longitude' in X.columns and 'latitude' in X.columns:
+        X['longitude_latitude_interaction'] = X['longitude'] * X['latitude']
+        X['longitude_sq'] = X['longitude'] ** 2
+        X['latitude_sq'] = X['latitude'] ** 2
+    if 'population' in X.columns and 'total_rooms' in X.columns:
+        X['density'] = X['population'] / (X['total_rooms'] + 1e-5)
+    if 'housing_median_age' in X.columns:
+        X['age_squared'] = X['housing_median_age'] ** 2
+    X = X.select_dtypes(include=[np.number])
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+    return X
+
+test_clean = preprocess_for_test(test)
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+X_test_fe = feature_engineering_for_test(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+X_test_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# ========== 5. 测试集预测 ==========
+print("Making predictions on test set...")
+test_preds = model.predict(X_test_fe)
+
+# 保存测试集预测结果
+test_result = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds
+})
+test_result.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 6. 特征重要性 ==========
+print("Extracting feature importance...")
+feature_names = X_test_fe.columns.tolist()
+
+# 从模型获取特征重要性
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保特征重要性排除目标列
+fi_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+fi_df = fi_df.sort_values('importance', ascending=False)
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# 特征重要性图（只显示 top 30）
+top_n = min(30, len(fi_df))
+fi_top = fi_df.head(top_n)
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(fi_top)), fi_top['importance'].values[::-1], color='steelblue')
+plt.yticks(range(len(fi_top)), fi_top['name'].values[::-1], fontsize=9)
+plt.xlabel('Importance')
+plt.title('Feature Importance (Top {})'.format(top_n))
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 7. 模型指标（使用训练集做近似评估） ==========
+print("Computing model metrics...")
+# 对训练集做预测以计算指标
+train_clean_full = preprocess_for_test(train)
+if target_col in train_clean_full.columns:
+    y_train_full = train_clean_full[target_col]
+    X_train_full = train_clean_full.drop(columns=[target_col])
+else:
+    y_train_full = train[target_col]
+    X_train_full = train_clean_full
+X_train_fe_full = feature_engineering_for_test(X_train_full)
+if isinstance(X_train_fe_full, np.ndarray):
+    X_train_fe_full = pd.DataFrame(X_train_fe_full, index=X_train_full.index)
+X_train_fe_full.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_train_fe_full.columns]
+if X_train_fe_full.columns.duplicated().any():
+    X_train_fe_full.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe_full.columns)]
+
+train_preds = model.predict(X_train_fe_full)
+rmse = float(root_mean_squared_error(y_train_full, train_preds))
+mae = float(mean_absolute_error(y_train_full, train_preds))
+r2 = float(r2_score(y_train_full, train_preds))
+
+metrics = {
+    'rmse': rmse,
+    'mae': mae,
+    'r2': r2
+}
+
+# ========== 8. 预测值 vs 真实值散点图 ==========
+print("Generating prediction vs actual plot...")
+plt.figure(figsize=(8, 8))
+plt.scatter(y_train_full, train_preds, alpha=0.3, s=5, color='steelblue')
+min_val = min(y_train_full.min(), train_preds.min())
+max_val = max(y_train_full.max(), train_preds.max())
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='y=x')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.title('Predicted vs Actual Values (Training Set)\nRMSE={:.4f}, MAE={:.4f}, R²={:.4f}'.format(rmse, mae, r2))
+plt.legend()
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Report figure saved to output/report_fig.png")
+
+# ========== 9. 保存模型 ==========
+print("Saving model...")
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 10. 生成 HTML 报告 ==========
+print("Generating HTML report...")
+# 残差统计
+residuals = y_train_full - train_preds
+residual_stats = {
+    'mean': float(np.mean(residuals)),
+    'std': float(np.std(residuals)),
+    'min': float(np.min(residuals)),
+    'max': float(np.max(residuals)),
+    'median': float(np.median(residuals))
+}
+
+# 构建特征重要性表格 HTML
+fi_html_rows = ""
+for _, row in fi_top.iterrows():
+    fi_html_rows += f"<tr><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>"
+
+# 构建测试集预测预览 HTML
+preview_n = min(10, len(test_result))
+preview_rows = ""
+for i in range(preview_n):
+    preview_rows += f"<tr><td>{test_result.iloc[i]['id']}</td><td>{test_result.iloc[i]['prediction']:.4f}</td></tr>"
+
+html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Regression Model Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; background-color: #f9f9f9; }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metrics {{ display: flex; gap: 20px; flex-wrap: wrap; }}
+        .metric-card {{ background: white; border: 1px solid #ddd; border-radius: 8px; padding: 15px; min-width: 150px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .metric-card .value {{ font-size: 24px; font-weight: bold; color: #4CAF50; }}
+        .metric-card .label {{ font-size: 12px; color: #777; }}
+        img {{ max-width: 100%; height: auto; margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <h1>Regression Model Report</h1>
+
+    <h2>Model Metrics (Training Set)</h2>
+    <div class="metrics">
+        <div class="metric-card">
+            <div class="value">{rmse:.4f}</div>
+            <div class="label">RMSE</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">{mae:.4f}</div>
+            <div class="label">MAE</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">{r2:.4f}</div>
+            <div class="label">R²</div>
+        </div>
+    </div>
+
+    <h2>Residual Statistics</h2>
+    <table>
+        <tr><th>Statistic</th><th>Value</th></tr>
+        <tr><td>Mean</td><td>{residual_stats['mean']:.4f}</td></tr>
+        <tr><td>Std</td><td>{residual_stats['std']:.4f}</td></tr>
+        <tr><td>Min</td><td>{residual_stats['min']:.4f}</td></tr>
+        <tr><td>Max</td><td>{residual_stats['max']:.4f}</td></tr>
+        <tr><td>Median</td><td>{residual_stats['median']:.4f}</td></tr>
+    </table>
+
+    <h2>Feature Importance (Top {top_n})</h2>
+    <table>
+        <tr><th>Feature</th><th>Importance</th></tr>
+        {fi_html_rows}
+    </table>
+    <img src="feature_importance.png" alt="Feature Importance">
+
+    <h2>Predicted vs Actual</h2>
+    <img src="report_fig.png" alt="Predicted vs Actual">
+
+    <h2>Test Set Predictions Preview (First {preview_n} rows)</h2>
+    <table>
+        <tr><th>ID</th><th>Prediction</th></tr>
+        {preview_rows}
+    </table>
+    <p>Full predictions saved to <code>output/test_predictions.csv</code></p>
+</body>
+</html>"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 11. 生成独立预测脚本 ==========
+predict_script = '''import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+
+def load_model(model_path='output/model.pkl'):
+    """Load the trained model."""
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    return model
+
+def preprocess(df):
+    """Preprocess input data (same as training)."""
+    df = df.copy()
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    target_col = 'median_house_value'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    preprocessor = ColumnTransformer([
+        ('num', Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ]), num_cols),
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ]), cat_cols)
+    ], remainder='passthrough')
+    preprocessor.fit(X)
+    X_processed = preprocessor.transform(X)
+    feature_names = list(num_cols)
+    if cat_cols:
+        encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        feature_names.extend(encoder.get_feature_names_out(cat_cols))
+    X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    if y is not None:
+        X_processed[target_col] = y.values
+    return X_processed
+
+def feature_engineering(df):
+    """Apply feature engineering (same as training)."""
+    df = df.copy()
+    target_col = 'median_house_value'
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    if 'total_rooms' in X.columns and 'households' in X.columns:
+        X['rooms_per_household'] = X['total_rooms'] / (X['households'] + 1e-5)
+    if 'total_bedrooms' in X.columns and 'total_rooms' in X.columns:
+        X['bedrooms_per_room'] = X['total_bedrooms'] / (X['total_rooms'] + 1e-5)
+    if 'population' in X.columns and 'households' in X.columns:
+        X['population_per_household'] = X['population'] / (X['households'] + 1e-5)
+    if 'median_income' in X.columns and 'total_rooms' in X.columns:
+        X['income_per_room'] = X['median_income'] / (X['total_rooms'] + 1e-5)
+    if 'total_bedrooms' in X.columns and 'households' in X.columns:
+        X['bedrooms_per_household'] = X['total_bedrooms'] / (X['households'] + 1e-5)
+    if 'total_rooms' in X.columns and 'population' in X.columns:
+        X['rooms_per_population'] = X['total_rooms'] / (X['population'] + 1e-5)
+    if 'median_income' in X.columns and 'households' in X.columns:
+        X['income_per_household'] = X['median_income'] / (X['households'] + 1e-5)
+    skewed_cols = ['total_rooms', 'total_bedrooms', 'population', 'households']
+    for col in skewed_cols:
+        if col in X.columns:
+            X[f'{col}_log'] = np.log1p(X[col])
+    if 'median_income' in X.columns:
+        X['median_income_sq'] = X['median_income'] ** 2
+        X['median_income_cub'] = X['median_income'] ** 3
+    if 'longitude' in X.columns and 'latitude' in X.columns:
+        X['longitude_latitude_interaction'] = X['longitude'] * X['latitude']
+        X['longitude_sq'] = X['longitude'] ** 2
+        X['latitude_sq'] = X['latitude'] ** 2
+    if 'population' in X.columns and 'total_rooms' in X.columns:
+        X['density'] = X['population'] / (X['total_rooms'] + 1e-5)
+    if 'housing_median_age' in X.columns:
+        X['age_squared'] = X['housing_median_age'] ** 2
+    X = X.select_dtypes(include=[np.number])
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+    return X
+
+def predict(new_data_path, model_path='output/model.pkl'):
+    """Load model and make predictions on new data."""
+    model = load_model(model_path)
+    df = pd.read_csv(new_data_path)
+    id_col = 'id' if 'id' in df.columns else df.columns[0]
+    df_clean = preprocess(df)
+    target_col = 'median_house_value'
+    X = df_clean.drop(columns=[target_col], errors='ignore')
+    X_fe = feature_engineering(X)
+    if isinstance(X_fe, np.ndarray):
+        X_fe = pd.DataFrame(X_fe, index=X.index)
+    X_fe.columns = [re.sub('[^\\\\w]', '_', str(c)) for c in X_fe.columns]
+    if X_fe.columns.duplicated().any():
+        X_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_fe.columns)]
+    predictions = model.predict(X_fe)
+    result = pd.DataFrame({
+        'id': df[id_col] if id_col in df.columns else range(len(predictions)),
+        'prediction': predictions
+    })
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv_path> [output_csv_path]")
+        sys.exit(1)
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+    result = predict(input_path)
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 12. 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_source': 'data/best_model.pkl' if model is not None else 'retrained',
+    'metrics': metrics,
+    'residual_stats': residual_stats,
+    'test_predictions_count': len(test_result),
+    'feature_count': len(fi_df),
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/report_fig.png',
+        'output/test_predictions.csv',
+        'output/predict.py'
+    ]
+}
+print(json.dumps(summary))
+```
+</code>

@@ -1,0 +1,299 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于健康、人口统计与生活方式特征，预测个体睡眠障碍类型（无障碍、失眠、睡眠呼吸暂停）。数据集涵盖性别、年龄、职业、睡眠时长、睡眠质量、运动水平、压力水平、BMI、血压、心率及步数等特征。需构建三分类模型，以Macro F1 Score为唯一评估指标，该指标均衡计算三类的F1均值，要求模型在各类别上表现均衡，尤其关注少数类识别能力。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 80,
+  "col_count": 13,
+  "columns": [
+    {
+      "name": "Person ID",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        "9e6a72557ada15d02001f024f43f06edc4a31437e0e1bb3eeac36ca2d0c4fda7",
+        "05ada863a4cf9660fd8c68e2295f1d35b2264815f5b605003d6625bd9e0492cf",
+        "3963317a2b410e5357f4d839787aedb9ceef495514fe5cd91f846ab3a59621e0",
+        "37834f2f25762f23e1f74a531cbe445db73d6765ebe60878a7dfbecd7d4af6e1",
+        "ad48ff99415b2f007dc35b7eb553fd1eb35ebfa2f2f308acd9488eeb86f71fa8"
+      ],
+      "mostCommon": "9e6a72557ada15d02001f024f43f06edc4a31437e0e1bb3eeac36ca2d0c4fda7",
+      "mostCommonFreq": 1,
+      "cardinality": "medium"
+    },
+    {
+      "name": "Gender",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Female",
+        "Male",
+        "Male",
+        "Female",
+        "Female"
+      ],
+      "mostCommon": "Female",
+      "mostCommonFreq": 44,
+      "cardinality": "low"
+    },
+    {
+      "name": "Age",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 43,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        59.0,
+        27.0,
+        26.0,
+        55.0,
+        32.0
+      ],
+      "min": 18.0,
+      "max": 90.0,
+      "mean": 42.0375,
+      "std": 15.022720134954406,
+      "median": 42.0,
+      "skewness": 0.4920121450323373
+    },
+    {
+      "name": "Occupation",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Manual Labor",
+        "Retired",
+        "Manual Labor",
+        "Retired",
+        "Retired"
+      ],
+      "mostCommon": "Manual Labor",
+      "mostCommonFreq": 24,
+      "cardinality": "low"
+    },
+    {
+      "name": "Sleep Duration (hours)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        12.056268320690524,
+        4.0998054626865255,
+        8.05586942973946,
+        7.836197517885462,
+        11.053567741824896
+      ],
+      "min": 4.0998054626865255,
+      "max": 12.056268320690524,
+      "mean": 8.085876949824264,
+      "std": 2.2032712695456986,
+      "median": 8.548313084010807,
+      "skewness": -0.2119970507380853,
+      "isMonotonic": false
+    },
+    {
+      "name": "Quality of Sleep (scale: 1-10)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        5.700353133430341,
+        7.305343152233314,
+        4.884815004383592,
+        8.51672893845756,
+        6.390662012952691
+      ],
+      "min": 1.0262129620450324,
+      "max": 10.196688987873197,
+      "mean": 6.13667260716501,
+      "std": 1.9310240085922954,
+      "median": 6.089316475503907,
+      "skewness": -0.0655889290130057,
+      "isMonotonic": false
+    },
+    {
+      "name": "Physical Activity Level (minutes/day)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        67.71283298153182,
+        115.9214866284724,
+        53.49778277779011,
+        109.961988629471,
+        74.63498211719282
+      ],
+      "min": 9.584213011177098,
+      "max": 121.59501111829026,
+      "mean": 69.0926611948862,
+      "std": 34.253756370700216,
+      "median": 69.57429800379396,
+      "skewness": -0.11514308598827462,
+      "isMonotonic": false
+    },
+    {
+      "name": "Stress Level (scale: 1-10)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        1.0450503561589135,
+        4.1648830284996725,
+        4.985350499745531,
+        2.0901489426425344,
+        5.717579665862051
+      ],
+      "min": 0.9524817211445148,
+      "max": 10.419792571779436,
+      "mean": 5.661801355764535,
+      "std": 3.0085737709194524,
+      "median": 5.475437525486854,
+      "skewness": -0.004603336557036912,
+      "isMonotonic": false
+    },
+    {
+      "name": "BMI Category",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Normal",
+        "Obese",
+        "Overweight",
+        "Underweight",
+        "Obese"
+      ],
+      "mostCommon": "Overweight",
+      "mostCommonFreq": 24,
+      "cardinality": "low"
+    },
+    {
+      "name": "Blood Pressure (systolic/diastolic)",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 74,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        "129/75",
+        "123/63",
+        "113/68",
+        "127/77",
+        "126/76"
+      ],
+      "mostCommon": "111/60",
+      "mostCommonFreq": 2,
+      "cardinality": "medium"
+    },
+    {
+      "name": "Heart Rate (bpm)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        85.42047250371614,
+        82.15021261668903,
+        55.604908223640734,
+        55.08921083880077,
+        65.60101624847738
+      ],
+      "min": 49.29109520621536,
+      "max": 102.04625345353617,
+      "mean": 76.45146183500249,
+      "std": 14.75003350357865,
+      "median": 76.85968227942762,
+      "skewness": -0.15486368887265395,
+      "isMonotonic": false
+    },
+    {
+      "name": "Daily Steps",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        3646.2920520286702,
+        15840.951141653964,
+        14036.143558430702,
+        6695.494290095804,
+        13188.142615907756
+      ],
+      "min": 2066.202591066366,
+      "max": 19871.474804063128,
+      "mean": 11269.127463008168,
+      "std": 5110.419231969948,
+      "median": 11912.36770426475,
+      "skewness": -0.15164686385394327,
+      "isMonotonic": false
+    },
+    {
+      "name": "Sleep Disorder",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No Disorder",
+        "No Disorder",
+        "No Disorder",
+        "Insomnia",
+        "No Disorder"
+      ],
+      "mostCommon": "No Disorder",
+      "mostCommonFreq": 56,
+      "cardinality": "low"
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

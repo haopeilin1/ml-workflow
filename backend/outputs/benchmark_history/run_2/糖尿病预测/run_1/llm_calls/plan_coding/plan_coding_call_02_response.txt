@@ -1,0 +1,223 @@
+<plan>
+**分析当前状态与优化方向：**
+
+1. **当前问题**：模型处于OPTIMIZE状态，评估Agent指出当前LightGBM使用默认参数，树复杂度不足导致欠拟合。建议增加n_estimators、增大max_depth/num_leaves、调整learning_rate，并检查特征工程是否充分。
+
+2. **数据特点**：
+   - 8个特征（Pregnancies, Glucose, BloodPressure, SkinThickness, Insulin, BMI, DiabetesPedigreeFunction, Age）
+   - 正类比例约33.8%，轻度不平衡（imbalanceRatio=1.96）
+   - 存在医学上不合理的0值（Glucose, BloodPressure等），已在preprocess中处理为NaN并用中位数填充
+   - 所有特征均为数值型，无类别特征
+
+3. **优化策略**：
+   - **模型参数优化**：增加n_estimators至300，配合early_stopping防止过拟合；增大max_depth至8，num_leaves至63；调整learning_rate=0.05
+   - **特征工程增强**：当前特征工程在标准化后的数据上创建交互特征，但标准化后的特征失去了原始物理意义。更好的做法是在preprocess之前（即原始数据上）创建特征，但当前架构限制preprocess先执行。我们可以在feature_engineering中基于标准化后的值创建有意义的特征组合，同时保留原始特征。
+   - **修复feature_engineering中的问题**：当前feature_engineering中使用了SelectKBest进行特征选择，但每次调用都会重新拟合，导致训练集和测试集选择不同的特征子集。需要改为在训练时拟合并保存状态。
+   - **简化特征工程**：由于数据维度低（8维），且所有特征都有明确的医学意义，过度特征工程可能导致过拟合。保留有意义的交互特征（如Glucose*BMI、Age*Pregnancies），移除冗余的聚合统计特征（row_mean等可能引入噪声）。
+
+4. **关键修复**：
+   - 修复feature_engineering中的特征选择逻辑：只在mode='train'时拟合SelectKBest，保存到全局状态
+   - 修复交互特征创建：确保在标准化后的数据上创建的特征有意义
+   - 调整模型参数：增加树复杂度，配合early_stopping
+
+5. **代码结构优化**：
+   - preprocess保持不变（处理0值、标准化）
+   - feature_engineering中：创建有意义的交互特征，使用状态保存的特征选择器
+   - build_model中：调整LightGBM参数
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量，用于存储训练时拟合的预处理参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 将医学上不可能的 0 值视为缺失值（Glucose, BloodPressure, SkinThickness, Insulin, BMI）
+    zero_as_missing_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+    for col in zero_as_missing_cols:
+        if col in df.columns:
+            df[col] = df[col].replace(0, np.nan)
+    
+    # 分离特征和目标列（仅用于训练时的拟合）
+    if mode == 'train':
+        # 保存目标列
+        if 'Outcome' in df.columns:
+            y = df['Outcome'].copy()
+        else:
+            y = None
+        
+        # 选择数值特征列
+        feature_cols = [col for col in df.columns if col != 'Outcome']
+        
+        # 拟合 imputer（中位数填充）
+        imputer = SimpleImputer(strategy='median')
+        imputer.fit(df[feature_cols])
+        PREPROCESS_STATE['imputer'] = imputer
+        
+        # 拟合 scaler
+        scaler = StandardScaler()
+        scaler.fit(imputer.transform(df[feature_cols]))
+        PREPROCESS_STATE['scaler'] = scaler
+        
+        # 保存特征列顺序
+        PREPROCESS_STATE['feature_cols'] = feature_cols
+        
+        # 应用预处理
+        df_processed = pd.DataFrame(
+            scaler.transform(imputer.transform(df[feature_cols])),
+            columns=feature_cols,
+            index=df.index
+        )
+        
+        # 恢复目标列
+        if y is not None:
+            df_processed['Outcome'] = y.values
+        
+        return df_processed
+    
+    elif mode == 'test':
+        # 从状态中读取已拟合的参数
+        imputer = PREPROCESS_STATE.get('imputer')
+        scaler = PREPROCESS_STATE.get('scaler')
+        feature_cols = PREPROCESS_STATE.get('feature_cols', [col for col in df.columns if col != 'Outcome'])
+        
+        if imputer is None or scaler is None:
+            raise ValueError("PREPROCESS_STATE 未初始化，请先运行 mode='train'")
+        
+        # 应用预处理
+        df_processed = pd.DataFrame(
+            scaler.transform(imputer.transform(df[feature_cols])),
+            columns=feature_cols,
+            index=df.index
+        )
+        
+        # 恢复目标列（如果存在）
+        if 'Outcome' in df.columns:
+            df_processed['Outcome'] = df['Outcome'].values
+        
+        return df_processed
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 分离目标列
+    if 'Outcome' in df.columns:
+        y = df['Outcome'].copy()
+        df = df.drop(columns=['Outcome'])
+    else:
+        y = None
+    
+    # 创建有意义的交互特征（基于标准化后的值）
+    # 注意：这些特征是在标准化后的数据上创建的，但保留了特征间的相对关系
+    
+    # 1. 关键交互特征（医学上合理的组合）
+    if 'Glucose' in df.columns and 'BMI' in df.columns:
+        df['Glucose_BMI_interaction'] = df['Glucose'] * df['BMI']
+    
+    if 'Glucose' in df.columns and 'Age' in df.columns:
+        df['Glucose_Age_interaction'] = df['Glucose'] * df['Age']
+    
+    if 'Age' in df.columns and 'Pregnancies' in df.columns:
+        df['Age_Pregnancies_interaction'] = df['Age'] * df['Pregnancies']
+    
+    if 'BMI' in df.columns and 'Age' in df.columns:
+        df['BMI_Age_interaction'] = df['BMI'] * df['Age']
+    
+    # 2. 多项式特征（仅对关键特征）
+    if 'Glucose' in df.columns:
+        df['Glucose_squared'] = df['Glucose'] ** 2
+    
+    if 'BMI' in df.columns:
+        df['BMI_squared'] = df['BMI'] ** 2
+    
+    if 'Insulin' in df.columns:
+        df['Insulin_squared'] = df['Insulin'] ** 2
+    
+    # 3. 比率特征（医学上有意义的比率）
+    if 'Glucose' in df.columns and 'BMI' in df.columns:
+        df['Glucose_BMI_ratio'] = df['Glucose'] / (df['BMI'] + 1e-8)
+    
+    if 'Insulin' in df.columns and 'Glucose' in df.columns:
+        df['Insulin_Glucose_ratio'] = df['Insulin'] / (df['Glucose'] + 1e-8)
+    
+    # 4. 特征选择（仅在训练时拟合，测试时应用）
+    if y is not None:
+        # 训练模式：拟合特征选择器
+        selector = SelectKBest(score_func=f_classif, k=min(20, df.shape[1]))
+        X_selected = selector.fit_transform(df, y)
+        selected_mask = selector.get_support()
+        selected_cols = df.columns[selected_mask].tolist()
+        # 保存选中的特征列
+        PREPROCESS_STATE['selected_feature_cols'] = selected_cols
+        df = df[selected_cols]
+    else:
+        # 测试模式：使用训练时选中的特征列
+        selected_cols = PREPROCESS_STATE.get('selected_feature_cols', df.columns.tolist())
+        # 只保留训练时选中的特征列（如果存在）
+        available_cols = [col for col in selected_cols if col in df.columns]
+        df = df[available_cols]
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object' or df[col].dtype.name == 'category':
+            df[col] = pd.factorize(df[col])[0]
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（根据数据画像，正类比例约 0.338，负类约 0.662）
+    scale_pos_weight = (1 - 0.3381) / 0.3381  # ≈ 1.96
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=63,           # 增加叶子节点数，提高模型复杂度
+        max_depth=8,             # 适当增加深度
+        learning_rate=0.05,      # 保持较低学习率
+        n_estimators=300,        # 增加迭代次数，配合 early_stopping
+        subsample=0.8,           # 行采样防止过拟合
+        colsample_bytree=0.8,    # 列采样防止过拟合
+        min_child_samples=20,    # 叶子节点最小样本数
+        min_child_weight=1e-3,   # 叶子节点最小权重和
+        reg_alpha=0.1,           # L1 正则化
+        reg_lambda=0.1,          # L2 正则化
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

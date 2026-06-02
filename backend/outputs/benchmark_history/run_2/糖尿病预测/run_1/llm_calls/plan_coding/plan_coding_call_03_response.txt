@@ -1,0 +1,264 @@
+<plan>
+当前运行状态为 OPTIMIZE，历史代码已实现基础 LightGBM 模型，AUC 为 0.800。根据上下文载荷的建议，需要提升模型性能。我将采取以下优化策略：
+
+1. **增加树模型复杂度**：将 max_depth 从 8 提升到 10，num_leaves 从 63 提升到 80，min_child_samples 从 20 降低到 10，以增强模型拟合能力。
+
+2. **尝试 XGBoost 替代 LightGBM**：XGBoost 的默认正则化机制（L1/L2）通常能带来更好的泛化性能，且对数值特征更友好。
+
+3. **增强特征工程**：
+   - 保留原有的交互特征和多项式特征
+   - 添加更多医学上有意义的交互特征（如 Age_Glucose_BMI 三阶交互）
+   - 对关键特征（Glucose, BMI, Insulin）进行分箱处理，捕捉非线性关系
+   - 添加对数变换特征（对右偏特征如 Insulin, DiabetesPedigreeFunction）
+
+4. **优化预处理**：保持原有的零值替换为缺失值的逻辑，但使用更稳健的填充策略。
+
+5. **模型调优**：
+   - 使用 XGBoost 替代 LightGBM
+   - 设置合理的正则化参数防止过拟合
+   - 使用 scale_pos_weight 处理类别不平衡
+   - 配合 early_stopping 防止过拟合
+
+6. **特征选择优化**：移除 SelectKBest 特征选择器（可能丢弃有用特征），改用全部特征，让树模型自行选择。
+
+关键改进点：
+- 将 LightGBM 替换为 XGBoost，利用其更好的默认正则化
+- 增加特征工程复杂度，特别是分箱和对数变换
+- 降低 min_child_samples 以允许更细粒度的分裂
+- 增加 max_depth 和 num_leaves 以提升模型容量
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, KBinsDiscretizer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from xgboost import XGBClassifier
+import warnings
+warnings.filterwarnings('ignore')
+
+# 全局状态变量，用于存储训练时拟合的预处理参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 将医学上不可能的 0 值视为缺失值（Glucose, BloodPressure, SkinThickness, Insulin, BMI）
+    zero_as_missing_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+    for col in zero_as_missing_cols:
+        if col in df.columns:
+            df[col] = df[col].replace(0, np.nan)
+    
+    # 分离特征和目标列（仅用于训练时的拟合）
+    if mode == 'train':
+        # 保存目标列
+        if 'Outcome' in df.columns:
+            y = df['Outcome'].copy()
+        else:
+            y = None
+        
+        # 选择数值特征列
+        feature_cols = [col for col in df.columns if col != 'Outcome']
+        
+        # 拟合 imputer（中位数填充）
+        imputer = SimpleImputer(strategy='median')
+        imputer.fit(df[feature_cols])
+        PREPROCESS_STATE['imputer'] = imputer
+        
+        # 拟合 scaler
+        scaler = StandardScaler()
+        scaler.fit(imputer.transform(df[feature_cols]))
+        PREPROCESS_STATE['scaler'] = scaler
+        
+        # 保存特征列顺序
+        PREPROCESS_STATE['feature_cols'] = feature_cols
+        
+        # 应用预处理
+        df_processed = pd.DataFrame(
+            scaler.transform(imputer.transform(df[feature_cols])),
+            columns=feature_cols,
+            index=df.index
+        )
+        
+        # 恢复目标列
+        if y is not None:
+            df_processed['Outcome'] = y.values
+        
+        return df_processed
+    
+    elif mode == 'test':
+        # 从状态中读取已拟合的参数
+        imputer = PREPROCESS_STATE.get('imputer')
+        scaler = PREPROCESS_STATE.get('scaler')
+        feature_cols = PREPROCESS_STATE.get('feature_cols', [col for col in df.columns if col != 'Outcome'])
+        
+        if imputer is None or scaler is None:
+            raise ValueError("PREPROCESS_STATE 未初始化，请先运行 mode='train'")
+        
+        # 应用预处理
+        df_processed = pd.DataFrame(
+            scaler.transform(imputer.transform(df[feature_cols])),
+            columns=feature_cols,
+            index=df.index
+        )
+        
+        # 恢复目标列（如果存在）
+        if 'Outcome' in df.columns:
+            df_processed['Outcome'] = df['Outcome'].values
+        
+        return df_processed
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 分离目标列
+    if 'Outcome' in df.columns:
+        y = df['Outcome'].copy()
+        df = df.drop(columns=['Outcome'])
+    else:
+        y = None
+    
+    # 保存原始特征列用于后续操作
+    original_cols = df.columns.tolist()
+    
+    # 1. 关键交互特征（医学上合理的组合）
+    if 'Glucose' in df.columns and 'BMI' in df.columns:
+        df['Glucose_BMI_interaction'] = df['Glucose'] * df['BMI']
+    
+    if 'Glucose' in df.columns and 'Age' in df.columns:
+        df['Glucose_Age_interaction'] = df['Glucose'] * df['Age']
+    
+    if 'Age' in df.columns and 'Pregnancies' in df.columns:
+        df['Age_Pregnancies_interaction'] = df['Age'] * df['Pregnancies']
+    
+    if 'BMI' in df.columns and 'Age' in df.columns:
+        df['BMI_Age_interaction'] = df['BMI'] * df['Age']
+    
+    # 2. 三阶交互特征（捕捉更复杂的非线性关系）
+    if all(col in df.columns for col in ['Age', 'Glucose', 'BMI']):
+        df['Age_Glucose_BMI_interaction'] = df['Age'] * df['Glucose'] * df['BMI']
+    
+    if all(col in df.columns for col in ['Glucose', 'BMI', 'Insulin']):
+        df['Glucose_BMI_Insulin_interaction'] = df['Glucose'] * df['BMI'] * df['Insulin']
+    
+    # 3. 多项式特征（仅对关键特征）
+    if 'Glucose' in df.columns:
+        df['Glucose_squared'] = df['Glucose'] ** 2
+        df['Glucose_cubed'] = df['Glucose'] ** 3
+    
+    if 'BMI' in df.columns:
+        df['BMI_squared'] = df['BMI'] ** 2
+        df['BMI_cubed'] = df['BMI'] ** 3
+    
+    if 'Insulin' in df.columns:
+        df['Insulin_squared'] = df['Insulin'] ** 2
+    
+    if 'DiabetesPedigreeFunction' in df.columns:
+        df['DPF_squared'] = df['DiabetesPedigreeFunction'] ** 2
+    
+    # 4. 比率特征（医学上有意义的比率）
+    if 'Glucose' in df.columns and 'BMI' in df.columns:
+        df['Glucose_BMI_ratio'] = df['Glucose'] / (df['BMI'] + 1e-8)
+    
+    if 'Insulin' in df.columns and 'Glucose' in df.columns:
+        df['Insulin_Glucose_ratio'] = df['Insulin'] / (df['Glucose'] + 1e-8)
+    
+    if 'BMI' in df.columns and 'Age' in df.columns:
+        df['BMI_Age_ratio'] = df['BMI'] / (df['Age'] + 1e-8)
+    
+    # 5. 对数变换（对右偏特征，处理零值）
+    for col in ['Insulin', 'DiabetesPedigreeFunction']:
+        if col in df.columns:
+            # 使用 log1p 处理零值
+            df[f'{col}_log'] = np.log1p(np.abs(df[col]))
+    
+    # 6. 分箱特征（捕捉非线性关系）
+    # 对关键特征进行分箱，仅在训练时拟合分箱器
+    binning_cols = ['Glucose', 'BMI', 'Age', 'Insulin']
+    available_binning_cols = [col for col in binning_cols if col in df.columns]
+    
+    if mode == 'train' or 'binning_transformers' in PREPROCESS_STATE:
+        if mode == 'train':
+            # 训练时拟合分箱器
+            binning_transformers = {}
+            for col in available_binning_cols:
+                discretizer = KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile')
+                discretizer.fit(df[[col]])
+                binning_transformers[col] = discretizer
+            PREPROCESS_STATE['binning_transformers'] = binning_transformers
+        else:
+            binning_transformers = PREPROCESS_STATE.get('binning_transformers', {})
+        
+        # 应用分箱
+        for col in available_binning_cols:
+            if col in binning_transformers:
+                discretizer = binning_transformers[col]
+                binned = discretizer.transform(df[[col]]).flatten()
+                df[f'{col}_binned'] = binned
+    
+    # 7. 差值特征
+    if 'Glucose' in df.columns and 'BMI' in df.columns:
+        df['Glucose_minus_BMI'] = df['Glucose'] - df['BMI']
+    
+    if 'Age' in df.columns and 'Pregnancies' in df.columns:
+        df['Age_minus_Pregnancies'] = df['Age'] - df['Pregnancies']
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object' or df[col].dtype.name == 'category':
+            df[col] = pd.factorize(df[col])[0]
+    
+    # 处理无穷大值
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.fillna(0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（根据数据画像，正类比例约 0.338，负类约 0.662）
+    scale_pos_weight = (1 - 0.3381) / 0.3381  # ≈ 1.96
+    
+    model = XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        max_depth=10,                # 增加深度以捕捉更复杂的模式
+        learning_rate=0.05,          # 保持较低学习率
+        n_estimators=500,            # 增加迭代次数，配合 early_stopping
+        subsample=0.8,               # 行采样防止过拟合
+        colsample_bytree=0.8,        # 列采样防止过拟合
+        min_child_weight=3,          # 叶子节点最小权重和（相当于 min_child_samples）
+        reg_alpha=0.1,               # L1 正则化
+        reg_lambda=1.0,              # L2 正则化（XGBoost 默认值，提供良好泛化）
+        gamma=0.1,                   # 分裂所需的最小损失减少
+        random_state=42,
+        verbosity=0,
+        eval_metric='auc'            # 使用 AUC 作为评估指标
+    )
+    
+    return model
+```
+</code>

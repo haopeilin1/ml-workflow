@@ -1,0 +1,7 @@
+{
+  "target_column": "Churn",
+  "task_type": "binary_classification",
+  "eval_metric": "AUC-ROC",
+  "complexity": "simple",
+  "is_time_series": false
+}

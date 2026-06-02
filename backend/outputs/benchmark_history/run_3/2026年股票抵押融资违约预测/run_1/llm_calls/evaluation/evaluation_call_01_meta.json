@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-05-27T16:44:06.619499",
+  "model": "deepseek-v4-flash",
+  "provider": "openai",
+  "prompt_tokens": 1953,
+  "completion_tokens": 396,
+  "total_tokens": 2349,
+  "latency_seconds": 3.88
+}

@@ -1,0 +1,63 @@
+============================================================
+  任务运行摘要: 黑色素瘤种类 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: target
+  评估指标: AUC-ROC
+  复杂度判定: complex (LLM直接判定为complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 73.50
+  总耗时: 0.0s
+  验证集 AUC: 0.8611
+  测试集 AUC: 0.8670
+
+【各阶段耗时】
+  意图识别: 1.1s
+  代码生成: 53.6s
+  沙箱执行: 23.5s
+  评估优化: 15.4s
+  产物生成: 79.8s
+  测试预测: 0.0s
+  总计: 322.4s
+
+【Token 消耗】
+  Plan/Coding 调用: 1 次, 11671 tokens
+  Evaluation 调用: 4 次, 9883 tokens
+  总计: 5 次, 21554 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 3178tokens | 0.9s
+    - qwen3.5-flash@openai: 1 calls, 3178 tokens, 0.9s
+  plan_coding : deepseek-v4-pro@openai | 1calls | 11671tokens | 73.4s
+    - deepseek-v4-pro@openai: 1 calls, 11671 tokens, 73.4s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9883tokens | 15.3s
+    - deepseek-v4-flash@openai: 4 calls, 9883 tokens, 15.3s
+  judge       : qwen3.5-flash@openai | 1calls | 1558tokens | 2.3s
+    - qwen3.5-flash@openai: 1 calls, 1558 tokens, 2.3s
+
+【产物生成】
+  完整性: simplified
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：AUC-ROC】为核心标准。模型在验证集上的 AUC 为 0.8611，在测试集上的 AUC 为 0.8670。测试集表现不仅达到了二分类任务通常可接受的基线（AUC > 0.7），甚至略优于验证集表现。计算泛化一致性：相对差距 = (0.8611 - 0.8670) / 0.8611 ≈ -0.68%，表明模型在训练集、验证集和测试集之间具有极高的一致性，未出现过拟合现象，且预测策略非通用回退模板。整体模型质量优秀，具备交付条件。...
+
+【维度评分】
+  unknown: 78.0 (weight=0.3)
+  unknown: 85.0 (weight=0.25)
+  unknown: 80.0 (weight=0.2)
+  unknown: 75.0 (weight=0.15)
+  unknown: 60.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 17:37:43 UTC
+============================================================

@@ -1,0 +1,242 @@
+<plan>
+## 调优规划
+
+### 问题分析
+当前代码在 OPTIMIZE 阶段，评估Agent建议：
+1. 增加树深度（max_depth=8~12）或增加迭代次数（n_estimators=500）
+2. 降低学习率（learning_rate=0.05）配合early_stopping
+3. 检查特征工程，考虑添加交互特征或多项式特征
+
+### 当前代码问题
+1. **特征工程中的错误**：`feature_engineering` 中使用了 `X[bmi_col] > 0` 来创建 `is_overweight` 特征，但标准化后的 BMI 均值为0，`>0` 表示高于平均水平，这没有实际意义。应该基于原始 BMI 阈值（25）创建特征，但预处理后已标准化，无法获取原始值。更好的做法是在预处理前创建这些特征。
+2. **特征工程不够丰富**：缺少 `age * smoker` 等关键交互特征（吸烟对费用的影响随年龄增长而加剧）。
+3. **模型参数**：当前 max_depth=6, learning_rate=0.05, n_estimators=500 已经符合建议，但可以进一步优化。
+
+### 优化策略
+
+#### 1. 预处理优化
+- 在预处理前（mode='train'）创建基于原始值的特征（如 `is_overweight`、`age_smoker_interaction` 等），然后保存这些特征的列名，在 mode='test' 时应用相同逻辑
+- 使用 `np.log1p` 对目标列 `charges` 进行对数变换（因为 charges 分布右偏，skewness=1.56），在预测后逆变换
+
+#### 2. 特征工程优化
+- 添加关键交互特征：
+  - `age * smoker`：吸烟对费用的影响随年龄增长
+  - `bmi * smoker`：吸烟者中 BMI 对费用的影响
+  - `age * bmi`：年龄和 BMI 的交互
+- 添加多项式特征：`age^2`, `bmi^2`
+- 添加阈值特征：`is_overweight`（bmi > 25）、`is_obese`（bmi > 30）
+- 添加 `has_children` 标志
+
+#### 3. 模型优化
+- 保持 max_depth=6（防止过拟合，数据仅856行）
+- 保持 learning_rate=0.05
+- 保持 n_estimators=500
+- 添加 early_stopping 回调
+- 添加正则化参数 reg_alpha, reg_lambda
+
+#### 4. 关键修复
+- 将基于原始值的特征创建移到 `preprocess` 函数中（在预处理前），这样可以在标准化前使用原始 BMI 阈值
+- 修复 `feature_engineering` 中 `is_overweight` 的错误逻辑
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+import lightgbm as lgb
+
+# 全局状态变量，用于保存预处理参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    global PREPROCESS_STATE
+    
+    # 复制数据，避免修改原始数据
+    df = df.copy()
+    
+    # 丢弃ID列（所有模式下都丢弃）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # ========== 基于原始值的特征创建（在标准化前）==========
+    if mode == 'train':
+        # 保存原始数值列的统计信息用于测试集
+        if 'bmi' in df.columns:
+            PREPROCESS_STATE['bmi_overweight_threshold'] = 25.0
+            PREPROCESS_STATE['bmi_obese_threshold'] = 30.0
+        if 'children' in df.columns:
+            PREPROCESS_STATE['has_children_threshold'] = 0
+    
+    # 创建基于原始值的特征（所有模式下都做，但阈值从状态中读取）
+    if 'bmi' in df.columns:
+        bmi_overweight_th = PREPROCESS_STATE.get('bmi_overweight_threshold', 25.0)
+        bmi_obese_th = PREPROCESS_STATE.get('bmi_obese_threshold', 30.0)
+        df['is_overweight'] = (df['bmi'] > bmi_overweight_th).astype(int)
+        df['is_obese'] = (df['bmi'] > bmi_obese_th).astype(int)
+    
+    if 'children' in df.columns:
+        has_children_th = PREPROCESS_STATE.get('has_children_threshold', 0)
+        df['has_children'] = (df['children'] > has_children_th).astype(int)
+    
+    # 创建交互特征（基于原始值）
+    if 'age' in df.columns and 'smoker' in df.columns:
+        df['age_smoker_interaction'] = df['age'] * (df['smoker'] == 'yes').astype(int)
+    
+    if 'bmi' in df.columns and 'smoker' in df.columns:
+        df['bmi_smoker_interaction'] = df['bmi'] * (df['smoker'] == 'yes').astype(int)
+    
+    if 'age' in df.columns and 'bmi' in df.columns:
+        df['age_bmi_interaction'] = df['age'] * df['bmi']
+    
+    # 创建多项式特征
+    if 'age' in df.columns:
+        df['age_squared'] = df['age'] ** 2
+    
+    if 'bmi' in df.columns:
+        df['bmi_squared'] = df['bmi'] ** 2
+    
+    # ========== 目标列对数变换（减少右偏）==========
+    if mode == 'train' and 'charges' in df.columns:
+        # 保存目标列的对数变换参数
+        PREPROCESS_STATE['target_transform'] = 'log1p'
+        # 对目标列进行对数变换
+        df['charges'] = np.log1p(df['charges'])
+    elif mode == 'test' and 'charges' in df.columns:
+        # 测试集（验证集）也做相同变换
+        df['charges'] = np.log1p(df['charges'])
+    
+    # ========== 定义类别列和数值列（包括新创建的特征）==========
+    cat_cols = ['sex', 'smoker', 'region']
+    # 数值列：原始数值列 + 新创建的数值特征
+    num_cols = ['age', 'bmi', 'children', 
+                'is_overweight', 'is_obese', 'has_children',
+                'age_smoker_interaction', 'bmi_smoker_interaction',
+                'age_bmi_interaction', 'age_squared', 'bmi_squared']
+    
+    # 只保留实际存在的列
+    num_cols = [c for c in num_cols if c in df.columns]
+    
+    if mode == 'train':
+        # 构建预处理 Pipeline
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 分离特征和目标
+        if 'charges' in df.columns:
+            X = df.drop(columns=['charges'])
+            y = df['charges']
+        else:
+            X = df
+            y = None
+        
+        # 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 获取特征名
+        ohe = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = ohe.get_feature_names_out(cat_cols)
+        num_feature_names = num_cols
+        PREPROCESS_STATE['feature_names'] = list(cat_feature_names) + list(num_feature_names)
+        
+    elif mode == 'test':
+        # 从状态中读取已拟合的预处理器
+        if 'preprocessor' not in PREPROCESS_STATE:
+            raise ValueError("PREPROCESS_STATE 中没有预处理器，请先运行 mode='train'")
+        
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        
+        # 分离特征和目标
+        if 'charges' in df.columns:
+            X = df.drop(columns=['charges'])
+            y = df['charges']
+        else:
+            X = df
+            y = None
+    
+    # 应用预处理
+    X_processed = preprocessor.transform(X)
+    
+    # 将 numpy 数组转回 DataFrame
+    feature_names = PREPROCESS_STATE.get('feature_names', [f'feature_{i}' for i in range(X_processed.shape[1])])
+    X_processed_df = pd.DataFrame(X_processed, columns=feature_names, index=df.index)
+    
+    # 如果目标列存在，合并回去
+    if y is not None:
+        X_processed_df['charges'] = y.values
+    
+    return X_processed_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 复制数据
+    df = df.copy()
+    
+    # 分离目标列
+    if 'charges' in df.columns:
+        y = df['charges']
+        X = df.drop(columns=['charges'])
+    else:
+        X = df
+        y = None
+    
+    # 预处理后所有列已经是数值类型（OneHot + StandardScaler）
+    # 不需要额外创建特征，因为已经在 preprocess 中基于原始值创建了
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = lgb.LGBMRegressor(
+        objective='regression',
+        metric='rmse',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbose=-1  # 抑制训练日志
+    )
+    
+    return model
+```
+</code>

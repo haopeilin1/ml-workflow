@@ -1,0 +1,3 @@
+METRICS_JSON_START
+{"val_auc": 0.991781351476728, "val_f1": 0.9426086956521739, "val_precision": 0.9508771929824561, "val_recall": 0.9344827586206896, "val_confusion_matrix_tn": 432, "val_confusion_matrix_fp": 14, "val_confusion_matrix_fn": 19, "val_confusion_matrix_tp": 271}
+METRICS_JSON_END

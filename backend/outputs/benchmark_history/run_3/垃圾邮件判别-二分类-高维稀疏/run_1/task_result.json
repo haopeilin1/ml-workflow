@@ -1,0 +1,228 @@
+{
+  "task_name": "垃圾邮件判别-二分类-高维稀疏",
+  "run_index": 1,
+  "success": true,
+  "task_id": "fast_f254c640cba7",
+  "phase": "completed",
+  "best_score": 95.2,
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": 0.9911087057368176,
+    "val_accuracy": 0.9538043478260869,
+    "val_f1_macro": null,
+    "val_rmse": null,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": 0.986053101888879,
+    "accuracy": 0.9511400651465798,
+    "f1": null,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": null,
+    "mae": null,
+    "r2": null
+  },
+  "dimension_scores": [
+    {
+      "name": "metric_performance",
+      "score": 98.0,
+      "weight": 0.3,
+      "reason": "AUC 0.991 极优秀"
+    },
+    {
+      "name": "overfit_control",
+      "score": 95.0,
+      "weight": 0.25,
+      "reason": "未见明显过拟合"
+    },
+    {
+      "name": "algorithm_choice",
+      "score": 95.0,
+      "weight": 0.2,
+      "reason": "LightGBM适合二分类"
+    },
+    {
+      "name": "code_completeness",
+      "score": 90.0,
+      "weight": 0.15,
+      "reason": "流程完整，含预处理"
+    },
+    {
+      "name": "task_alignment",
+      "score": 95.0,
+      "weight": 0.1,
+      "reason": "完美匹配AUC目标"
+    }
+  ],
+  "judge_accepted": true,
+  "judge_analysis": "本次评估以【建模时使用的主要指标：ROC-AUC】为核心标准。模型在验证集上取得了0.9911的AUC，在测试集上取得了0.9861的AUC。测试集AUC（0.9861）远超二分类任务的可接受基线（通常>0.7），表现极其优异。从泛化一致性来看，验证集与测试集的AUC相对差距为 (0.9911 - 0.9861) / 0.9911 ≈ 0.5%，远小于10%的良好阈值，表明模型具有极强的泛化能力且未出现过拟合迹象。Accuracy指标（验证集0.9538 vs 测试集0.9511）也保持了高度一致。预测策略未知，但未发现使用通用回退模板的迹象。综合各项指标，该模型质量极高，完全满足交付标准。",
+  "judge_reason": "测试集核心指标ROC-AUC达到0.9861，显著优于可接受基线；验证集与测试集AUC相对差距仅约0.5%，泛化性能极佳且无过拟合风险。",
+  "prediction_strategy": "embedded_best",
+  "error_message": null,
+  "logs": [
+    "[Plan & Coding Agent] 生成初始基线代码",
+    "=== 建模计划 ===\n============================================================\n【结构化建模计划】\n============================================================\n\n【任务分析】\n  task_type: binary_classification\n  primary_metric: ROC-AUC\n  secondary_metrics: ['F1', 'Precision', 'Recall']\n  dataset_size: 3680 行 (训练集)\n  class_balance: 基本平衡 (正例占 39.4%，负例占 60.6%)\n  time_series: False\n  key_features: 57 维连续特征，包括词频 (f0-f53)、字符频率 (f54-f56) 和大写序列长度等，特征分布极度右偏且稀疏\n  data_quality_issues: ['无缺失值', '几乎所有特征高度右偏 (skewness > 5)', '存在极值 (如 f55 最大值 9989)', '特征尺度差异巨大 (f0 均值 0.1 vs f56 均值 278)']\n\n【核心挑战】\n  1. 特征分布极度右偏且稀疏：57 个特征中绝大多数 (如 f0-f53) 的中位数为 0，均值远小于最大值，skewness 普遍 > 5，部分 > 30。若不处理，树模型可能过度关注少数非零样本，线性模型则难以拟合，导致模型泛化能力差，ROC-AUC 不稳定。\n  2. 特征尺度差异巨大：f0-f53 均值在 0.01-0.8 之间，而 f54-f56 均值在 5-278 之间。对于基于距离或梯度的模型 (如逻辑回归、SVM)，尺度差异会导致特征重要性被扭曲，必须进行标准化。\n  3. 存在极端异常值：f55 (最长连续大写字母长度) 最大值为 9989，均值仅为 51.9，标准差为 206.3，skewness 高达 31.97。这些极值点可能成为强噪声，导致模型过拟合或预测不稳定。\n  4. 数据量中等 (3680 行) 且特征维度较高 (57 维)：虽然特征数远小于样本数，但特征稀疏性可能导致模型容量不足或过拟合风险。需要正则化或特征选择。\n  5. 评估指标为 ROC-AUC，对类别不平衡不敏感：虽然数据集基本平衡，但 ROC-AUC 只关注排序能力，不反映概率校准质量。如果模型输出概率校准差，即使 AUC 高，实际应用 (如设定阈值) 也可能效果不佳。\n\n【必须执行 (MUST DO) —— 后续代码必须逐项实现】\n  1. 【关键】丢弃 'id' 列\n     原因: id 列是唯一标识符，与目标变量无关，若不丢弃会导致模型学习到无意义的模式，严重过拟合，且无法泛化到测试集。\n  2. 【关键】对所有数值特征进行标准化 (StandardScaler)，以消除特征尺度差异\n     原因: f0-f53 与 f54-f56 的均值相差数百倍，若不标准化，基于梯度或距离的模型 (如逻辑回归、SVM) 会赋予大尺度特征过高的权重，导致模型性能下降。树模型虽不受尺度影响，但标准化有助于后续特征选择和模型解释。\n  3. 【关键】对高度右偏的特征 (skewness > 5) 应用 log1p 变换，以缓解偏态分布的影响\n     原因: 几乎所有特征都极度右偏 (skewness > 5)，中位数为 0。log1p 变换可以将长尾分布压缩，使数据更接近正态分布，提升线性模型和树模型对稀疏特征的敏感性，避免模型只关注少数极端值。\n  4. 【关键】使用 ROC-AUC 作为主要评估指标，并辅以 F1、Precision、Recall 进行模型监控\n     原因: 用户指定 ROC-AUC 为唯一指标，必须严格遵守。但 ROC-AUC 对概率校准不敏感，因此必须同时监控 F1 等指标，确保模型在最佳阈值下具有实际可用性，避免 'AUC 高但实际预测效果差' 的陷阱。\n  5. 【关键】在验证集上确定最优分类阈值，并记录该阈值用于测试集预测\n     原因: 默认 0.5 阈值可能不是最优，尤其在概率分布偏移时。必须在验证集上以 F1 或 Youden's J 统计量为目标搜索最佳阈值，确保模型在测试集上的预测具有实际意义。若不调整阈值，可能导致 Precision 或 Recall 严重失衡。\n\n【必须避免 (AVOID) —— 代码中严禁出现】\n  1. 对树模型 (如 XGBoost, LightGBM) 使用 class_weight='balanced'\n     原因: 数据集基本平衡 (正例 39.4%)，无需类别加权。对树模型使用 class_weight 会人为改变分裂增益计算，通常损害 ROC-AUC 和整体排序能力。\n  2. 使用过采样 (如 SMOTE) 或下采样\n     原因: 数据集基本平衡，过采样/下采样不仅无益，还会引入噪声或丢失信息，增加训练时间，对 ROC-AUC 无正面影响。\n  3. 在测试集上进行任何调参或阈值选择\n     原因: 这是数据泄露的典型反模式。所有模型选择和阈值优化必须在验证集上完成，测试集仅用于最终评估。\n  4. 使用简单复制过采样\n     原因: 完全无效，只会增加训练时间，不会提供任何新信息，对模型性能无改善。\n  5. 单独依赖 ROC-AUC 判断模型好坏\n     原因: ROC-AUC 只反映排序能力，不反映概率校准。在基本平衡的数据集上，AUC 可能虚高，必须结合混淆矩阵和 F1 等指标综合评估。\n  6. 对特征进行 PCA 等无监督降维\n     原因: 57 维特征虽然多，但样本量 3680 足够，且特征具有明确语义 (词频、字符频率)。无监督降维会丢失可解释性和重要信息，不利于模型理解和调试。\n\n【Pipeline 计划】\n  ▶ 数据预处理\n    - 加载训练集 (train.csv) 和测试集 (test.csv)\n    - 丢弃 'id' 列\n    - 分离特征矩阵 X 和目标变量 y (spam)\n    - 对训练集特征进行 log1p 变换 (所有特征)\n    - 使用 StandardScaler 对训练集特征进行标准化，并保存 scaler 对象\n    - 对测试集应用相同的 log1p 变换和标准化 (使用训练集拟合的 scaler)\n  ▶ 特征工程\n    - 检查并处理可能存在的无穷大值 (log1p 变换后不会产生，但需确认)\n    - 检查并处理可能存在的 NaN 值 (数据画像显示无缺失，但作为防御性编程)\n    - 考虑创建交叉特征或多项式特征 (可选，根据基线模型性能决定)\n  ▶ 模型训练\n    - 将预处理后的训练集划分为训练子集和验证集 (如 80/20 或 5 折交叉验证)\n    - 训练基线模型：逻辑回归 (作为线性模型基准) 和 LightGBM (作为树模型基准)\n    - 对 LightGBM 设置参数：objective='binary', metric='auc', boosting_type='gbdt'\n    - 使用验证集评估模型，计算 ROC-AUC、F1、Precision、Recall\n    - 在验证集上搜索最优分类阈值 (以 F1 最大化为目标)\n  ▶ 验证与调优\n    - 使用交叉验证 (如 5 折) 评估模型稳定性和泛化能力\n    - 对 LightGBM 进行超参数调优 (如 n_estimators, max_depth, learning_rate, num_leaves, subsample, colsample_bytree)\n    - 监控验证集 ROC-AUC 和 F1，防止过拟合\n    - 选择验证集 ROC-AUC 最高的模型作为最终模型\n    - 在最终模型上，使用验证集确定最优阈值\n    - 保存最终模型、scaler 和最优阈值\n\n【模型选择】LightGBM\n【选择理由】LightGBM 是梯度提升树模型，天然适合处理高维、稀疏、非线性关系的数据。它比 XGBoost 训练更快，内存占用更低，且内置处理类别特征和缺失值的能力。对于 3680 行 57 维的数据，LightGBM 能高效捕捉特征间的复杂交互，且通过正则化参数 (如 max_depth, min_data_in_leaf) 可有效防止过拟合。逻辑回归将作为基线模型，用于对比验证 LightGBM 的增益。\n\n【预期表现】验证集 ROC-AUC > 0.95，F1 > 0.85\n\n【风险预判】\n  ⚠ 风险1: 过拟合。由于特征稀疏且存在极端值，LightGBM 可能过度拟合训练集中的噪声。缓解措施：使用早停 (early_stopping)、限制树深度 (max_depth)、增加 min_data_in_leaf、使用列采样 (colsample_bytree) 和数据采样 (subsample)。\n  ⚠ 风险2: 概率校准不佳。即使 ROC-AUC 很高，模型输出的概率可能不反映真实置信度。缓解措施：在验证集上调整阈值，并监控 Precision-Recall 曲线。如果校准问题严重，可考虑使用 Platt Scaling 或 Isotonic Regression 进行后处理。\n  ⚠ 风险3: 测试集分布与训练集不一致。如果测试集来自不同时间段或数据源，模型可能失效。缓解措施：确保训练集和测试集预处理流程完全一致，并监控测试集上的特征分布统计量。\n============================================================\n\n============================================================\n【Coding Agent 实现计划】\n============================================================\n基于结构化计划，我将在代码中实现以下关键点：\n\n**MUST DO 实现：**\n1. 丢弃 'id' 列：在 preprocess 中通过 drop(columns=['id'], errors='ignore') 实现\n2. 对所有数值特征进行 StandardScaler 标准化：在 build_model 的 Pipeline 中通过 StandardScaler 实现\n3. 对高度右偏特征应用 log1p 变换：在 preprocess 中对所有数值特征（除目标列外）应用 np.log1p\n4. 使用 ROC-AUC 作为主要评估指标：系统骨架已处理，但需在 build_model 中设置 objective='binary', metric='auc'\n5. 在验证集上确定最优分类阈值：系统骨架已处理\n\n**AVOID 规避：**\n1. 不使用 class_weight='balanced'（数据集基本平衡）\n2. 不使用 SMOTE 或任何过采样/下采样\n3. 不在测试集上调参（由系统骨架保证）\n4. 不使用简单复制过采样\n5. 不单独依赖 ROC-AUC（系统骨架会同时输出 F1/Precision/Recall）\n6. 不使用 PCA 等无监督降维\n\n**Pipeline 实现：**\n- preprocess: 丢弃 id 列 + log1p 变换所有数值特征\n- feature_engineering: 防御性检查（无穷值、NaN），无额外特征创建\n- build_model: Pipeline(StandardScaler + LightGBM)，带正则化参数防止过拟合\n\n**关键约束遵守：**\n- 数据集 3680 行 > 500，不需要极小样本保护\n- 所有特征都是数值类型，无需类别编码\n- 使用 LightGBM 4.6.0 新 API（callbacks 替代 early_stopping_rounds）\n- 目标列 'spam' 在 preprocess 中保留原始值，不做任何变换\n- 特征名清洗：使用正则替换特殊字符",
+    "=== LLM 原始响应 ===\n<plan>\n基于结构化计划，我将在代码中实现以下关键点：\n\n**MUST DO 实现：**\n1. 丢弃 'id' 列：在 preprocess 中通过 drop(columns=['id'], errors='ignore') 实现\n2. 对所有数值特征进行 StandardScaler 标准化：在 build_model 的 Pipeline 中通过 StandardScaler 实现\n3. 对高度右偏特征应用 log1p 变换：在 preprocess 中对所有数值特征（除目标列外）应用 np.log1p\n4. 使用 ROC-AUC 作为主要评估指标：系统骨架已处理，但需在 build_model 中设置 objective='binary', metric='auc'\n5. 在验证集上确定最优分类阈值：系统骨架已处理\n\n**AVOID 规避：**\n1. 不使用 class_weight='balanced'（数据集基本平衡）\n2. 不使用 SMOTE 或任何过采样/下采样\n3. 不在测试集上调参（由系统骨架保证）\n4. 不使用简单复制过采样\n5. 不单独依赖 ROC-AUC（系统骨架会同时输出 F1/Precision/Recall）\n6. 不使用 PCA 等无监督降维\n\n**Pipeline 实现：**\n- preprocess: 丢弃 id 列 + log1p 变换所有数值特征\n- feature_engineering: 防御性检查（无穷值、NaN），无额外特征创建\n- build_model: Pipeline(StandardScaler + LightGBM)，带正则化参数防止过拟合\n\n**关键约束遵守：**\n- 数据集 3680 行 > 500，不需要极小样本保护\n- 所有特征都是数值类型，无需类别编码\n- 使用 LightGBM 4.6.0 新 API（callbacks 替代 early_stopping_rounds）\n- 目标列 'spam' 在 preprocess 中保留原始值，不做任何变换\n- 特征名清洗：使用正则替换特殊字符\n</plan>\n<code>\n```python\nimport numpy as np\nimport pandas as pd\nimport re\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.pipeline import Pipeline\nfrom lightgbm import LGBMClassifier, early_stopping\n\n# 全局状态：用于在 preprocess 的 train 和 test 模式间共享参数\nPREPROCESS_STATE = {\n    'log1p_cols': None,  # 需要 log1p 变换的列名列表\n    'scaler': None,      # StandardScaler 实例\n}\n\ndef preprocess(df, mode='train'):\n    '''\n    数据清洗和预处理。\n    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。\n    mode='test' 时应用已保存的参数。\n    返回处理后的 DataFrame（仍包含目标列）。\n    '''\n    # 1. 丢弃 'id' 列（must_do #1）\n    df = df.drop(columns=['id'], errors='ignore')\n    \n    # 2. 清洗特征名：替换特殊字符（防止 LightGBM 报 JSON 特殊字符错误）\n    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]\n    \n    # 3. 确定目标列\n    target_col = 'spam'\n    \n    # 4. 获取所有数值特征列（排除目标列）\n    feature_cols = [c for c in df.columns if c != target_col]\n    \n    # 5. 确保所有特征列是数值类型（防御性编程）\n    for col in feature_cols:\n        if df[col].dtype == 'object':\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n    \n    if mode == 'train':\n        # 训练模式：确定需要 log1p 变换的列，并拟合 scaler\n        \n        # 对所有特征列应用 log1p 变换（must_do #3：缓解右偏分布）\n        # 由于所有特征都是非负的（min >= 0），log1p 是安全的\n        PREPROCESS_STATE['log1p_cols'] = feature_cols.copy()\n        \n        for col in feature_cols:\n            # 防御性处理：确保没有负值（log1p 要求 x >= -1）\n            min_val = df[col].min()\n            if min_val < 0:\n                # 如果有负值，先平移使最小值为 0，再 log1p\n                df[col] = np.log1p(df[col] - min_val)\n            else:\n                df[col] = np.log1p(df[col])\n        \n        # 拟合 StandardScaler（must_do #2：消除特征尺度差异）\n        scaler = StandardScaler()\n        df[feature_cols] = scaler.fit_transform(df[feature_cols])\n        PREPROCESS_STATE['scaler'] = scaler\n        \n    else:\n        # 测试模式：应用训练时保存的参数\n        \n        log1p_cols = PREPROCESS_STATE.get('log1p_cols', feature_cols)\n        scaler = PREPROCESS_STATE.get('scaler', None)\n        \n        # 应用 log1p 变换\n        for col in log1p_cols:\n            if col in df.columns:\n                min_val = df[col].min()\n                if min_val < 0:\n                    df[col] = np.log1p(df[col] - min_val)\n                else:\n                    df[col] = np.log1p(df[col])\n        \n        # 应用 StandardScaler\n        if scaler is not None:\n            # 只 transform 实际存在的列\n            cols_to_scale = [c for c in log1p_cols if c in df.columns]\n            if cols_to_scale:\n                df[cols_to_scale] = scaler.transform(df[cols_to_scale])\n    \n    return df\n\n\ndef feature_engineering(df):\n    '''\n    特征工程。\n    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。\n    \n    防御性检查：处理无穷大值和 NaN 值。\n    '''\n    target_col = 'spam'\n    \n    # 分离特征和目标\n    X = df.drop(columns=[target_col], errors='ignore')\n    \n    # 防御性编程：处理无穷大值\n    X = X.replace([np.inf, -np.inf], np.nan)\n    \n    # 防御性编程：处理 NaN 值（用 0 填充，因为 log1p 变换后 0 是合理的默认值）\n    if X.isnull().any().any():\n        X = X.fillna(0)\n    \n    # 确保所有列都是数值类型\n    for col in X.columns:\n        if X[col].dtype == 'object':\n            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)\n    \n    return X\n\n\ndef build_model():\n    '''\n    模型构建和超参数设置。\n    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。\n    \n    使用 LightGBM 作为主模型，带正则化参数防止过拟合。\n    '''\n    # 数据集 3680 行，不属于极小样本（>= 500），可以使用 LightGBM\n    # 但需要设置合理的正则化参数防止过拟合\n    \n    model = LGBMClassifier(\n        objective='binary',\n        metric='auc',\n        boosting_type='gbdt',\n        random_state=42,\n        n_estimators=300,           # 适中的树数量\n        max_depth=6,                # 限制树深度防止过拟合（must_do 过拟合控制）\n        num_leaves=31,              # 默认值，与 max_depth 配合\n        learning_rate=0.05,         # 较小的学习率\n        subsample=0.8,              # 行采样防止过拟合\n        colsample_bytree=0.8,       # 列采样防止过拟合\n        min_child_samples=20,       # 叶子节点最小样本数（must_do 过拟合控制）\n        reg_alpha=0.1,              # L1 正则化\n        reg_lambda=0.1,             # L2 正则化\n        verbose=-1,                 # 静默模式\n    )\n    \n    return model\n```\n</code>",
+    "[Evaluation Agent] 评估结果",
+    "{\n  \"decision\": \"YIELD_TO_USER\",\n  \"score\": 95.2,\n  \"method_summary\": \"本轮使用LightGBM+StandardScaler，验证集AUC达0.991，准确率0.954，效果极佳。\",\n  \"suggestions_for_coding_agent\": null,\n  \"report_to_user\": \"模型已成功训练，验证集AUC高达0.991，准确率0.954，表现非常优秀，已达到部署标准。无需进一步自动优化。\",\n  \"evaluation_analysis\": \"验证集AUC 0.991远超优秀线0.9，准确率0.954也极高，且无过拟合迹象。LightGBM配合StandardScaler处理特征尺度，模型性能卓越。当前为首次运行，指标已达标，建议交棒用户。\",\n  \"dimension_scores\": [\n    {\"name\": \"metric_performance\", \"score\": 98, \"weight\": 0.30, \"reason\": \"AUC 0.991 极优秀\"},\n    {\"name\": \"overfit_control\", \"score\": 95, \"weight\": 0.25, \"reason\": \"未见明显过拟合\"},\n    {\"name\": \"algorithm_choice\", \"score\": 95, \"weight\": 0.20, \"reason\": \"LightGBM适合二分类\"},\n    {\"name\": \"code_completeness\", \"score\": 90, \"weight\": 0.15, \"reason\": \"流程完整，含预处理\"},\n    {\"name\": \"task_alignment\", \"score\": 95, \"weight\": 0.10, \"reason\": \"完美匹配AUC目标\"}\n  ]\n}",
+    "[Plan & Coding Agent] 正在单独生成配套预测脚本 predict.py...",
+    "[Plan & Coding Agent] predict.py 生成完成, 长度=3943",
+    "[Plan & Coding Agent] 正在调用 LLM 生成产物代码...",
+    "[Plan & Coding Agent] 产物代码生成完成, 长度=15995",
+    "[FastEngine] 正在沙箱中执行产物代码（允许文件写入）...",
+    "[ERROR] 产物代码执行失败 (第1次):\nTraceback (most recent call last):\n  File \"C:\\Users\\86147\\AppData\\Local\\Temp\\sandbox_w7nco1hg\\script.py\", line 137, in <module>\n    test_clean = preprocess(test, mode='test')\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\86147\\AppData\\Local\\Temp\\sandbox_w7nco1hg\\script.py\", line 53, in preprocess\n    for col in log1p_cols:\n               ^^^^^^^^^^\nTypeError: 'NoneType' object is not iterable\n",
+    "[FastEngine] 正在第 1 次修复产物代码...",
+    "[Plan & Coding Agent] 产物代码修复完成, 长度=15085",
+    "[FastEngine] 正在沙箱中执行产物代码（允许文件写入）...",
+    "[FastEngine] 产物代码执行成功，正在解析产物...",
+    "[FastEngine] 测试预测文件: 921 行, 列=['id', 'prediction', 'probability']",
+    "[FastEngine] 产物生成完成",
+    "产物文件: ['feature_importance.csv', 'feature_importance.png', 'model.pkl', 'predict.py', 'report.html', 'report_fig.png', 'test_predictions.csv']",
+    "[NOTE] 本次产物生成已跳过以下项目（数据集较大或生成超时）：Pipeline 代码。核心模型与指标已就绪。",
+    "[FastEngine] 任务已完成"
+  ],
+  "duration_seconds": 0.0,
+  "timing": {
+    "intent_recognition_seconds": 1.4939937591552734,
+    "code_generation_seconds": 53.35490155220032,
+    "sandbox_execution_seconds": 4.329727411270142,
+    "evaluation_seconds": 3.404630422592163,
+    "artifact_generation_seconds": 134.10124039649963,
+    "test_prediction_seconds": 0.003985881805419922,
+    "total_seconds": 202.26690936088562
+  },
+  "token_usage": {
+    "plan_coding_calls": 2,
+    "plan_coding_prompt_tokens": 9914,
+    "plan_coding_completion_tokens": 9681,
+    "plan_coding_total_tokens": 19595,
+    "evaluation_calls": 1,
+    "evaluation_prompt_tokens": 1733,
+    "evaluation_completion_tokens": 360,
+    "evaluation_total_tokens": 2093,
+    "total_calls": 3,
+    "total_prompt_tokens": 11647,
+    "total_completion_tokens": 10041,
+    "total_tokens": 21688
+  },
+  "result_dir": null,
+  "artifacts": {
+    "files": [],
+    "test_predictions": null,
+    "feature_importance": null,
+    "report_path": null,
+    "notes": null,
+    "completeness": "full",
+    "generated_files": [
+      "test_predictions.csv",
+      "model.pkl",
+      "feature_importance.csv",
+      "feature_importance.png",
+      "report.html",
+      "report_fig.png",
+      "predict.py"
+    ],
+    "prediction_file": true,
+    "model_file": true,
+    "feature_importance_csv": true,
+    "feature_importance_png": true,
+    "report_html": true,
+    "report_fig_png": true,
+    "predict_script": true,
+    "pipeline_py": false,
+    "residual_png": false,
+    "cluster_png": false,
+    "ts_forecast_png": false
+  },
+  "complexity": "complex",
+  "complexity_reason": "高维数据(59列)强制complex",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "llm_usage_trace": {
+    "intent": {
+      "primary_model": "qwen3.5-flash",
+      "primary_provider": "openai",
+      "total_calls": 1,
+      "total_tokens": 14792,
+      "total_latency_seconds": 1.42,
+      "avg_latency_seconds": 1.42,
+      "fallback_triggers": 0,
+      "model_breakdown": [
+        {
+          "model": "qwen3.5-flash",
+          "provider": "openai",
+          "calls": 1,
+          "tokens": 14792,
+          "latency": 1.42
+        }
+      ]
+    },
+    "judge": {
+      "primary_model": "qwen3.5-flash",
+      "primary_provider": "openai",
+      "total_calls": 1,
+      "total_tokens": 1608,
+      "total_latency_seconds": 2.47,
+      "avg_latency_seconds": 2.47,
+      "fallback_triggers": 0,
+      "model_breakdown": [
+        {
+          "model": "qwen3.5-flash",
+          "provider": "openai",
+          "calls": 1,
+          "tokens": 1608,
+          "latency": 2.47
+        }
+      ]
+    },
+    "plan_coding": {
+      "primary_model": "deepseek-v4-pro",
+      "primary_provider": "openai",
+      "total_calls": 2,
+      "total_tokens": 19595,
+      "total_latency_seconds": 124.22,
+      "avg_latency_seconds": 62.11,
+      "fallback_triggers": 0,
+      "model_breakdown": [
+        {
+          "model": "deepseek-v4-pro",
+          "provider": "openai",
+          "calls": 2,
+          "tokens": 19595,
+          "latency": 124.22
+        }
+      ]
+    },
+    "plan_coding_breakdown": [
+      {
+        "model": "deepseek-v4-pro",
+        "provider": "openai",
+        "calls": 2,
+        "tokens": 19595
+      }
+    ],
+    "evaluation": {
+      "primary_model": "deepseek-v4-flash",
+      "primary_provider": "openai",
+      "total_calls": 1,
+      "total_tokens": 2093,
+      "total_latency_seconds": 3.4,
+      "avg_latency_seconds": 3.4,
+      "fallback_triggers": 0,
+      "model_breakdown": [
+        {
+          "model": "deepseek-v4-flash",
+          "provider": "openai",
+          "calls": 1,
+          "tokens": 2093,
+          "latency": 3.4
+        }
+      ]
+    }
+  }
+}

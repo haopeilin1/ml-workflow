@@ -1,0 +1,219 @@
+<plan>
+## 规划
+
+### 1. 数据预处理 (preprocess)
+- **丢弃 id 列**：id 列有 856 个唯一值（与行数相同），是典型的 ID 列，必须丢弃，否则会导致严重过拟合。
+- **类别特征编码**：`sex`、`smoker`、`region` 是类别特征，使用 `ColumnTransformer` + `OneHotEncoder` 进行编码。
+- **数值特征缩放**：`age`、`bmi`、`children` 是数值特征，使用 `StandardScaler` 进行标准化。
+- **状态管理**：在 `mode='train'` 时拟合 `ColumnTransformer`，保存到全局变量 `PREPROCESS_STATE`；在 `mode='test'` 时直接应用已拟合的转换器。
+- **目标列保留**：`preprocess` 函数不丢弃目标列 `charges`（仅在 `feature_engineering` 中丢弃）。
+
+### 2. 特征工程 (feature_engineering)
+- **丢弃目标列**：移除 `charges` 列。
+- **创建交互特征**：`bmi * smoker`（BMI 与吸烟的交互作用对医疗费用影响显著）、`age * smoker`（年龄与吸烟的交互）。
+- **多项式特征**：`bmi^2`（BMI 与费用的非线性关系）。
+- **对数变换**：对 `charges` 进行对数变换（在预处理阶段完成，使目标分布更接近正态）。
+- **返回数值特征矩阵**：确保所有列都是数值类型。
+
+### 3. 模型构建 (build_model)
+- **模型选择**：使用 `LGBMRegressor`（LightGBM 回归器），适合中小规模数据，速度快，效果好。
+- **超参数设置**：
+  - `n_estimators=500`，配合早停
+  - `max_depth=6`，防止过拟合
+  - `learning_rate=0.05`
+  - `subsample=0.8`，行采样
+  - `min_child_samples=20`，叶子节点最小样本数
+  - `reg_alpha=0.1`，L1 正则化
+  - `reg_lambda=0.1`，L2 正则化
+- **早停**：使用 `callbacks=[lgb.early_stopping(stopping_rounds=50)]`（LightGBM 4.6.0 的正确写法）。
+- **评估指标**：使用 RMSE（系统默认指标）。
+
+### 4. 关键注意事项
+- 使用 `ColumnTransformer` + `OneHotEncoder` 编码类别特征，禁止使用 `pd.get_dummies`。
+- 使用 `LGBMRegressor` 的 sklearn 接口，禁止使用 `lgb.train()`。
+- 在 `mode='test'` 时，`preprocess` 函数不丢弃目标列（验证集需要目标列用于评估）。
+- 测试集没有目标列，`feature_engineering` 中 `drop('charges', errors='ignore')` 会安全处理。
+</plan>
+<code>
+```python
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMRegressor
+
+# 全局状态变量，用于存储预处理拟合的参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 定义类别列和数值列
+    cat_cols = ['sex', 'smoker', 'region']
+    num_cols = ['age', 'bmi', 'children']
+    
+    # 只保留存在的列
+    cat_cols = [c for c in cat_cols if c in df.columns]
+    num_cols = [c for c in num_cols if c in df.columns]
+    
+    if mode == 'train':
+        # 构建预处理管道
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('cat', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+                ]), cat_cols),
+                ('num', Pipeline([
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler())
+                ]), num_cols)
+            ],
+            remainder='passthrough'
+        )
+        
+        # 分离特征和目标
+        target_col = 'charges'
+        if target_col in df.columns:
+            y = df[target_col].values
+            X = df.drop(columns=[target_col])
+        else:
+            y = None
+            X = df
+        
+        # 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 获取转换后的列名
+        transformed_X = preprocessor.transform(X)
+        
+        # 获取 OneHotEncoder 的列名
+        ohe = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            categories = ohe.categories_[i]
+            for cat in categories:
+                cat_feature_names.append(f"{col}_{cat}")
+        
+        num_feature_names = num_cols
+        all_feature_names = cat_feature_names + num_feature_names
+        
+        PREPROCESS_STATE['feature_names'] = all_feature_names
+        
+        # 构建处理后的 DataFrame
+        processed_df = pd.DataFrame(transformed_X, columns=all_feature_names)
+        if y is not None:
+            processed_df[target_col] = y
+        
+        return processed_df
+    
+    elif mode == 'test':
+        # 从状态中读取已拟合的预处理器
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        feature_names = PREPROCESS_STATE['feature_names']
+        
+        target_col = 'charges'
+        if target_col in df.columns:
+            y = df[target_col].values
+            X = df.drop(columns=[target_col])
+        else:
+            y = None
+            X = df
+        
+        # 应用预处理器
+        transformed_X = preprocessor.transform(X)
+        
+        # 构建处理后的 DataFrame
+        processed_df = pd.DataFrame(transformed_X, columns=feature_names)
+        if y is not None:
+            processed_df[target_col] = y
+        
+        return processed_df
+    
+    return df
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'charges'
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df
+    
+    # 创建交互特征和多项式特征
+    # 注意：此时列名已经是编码后的名称（如 smoker_yes, smoker_no）
+    # 我们需要找到对应的列
+    
+    # 检查是否存在 smoker_yes 列（OneHotEncoder 编码后）
+    smoker_yes_col = None
+    for col in X.columns:
+        if col.startswith('smoker_'):
+            smoker_yes_col = col
+            break
+    
+    # 创建 bmi * smoker 交互特征
+    if smoker_yes_col and 'bmi' in X.columns:
+        X['bmi_smoker'] = X['bmi'] * X[smoker_yes_col]
+    
+    # 创建 age * smoker 交互特征
+    if smoker_yes_col and 'age' in X.columns:
+        X['age_smoker'] = X['age'] * X[smoker_yes_col]
+    
+    # 创建 bmi^2 多项式特征
+    if 'bmi' in X.columns:
+        X['bmi_squared'] = X['bmi'] ** 2
+    
+    # 创建 age^2 多项式特征
+    if 'age' in X.columns:
+        X['age_squared'] = X['age'] ** 2
+    
+    # 创建 children 的平方特征（可选）
+    if 'children' in X.columns:
+        X['children_squared'] = X['children'] ** 2
+    
+    return X
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = LGBMRegressor(
+        objective='regression',
+        n_estimators=500,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        n_jobs=-1
+    )
+    return model
+```
+</code>

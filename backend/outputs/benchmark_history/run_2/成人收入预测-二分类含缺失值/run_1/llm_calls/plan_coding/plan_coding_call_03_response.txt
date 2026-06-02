@@ -1,0 +1,279 @@
+<plan>
+## 优化规划
+
+### 当前问题分析
+1. **val_accuracy仅0.828**，但AUC很高，说明模型存在过拟合倾向
+2. 类别不平衡（<=50K占76%，>50K占24%）导致模型偏向多数类
+3. 当前模型配置：num_leaves=24, learning_rate=0.03, n_estimators=800，正则化参数已设置但可进一步优化
+
+### 优化策略
+
+#### 1. 预处理优化
+- 保留现有OneHotEncoder + StandardScaler的Pipeline结构
+- 确保native_country列正确处理（虽然它是字符串，但检查清单要求用pd.to_numeric转换，但实际数据中它是类别特征，应保留为类别编码）
+- 目标列income映射为0/1
+
+#### 2. 特征工程优化
+- 保留已有的对数变换、平方项、交互特征
+- 添加更多有意义的特征：
+  - 年龄分组（青年/中年/老年）
+  - 每周工作时间分组（兼职/全职/超时）
+  - 资本收益二值化（是否有资本收益）
+  - 教育程度分组（高中及以下/大学/研究生）
+  - 婚姻状况与性别的交互（已婚男性通常收入更高）
+  - 工作类别与职业的交互
+
+#### 3. 模型优化（核心）
+- **降低num_leaves**：从24→15，减少模型复杂度
+- **降低learning_rate**：从0.03→0.02，更慢学习
+- **减少n_estimators**：从800→500，配合更低的learning_rate和early stopping
+- **增加正则化**：reg_alpha从0.1→0.3，reg_lambda从0.1→0.3
+- **增加min_child_samples**：从30→50
+- **增加min_split_gain**：从0.01→0.1
+- **使用early stopping**：在fit时使用callbacks=[lgb.early_stopping(stopping_rounds=50)]
+- **调整scale_pos_weight**：从3.17→3.5（略微增加少数类权重）
+
+#### 4. 关键修复
+- 在build_model中，fit方法必须使用callbacks参数，不能使用early_stopping_rounds参数（LightGBM 4.6.0 API变更）
+- 确保所有类别特征正确编码
+
+### 预期效果
+- 通过降低模型复杂度、增加正则化、使用early stopping，提升验证集accuracy
+- 保持AUC在较高水平
+- 减少过拟合，使训练集和验证集表现更一致
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态存储
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃id列（id列是单调递增的，uniqueCount=rowCount，会导致过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 处理目标列：将income从字符串转换为0/1
+    if 'income' in df.columns:
+        df['income'] = df['income'].map({'<=50K': 0, '>50K': 1}).astype(int)
+    
+    # 类别列列表
+    cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                'relationship', 'race', 'sex', 'native_country']
+    
+    # 数值列列表
+    num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 'capital_loss', 'hours_per_week']
+    
+    if mode == 'train':
+        # 训练模式：拟合编码器和缩放器
+        # 类别列：用众数填充 + OneHot编码
+        cat_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        
+        # 数值列：用中位数填充 + 标准化
+        num_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        # 保存列名信息
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 拟合并转换
+        cat_data = cat_transformer.fit_transform(df[cat_cols])
+        num_data = num_transformer.fit_transform(df[num_cols])
+        
+        # 保存转换器
+        PREPROCESS_STATE['cat_transformer'] = cat_transformer
+        PREPROCESS_STATE['num_transformer'] = num_transformer
+        
+        # 获取编码后的列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = cat_transformer.named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(
+            np.hstack([cat_data, num_data]),
+            columns=cat_feature_names + num_cols,
+            index=df.index
+        )
+        
+        # 添加目标列
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+        
+        PREPROCESS_STATE['feature_names'] = processed_df.columns.tolist()
+        
+    else:  # mode == 'test'
+        # 测试模式：应用已保存的转换器
+        cat_transformer = PREPROCESS_STATE['cat_transformer']
+        num_transformer = PREPROCESS_STATE['num_transformer']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        
+        # 转换数据
+        cat_data = cat_transformer.transform(df[cat_cols])
+        num_data = num_transformer.transform(df[num_cols])
+        
+        # 获取编码后的列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = cat_transformer.named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(
+            np.hstack([cat_data, num_data]),
+            columns=cat_feature_names + num_cols,
+            index=df.index
+        )
+        
+        # 保留目标列（如果有）
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+    
+    return processed_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 分离特征和目标
+    if 'income' in df.columns:
+        X = df.drop(columns=['income'])
+    else:
+        X = df
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    # 填充可能出现的NaN
+    X = X.fillna(0)
+    
+    # === 基础特征变换 ===
+    # 1. 资本收益对数变换（处理偏态分布）
+    if 'capital_gain' in X.columns:
+        X['capital_gain_log'] = np.log1p(X['capital_gain'])
+    
+    # 2. 资本损失对数变换
+    if 'capital_loss' in X.columns:
+        X['capital_loss_log'] = np.log1p(X['capital_loss'])
+    
+    # 3. 年龄平方项（年龄与收入可能非线性关系）
+    if 'age' in X.columns:
+        X['age_squared'] = X['age'] ** 2
+    
+    # 4. 资本收益与工作时间的交互
+    if 'capital_gain' in X.columns and 'hours_per_week' in X.columns:
+        X['capital_gain_hours_interaction'] = X['capital_gain'] * X['hours_per_week']
+    
+    # 5. 教育程度与工作时间的交互
+    if 'education_num' in X.columns and 'hours_per_week' in X.columns:
+        X['education_hours_interaction'] = X['education_num'] * X['hours_per_week']
+    
+    # 6. 资本净收益
+    if 'capital_gain' in X.columns and 'capital_loss' in X.columns:
+        X['capital_net'] = X['capital_gain'] - X['capital_loss']
+    
+    # === 新增特征 ===
+    # 7. 年龄分组（离散化）
+    if 'age' in X.columns:
+        X['age_group'] = pd.cut(X['age'], bins=[0, 25, 35, 45, 55, 100], labels=[0, 1, 2, 3, 4]).astype(int)
+    
+    # 8. 每周工作时间分组
+    if 'hours_per_week' in X.columns:
+        X['hours_group'] = pd.cut(X['hours_per_week'], bins=[0, 20, 40, 50, 100], labels=[0, 1, 2, 3]).astype(int)
+    
+    # 9. 是否有资本收益（二值化）
+    if 'capital_gain' in X.columns:
+        X['has_capital_gain'] = (X['capital_gain'] > 0).astype(int)
+    
+    # 10. 是否有资本损失（二值化）
+    if 'capital_loss' in X.columns:
+        X['has_capital_loss'] = (X['capital_loss'] > 0).astype(int)
+    
+    # 11. 教育程度分组
+    if 'education_num' in X.columns:
+        X['education_group'] = pd.cut(X['education_num'], bins=[0, 9, 12, 16, 20], labels=[0, 1, 2, 3]).astype(int)
+    
+    # 12. 年龄与教育程度的交互
+    if 'age' in X.columns and 'education_num' in X.columns:
+        X['age_education_interaction'] = X['age'] * X['education_num']
+    
+    # 13. 每周工作时间与教育程度的交互（另一种形式）
+    if 'hours_per_week' in X.columns and 'education_num' in X.columns:
+        X['hours_education_ratio'] = X['hours_per_week'] / (X['education_num'] + 1)
+    
+    # 14. fnlwgt的对数变换（该列偏态严重）
+    if 'fnlwgt' in X.columns:
+        X['fnlwgt_log'] = np.log1p(X['fnlwgt'])
+    
+    # 再次填充新特征可能产生的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重：income >50K 占比约24%，所以scale_pos_weight ≈ 76/24 ≈ 3.17
+    # 略微提高权重以更关注少数类
+    scale_pos_weight = 3.5
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=15,              # 从24降低到15，大幅减少过拟合
+        max_depth=6,                # 保持6层
+        learning_rate=0.02,         # 从0.03降低到0.02，更慢学习
+        n_estimators=500,           # 从800降低到500，配合early stopping
+        subsample=0.8,              # 保持行采样
+        subsample_freq=1,           # 每轮都进行行采样
+        colsample_bytree=0.8,       # 列采样，增加随机性
+        min_child_samples=50,       # 从30增加到50，防止过拟合
+        min_child_weight=10.0,      # 从5.0增加到10.0，更保守
+        min_split_gain=0.1,         # 从0.01增加到0.1，减少不必要的分裂
+        reg_alpha=0.3,              # L1正则化从0.1增加到0.3
+        reg_lambda=0.3,             # L2正则化从0.1增加到0.3
+        random_state=42,
+        verbosity=-1,
+        importance_type='gain'      # 使用gain计算特征重要性
+    )
+    
+    return model
+```
+</code>

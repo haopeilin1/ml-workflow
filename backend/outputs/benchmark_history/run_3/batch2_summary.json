@@ -1,0 +1,225 @@
+{
+  "eval_id": "run3_batch2",
+  "timestamp": "2026-05-28T01:37:44.654308",
+  "total_tasks": 11,
+  "success_count": 10,
+  "success_rate": 0.9090909090909091,
+  "judge_count": 9,
+  "judge_rate": 0.8181818181818182,
+  "full_artifact_count": 7,
+  "partial_artifact_count": 0,
+  "simplified_artifact_count": 3,
+  "details": [
+    {
+      "task_name": "医疗保险费用预测",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 72.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": null,
+        "accuracy": null,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": 5948.819226033848,
+        "mae": 3379.350257654735,
+        "r2": 0.778189927846263
+      }
+    },
+    {
+      "task_name": "吸烟状况",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 82.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "simplified",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 0.8928604973011101,
+        "accuracy": 0.804,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "垃圾邮件判别-二分类-高维稀疏",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 95.2,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 0.986053101888879,
+        "accuracy": 0.9511400651465798,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "成人收入预测-二分类含缺失值",
+      "success": false,
+      "judge_accepted": false,
+      "best_score": null,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": null,
+      "error_message": "代码运行失败，经过 3 次自动修复仍未解决。建议切换至深度模式进行更深入的探索。",
+      "prediction_strategy": null,
+      "test_metrics": null
+    },
+    {
+      "task_name": "支付欺诈",
+      "success": true,
+      "judge_accepted": false,
+      "best_score": 54.0,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 1.0,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "机翼噪声预测",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 84.0,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": null,
+        "accuracy": null,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": 1.672582290106867,
+        "mae": 1.2086519010732029,
+        "r2": 0.9441594626024644
+      }
+    },
+    {
+      "task_name": "电子商务客户流失预测",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 92.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "simplified",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 0.9163485378784376,
+        "accuracy": 0.8602815574011898,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "糖尿病预测",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 72.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 0.7866666666666666,
+        "accuracy": 0.7154471544715447,
+        "f1": 0.6153846153846154,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "肝硬化患者状态预测",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 72.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": null,
+        "accuracy": 0.842,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": 0.4440102284477651,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "鸢尾花种类识别-极小样本多分类",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 82.0,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": null,
+        "accuracy": 0.9666666666666667,
+        "f1": null,
+        "f1_macro": 0.9710144927536232,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "黑色素瘤种类",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 73.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "simplified",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 0.8669709483756725,
+        "accuracy": null,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    }
+  ]
+}

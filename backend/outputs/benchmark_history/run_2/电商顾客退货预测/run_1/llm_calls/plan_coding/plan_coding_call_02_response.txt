@@ -1,0 +1,284 @@
+<plan>
+## 优化规划
+
+### 问题诊断
+当前模型处于**欠拟合**状态，验证集 AUC 表现不佳。主要问题：
+
+1. **树模型参数过于保守**：`max_depth=6`, `n_estimators=500`, `learning_rate=0.05` 虽然合理，但可以适当调整以提升拟合能力
+2. **特征工程过于简单**：只创建了少量交互特征，没有充分利用数据中的信息
+3. **类别编码方式**：OneHotEncoder 对低基数类别（3-6类）是合理的，但可以尝试 TargetEncoding 增强信号
+4. **类别不平衡处理**：目标列 `returned` 正负样本比例约为 47.5% : 52.5%，接近平衡，`scale_pos_weight` 不是关键问题
+
+### 优化策略
+
+#### 1. 预处理优化
+- 保留现有 ID 列丢弃逻辑（`product_price`, `discount_percent`, `product_rating`, `past_return_rate`, `delivery_delay_days`, `session_length_minutes`, `order_id`）
+- 对类别特征使用 **TargetEncoder**（category-encoders 库）替代 OneHotEncoder，更好地捕捉类别与目标的关系
+- 数值特征标准化保持不变
+
+#### 2. 特征工程增强
+- 创建更多有意义的交互特征：
+  - `customer_age` 与 `past_purchase_count` 的交互（年龄越大购买次数越多？）
+  - `num_product_views` 与 `past_purchase_count` 的比率（浏览转化率）
+  - `used_coupon` 与 `past_purchase_count` 的交互（使用优惠券的回头客）
+  - 对 `customer_age` 进行分箱（年龄段）
+- 添加多项式特征：`customer_age^2`, `past_purchase_count^2`
+
+#### 3. 模型参数调整
+- 增加 `max_depth` 从 6 到 8（适度增加复杂度）
+- 增加 `n_estimators` 从 500 到 800（配合早停）
+- 降低 `learning_rate` 从 0.05 到 0.03（更精细的学习）
+- 保持正则化参数（`reg_alpha`, `reg_lambda`）防止过拟合
+- 使用 `scale_pos_weight` 根据训练集正负样本比例自动计算
+
+#### 4. 训练策略
+- 使用 `callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)]` 进行早停
+- 传入 `eval_set` 监控验证集 AUC
+
+### 关键变更点
+1. **preprocess**: 改用 `TargetEncoder` 编码类别特征，保留数值标准化
+2. **feature_engineering**: 增加更多交互特征和多项式特征
+3. **build_model**: 调整超参数，增加模型容量同时保持正则化
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+from category_encoders import TargetEncoder
+
+# 全局状态变量，用于存储预处理参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃ID列（uniqueCount ≈ rowCount，会导致严重过拟合）
+    id_cols = ['product_price', 'discount_percent', 'product_rating', 
+               'past_return_rate', 'delivery_delay_days', 'session_length_minutes', 'order_id']
+    df = df.drop(columns=[col for col in id_cols if col in df.columns], errors='ignore')
+    
+    # 2. 分离特征和目标列（目标列保留，不做处理）
+    target_col = 'returned'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 3. 定义类别列和数值列
+    cat_cols = ['device_type', 'product_category', 'shipping_method', 'payment_method']
+    cat_cols = [col for col in cat_cols if col in X.columns]
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = [col for col in num_cols if col not in cat_cols]
+    
+    if mode == 'train':
+        # 4. 构建预处理器：对类别列使用 TargetEncoder，数值列使用 StandardScaler
+        # TargetEncoder 需要 y 来拟合，所以单独处理
+        # 数值列使用 Pipeline
+        num_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        # 拟合数值列
+        if num_cols:
+            num_pipeline.fit(X[num_cols])
+        
+        # 拟合 TargetEncoder
+        if cat_cols:
+            target_encoder = TargetEncoder(cols=cat_cols, smoothing=10, handle_missing='value')
+            target_encoder.fit(X[cat_cols], y)
+        else:
+            target_encoder = None
+        
+        # 保存状态
+        PREPROCESS_STATE['num_pipeline'] = num_pipeline
+        PREPROCESS_STATE['target_encoder'] = target_encoder
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 5. 转换数据
+        processed_parts = []
+        
+        # 数值列
+        if num_cols:
+            num_processed = num_pipeline.transform(X[num_cols])
+            num_df = pd.DataFrame(num_processed, columns=num_cols, index=X.index)
+            processed_parts.append(num_df)
+        
+        # 类别列（TargetEncoder 后是数值）
+        if cat_cols and target_encoder is not None:
+            cat_processed = target_encoder.transform(X[cat_cols])
+            # TargetEncoder 返回 DataFrame，列名保持不变
+            processed_parts.append(cat_processed)
+        
+        # 合并
+        if processed_parts:
+            X_processed = pd.concat(processed_parts, axis=1)
+        else:
+            X_processed = X.copy()
+        
+        # 添加目标列
+        if y is not None:
+            X_processed[target_col] = y.values
+        
+        return X_processed
+    
+    elif mode == 'test':
+        # 应用已保存的预处理器
+        num_pipeline = PREPROCESS_STATE['num_pipeline']
+        target_encoder = PREPROCESS_STATE['target_encoder']
+        cat_cols_saved = PREPROCESS_STATE['cat_cols']
+        num_cols_saved = PREPROCESS_STATE['num_cols']
+        
+        # 转换数据
+        processed_parts = []
+        
+        # 数值列
+        if num_cols_saved:
+            # 只取训练时存在的数值列
+            available_num_cols = [c for c in num_cols_saved if c in X.columns]
+            if available_num_cols:
+                num_processed = num_pipeline.transform(X[available_num_cols])
+                num_df = pd.DataFrame(num_processed, columns=available_num_cols, index=X.index)
+                processed_parts.append(num_df)
+        
+        # 类别列
+        if cat_cols_saved and target_encoder is not None:
+            available_cat_cols = [c for c in cat_cols_saved if c in X.columns]
+            if available_cat_cols:
+                cat_processed = target_encoder.transform(X[available_cat_cols])
+                processed_parts.append(cat_processed)
+        
+        # 合并
+        if processed_parts:
+            X_processed = pd.concat(processed_parts, axis=1)
+        else:
+            X_processed = X.copy()
+        
+        # 添加目标列（如果存在）
+        if y is not None:
+            X_processed[target_col] = y.values
+        
+        return X_processed
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃目标列
+    target_col = 'returned'
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    # 2. 确保所有列是数值类型（防御性检查）
+    non_numeric_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+    if non_numeric_cols:
+        for col in non_numeric_cols:
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 3. 获取当前数值列
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # 4. 创建新特征
+    
+    # 4.1 交互特征：年龄与购买行为
+    if 'customer_age' in num_cols and 'past_purchase_count' in num_cols:
+        X['age_purchase_interaction'] = X['customer_age'] * X['past_purchase_count']
+        X['purchase_per_age'] = X['past_purchase_count'] / (X['customer_age'] + 1)
+    
+    # 4.2 交互特征：浏览与购买
+    if 'num_product_views' in num_cols and 'past_purchase_count' in num_cols:
+        X['view_to_purchase_ratio'] = X['num_product_views'] / (X['past_purchase_count'] + 1)
+    
+    if 'num_product_views' in num_cols and 'customer_age' in num_cols:
+        X['views_per_age'] = X['num_product_views'] / (X['customer_age'] + 1)
+    
+    # 4.3 交互特征：优惠券使用
+    if 'used_coupon' in num_cols and 'past_purchase_count' in num_cols:
+        X['coupon_purchase_interaction'] = X['used_coupon'] * X['past_purchase_count']
+    
+    # 4.4 多项式特征
+    if 'customer_age' in num_cols:
+        X['age_squared'] = X['customer_age'] ** 2
+        X['age_cubed'] = X['customer_age'] ** 3
+    
+    if 'past_purchase_count' in num_cols:
+        X['purchase_squared'] = X['past_purchase_count'] ** 2
+    
+    if 'num_product_views' in num_cols:
+        X['views_squared'] = X['num_product_views'] ** 2
+    
+    # 4.5 对数变换（处理偏态分布）
+    if 'num_product_views' in num_cols:
+        X['log_views'] = np.log1p(X['num_product_views'].clip(lower=0))
+    
+    if 'past_purchase_count' in num_cols:
+        X['log_purchases'] = np.log1p(X['past_purchase_count'])
+    
+    # 4.6 年龄分箱（作为数值特征）
+    if 'customer_age' in num_cols:
+        X['age_group'] = (X['customer_age'] // 10).astype(float)
+    
+    # 4.7 确保 used_coupon 是整数
+    if 'used_coupon' in num_cols:
+        X['used_coupon'] = X['used_coupon'].astype(int)
+    
+    # 5. 确保所有列是数值类型（最终检查）
+    X = X.select_dtypes(include=[np.number])
+    
+    # 6. 处理无穷值和NaN
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # scale_pos_weight 将在训练时根据实际数据计算
+    model = LGBMClassifier(
+        objective='binary',
+        metric='auc',
+        num_leaves=63,           # 增加叶子节点数，提升模型容量
+        max_depth=8,             # 增加树深度，从6提升到8
+        learning_rate=0.03,      # 降低学习率，配合更多迭代
+        n_estimators=800,        # 增加迭代次数
+        subsample=0.8,           # 行采样，防止过拟合
+        colsample_bytree=0.8,    # 列采样，防止过拟合
+        min_child_samples=20,    # 叶子节点最小样本数
+        reg_alpha=0.1,           # L1正则化
+        reg_lambda=0.1,          # L2正则化
+        min_split_gain=0.0,      # 最小分裂增益
+        random_state=42,
+        verbosity=-1,
+        n_jobs=-1                # 使用所有CPU核心
+    )
+    
+    return model
+```
+</code>

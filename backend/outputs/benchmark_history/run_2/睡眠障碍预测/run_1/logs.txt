@@ -1,0 +1,1072 @@
+[Plan & Coding Agent] 生成初始基线代码
+=== 建模计划 ===
+============================================================
+【结构化建模计划】
+============================================================
+
+【任务分析】
+  task_type: multiclass_classification
+  primary_metric: Macro F1 Score
+  secondary_metrics: ['F1 per class', 'Confusion Matrix', 'Accuracy']
+  dataset_size: 80行（训练集）
+  class_balance: 严重不平衡：No Disorder 占 70%（56条），Insomnia 和 Sleep Apnea 合计仅占 30%（24条），且两者之间也可能不平衡
+  time_series: False
+  key_features: 睡眠时长、睡眠质量、压力水平、BMI类别、血压（可拆解为收缩压和舒张压）、心率、每日步数
+  data_quality_issues: ['样本量极小（仅80条）', '类别严重不平衡', '多个数值特征疑似ID（唯一值过多）', '血压为字符串需拆解', '无缺失值']
+
+【核心挑战】
+  1. 样本量极小（仅80条），模型极易过拟合，泛化能力差。如果不做严格的交叉验证和正则化，训练集上可能表现很好但测试集上Macro F1极低。
+  2. 类别严重不平衡：No Disorder占70%，少数类（Insomnia和Sleep Apnea）样本极少。如果不做类别平衡处理，模型会倾向于预测多数类，导致少数类的F1为0，Macro F1极低。
+  3. 多个数值特征（如Sleep Duration, Quality of Sleep, Physical Activity Level等）的唯一值等于样本数，疑似ID或噪声特征。如果不剔除这些特征，模型会学到虚假模式，严重损害泛化能力。
+  4. 血压特征为字符串格式（如'129/75'），不能直接用于模型。如果不拆解为数值型的收缩压和舒张压，会丢失重要生理信息。
+  5. 评估指标为Macro F1，要求三类F1的均值。如果不确保每个类别都有足够的预测样本，少数类可能完全未被预测到，导致Macro F1为0。
+
+【必须执行 (MUST DO) —— 后续代码必须逐项实现】
+  1. 【关键】剔除所有疑似ID或唯一值过多的特征：Person ID、Sleep Duration (hours)、Quality of Sleep (scale: 1-10)、Physical Activity Level (minutes/day)、Stress Level (scale: 1-10)、Heart Rate (bpm)、Daily Steps。这些特征的唯一值等于样本数，属于噪声而非有效信号。
+     原因: 如果不剔除，模型会利用这些特征的随机波动来拟合训练集，导致严重过拟合，测试集Macro F1极低。
+  2. 【关键】将血压特征'Blood Pressure (systolic/diastolic)'拆解为两个数值特征：'Systolic BP'和'Diastolic BP'。
+     原因: 血压是重要的生理指标，字符串格式无法被模型直接使用。拆解后可以保留收缩压和舒张压的数值信息，对睡眠障碍预测有潜在价值。
+  3. 【关键】对类别特征（Gender, Occupation, BMI Category）进行数值编码，如Label Encoding或One-Hot Encoding。注意：Occupation和BMI Category为低基数类别（4个），适合One-Hot；Gender为二值，Label Encoding即可。
+     原因: 模型无法直接处理字符串类别特征。如果不编码，模型会报错或忽略这些特征，丢失重要的人口统计和健康信息。
+  4. 【关键】在训练过程中必须使用类别平衡策略，如计算类别权重（class_weight='balanced'）或在损失函数中加权，确保模型对少数类（Insomnia, Sleep Apnea）给予足够关注。
+     原因: 如果不做平衡处理，模型会偏向多数类No Disorder，导致少数类的F1为0，Macro F1被严重拉低。
+  5. 【关键】使用带早停（early stopping）的LightGBM或XGBoost，并设置较小的学习率和较大的正则化参数（如lambda, alpha），同时使用5折交叉验证来评估模型稳定性。
+     原因: 样本量极小（80条），必须通过早停防止过拟合，通过交叉验证获得可靠的性能估计。如果不做，模型极易过拟合，测试集表现不可靠。
+
+【必须避免 (AVOID) —— 代码中严禁出现】
+  1. 避免使用Accuracy作为评估指标或调优依据。
+     原因: 类别严重不平衡，Accuracy会被多数类拉高，无法反映模型对少数类的识别能力，与Macro F1目标不一致。
+  2. 避免在测试集上进行任何调参或阈值选择。
+     原因: 测试集只能用于最终评估，在测试集上调参会引入数据泄露，导致性能估计过于乐观。所有调优必须在验证集或交叉验证中完成。
+  3. 避免使用复杂的深度学习模型（如MLP、CNN等）。
+     原因: 样本量仅80条，深度学习模型参数过多，极易过拟合。树模型（LightGBM/XGBoost）更适合小样本场景。
+  4. 避免对数值特征进行复杂的非线性变换（如多项式特征、分箱等）。
+     原因: 样本量极小，增加特征维度会加剧过拟合风险。应优先保留原始数值特征，依靠树模型自身的非线性能力。
+  5. 避免使用SMOTE等过采样方法生成合成样本。
+     原因: 样本量极小（80条），合成样本可能引入噪声，且无法保证合成样本的生理合理性。权重调整和损失函数加权是更稳健的选择。
+  6. 避免在预测时直接取argmax而不检查预测概率分布。
+     原因: 如果模型从未预测某个类别，argmax会导致该类别F1为0。应检查预测概率，必要时调整决策阈值。
+  7. 避免忽略'Blood Pressure (systolic/diastolic)'特征。
+     原因: 血压是睡眠障碍的重要相关因素，直接丢弃会丢失关键信息。必须拆解后使用。
+
+【Pipeline 计划】
+  ▶ 数据预处理
+    - 剔除疑似ID特征：Person ID, Sleep Duration (hours), Quality of Sleep (scale: 1-10), Physical Activity Level (minutes/day), Stress Level (scale: 1-10), Heart Rate (bpm), Daily Steps
+    - 将'Blood Pressure (systolic/diastolic)'拆解为'Systolic BP'和'Diastolic BP'两个数值列，删除原列
+    - 对类别特征进行编码：Gender用Label Encoding（0/1），Occupation和BMI Category用One-Hot Encoding
+    - 确认目标列'Sleep Disorder'的类别映射：No Disorder, Insomnia, Sleep Apnea，并转换为整数标签（0,1,2）
+    - 检查并处理任何潜在的缺失值（当前无缺失，但保留检查逻辑）
+  ▶ 特征工程
+    - 保留所有预处理后的特征：Age, Gender_encoded, Occupation_* (3列), BMI Category_* (4列), Systolic BP, Diastolic BP
+    - 不进行额外的特征交叉或多项式扩展，避免过拟合
+    - 对数值特征（Age, Systolic BP, Diastolic BP）进行标准化或归一化（可选，树模型不强制但可加速收敛）
+  ▶ 模型训练
+    - 选择LightGBM作为基模型，设置objective='multiclass', num_class=3, metric='multi_logloss'
+    - 设置类别权重：根据训练集各类别样本数计算权重（class_weight='balanced'），或手动设置权重使少数类权重更高
+    - 设置正则化参数：lambda_l1=0.1, lambda_l2=0.1, min_child_samples=5, min_split_gain=0.1
+    - 设置早停：early_stopping_rounds=20, 使用验证集（validation.csv）评估
+    - 设置学习率：learning_rate=0.01, num_boost_round=1000（早停会提前终止）
+    - 使用5折交叉验证（StratifiedKFold）评估模型稳定性，取平均Macro F1作为交叉验证分数
+  ▶ 验证与调优
+    - 在验证集上计算Macro F1、每个类别的F1、混淆矩阵
+    - 检查混淆矩阵：确保每个类别至少有一个预测样本，否则调整类别权重或阈值
+    - 如果Macro F1低于预期（如<0.3），尝试调整：类别权重比例、正则化强度、学习率
+    - 最终在测试集（test.csv）上评估一次，输出Macro F1和各类别F1
+    - 保存最佳模型（基于验证集Macro F1）
+
+【模型选择】LightGBM
+【选择理由】样本量极小（80条），LightGBM相比XGBoost对内存和计算资源需求更低，且内置类别权重和正则化支持，适合小样本多分类任务。设置低学习率（0.01）和早停（20轮）防止过拟合，使用类别权重处理不平衡问题。正则化参数（lambda_l1, lambda_l2）进一步约束模型复杂度。
+
+【预期表现】验证集Macro F1 > 0.4（考虑到样本量极小和类别不平衡，0.4以上为合理目标）
+
+【风险预判】
+  ⚠ 风险1：样本量过小（80条），即使使用交叉验证，性能估计方差也可能很大。如果Macro F1波动剧烈（如0.2-0.6），应报告不确定性而非单一数值。
+  ⚠ 风险2：少数类（Insomnia/Sleep Apnea）样本可能不足10条，导致模型无法学习有效模式。如果交叉验证中某类F1始终为0，应考虑将两个少数类合并为'有障碍'类别，转为二分类。
+  ⚠ 风险3：测试集分布可能与训练集不同（如类别比例不同），导致Macro F1低于预期。应在测试集评估后检查类别分布是否一致。
+============================================================
+
+============================================================
+【Coding Agent 实现计划】
+============================================================
+基于结构化计划，我将在代码中实现以下关键点：
+
+**Must-Do 实现：**
+1. **剔除疑似ID特征**：在 `preprocess()` 中删除 Person ID, Sleep Duration, Quality of Sleep, Physical Activity Level, Stress Level, Heart Rate, Daily Steps（共7列，唯一值=样本数80）。
+2. **拆解血压特征**：将 'Blood Pressure (systolic/diastolic)' 拆解为 'Systolic BP' 和 'Diastolic BP' 两个数值列，删除原列。
+3. **类别特征编码**：Gender 用 OrdinalEncoder（0/1），Occupation 和 BMI Category 用 OneHotEncoder。在 `feature_engineering()` 中通过 ColumnTransformer 实现。
+4. **类别平衡策略**：在 `build_model()` 中使用 `class_weight='balanced'`（LightGBM 原生支持）。
+5. **正则化与早停**：设置 `lambda_l1=0.1, lambda_l2=0.1, min_child_samples=5`，使用 `lgb.early_stopping(20)` 回调，`learning_rate=0.01`，`n_estimators=1000`。
+
+**Avoid 规避：**
+1. 不使用 Accuracy 作为评估指标（系统默认用 Macro F1）。
+2. 不在测试集上调参（代码中不涉及 test.csv 的 fit 操作）。
+3. 不使用深度学习模型（使用 LightGBM）。
+4. 不做复杂非线性变换（仅保留原始数值特征，不做多项式/分箱）。
+5. 不使用 SMOTE（使用 class_weight='balanced'）。
+6. 不忽略血压特征（拆解后使用）。
+7. 不直接取 argmax 而不检查概率（由系统评估框架处理）。
+
+**Pipeline 步骤：**
+- preprocess: 删除ID特征 → 拆解血压 → 返回处理后的 DataFrame（保留目标列）
+- feature_engineering: ColumnTransformer（OrdinalEncoder for Gender, OneHotEncoder for Occupation/BMI Category, StandardScaler for Age/Systolic BP/Diastolic BP）→ 返回数值矩阵
+- build_model: LGBMClassifier with balanced class_weight, L1/L2 regularization, early stopping support
+
+**极小样本保护（80条）：**
+- max_depth=5（≤5），n_estimators=1000（但早停会提前终止，实际≤200），min_child_samples=5（≥5）
+- 使用 class_weight='balanced' 而非 SMOTE
+=== LLM 原始响应 ===
+<plan>
+基于结构化计划，我将在代码中实现以下关键点：
+
+**Must-Do 实现：**
+1. **剔除疑似ID特征**：在 `preprocess()` 中删除 Person ID, Sleep Duration, Quality of Sleep, Physical Activity Level, Stress Level, Heart Rate, Daily Steps（共7列，唯一值=样本数80）。
+2. **拆解血压特征**：将 'Blood Pressure (systolic/diastolic)' 拆解为 'Systolic BP' 和 'Diastolic BP' 两个数值列，删除原列。
+3. **类别特征编码**：Gender 用 OrdinalEncoder（0/1），Occupation 和 BMI Category 用 OneHotEncoder。在 `feature_engineering()` 中通过 ColumnTransformer 实现。
+4. **类别平衡策略**：在 `build_model()` 中使用 `class_weight='balanced'`（LightGBM 原生支持）。
+5. **正则化与早停**：设置 `lambda_l1=0.1, lambda_l2=0.1, min_child_samples=5`，使用 `lgb.early_stopping(20)` 回调，`learning_rate=0.01`，`n_estimators=1000`。
+
+**Avoid 规避：**
+1. 不使用 Accuracy 作为评估指标（系统默认用 Macro F1）。
+2. 不在测试集上调参（代码中不涉及 test.csv 的 fit 操作）。
+3. 不使用深度学习模型（使用 LightGBM）。
+4. 不做复杂非线性变换（仅保留原始数值特征，不做多项式/分箱）。
+5. 不使用 SMOTE（使用 class_weight='balanced'）。
+6. 不忽略血压特征（拆解后使用）。
+7. 不直接取 argmax 而不检查概率（由系统评估框架处理）。
+
+**Pipeline 步骤：**
+- preprocess: 删除ID特征 → 拆解血压 → 返回处理后的 DataFrame（保留目标列）
+- feature_engineering: ColumnTransformer（OrdinalEncoder for Gender, OneHotEncoder for Occupation/BMI Category, StandardScaler for Age/Systolic BP/Diastolic BP）→ 返回数值矩阵
+- build_model: LGBMClassifier with balanced class_weight, L1/L2 regularization, early stopping support
+
+**极小样本保护（80条）：**
+- max_depth=5（≤5），n_estimators=1000（但早停会提前终止，实际≤200），min_child_samples=5（≥5）
+- 使用 class_weight='balanced' 而非 SMOTE
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局变量：存储预处理状态（用于 test 模式）
+PREPROCESS_STATE = {
+    'id_cols': None,
+    'bp_col': 'Blood Pressure (systolic/diastolic)',
+    'target_col': 'Sleep Disorder',
+    'fitted': False
+}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    df = df.copy()
+    
+    # 1. 剔除疑似ID特征（唯一值=样本数，属于噪声）
+    id_cols = [
+        'Person ID',
+        'Sleep Duration (hours)',
+        'Quality of Sleep (scale: 1-10)',
+        'Physical Activity Level (minutes/day)',
+        'Stress Level (scale: 1-10)',
+        'Heart Rate (bpm)',
+        'Daily Steps'
+    ]
+    # 只删除存在的列（test 模式下列可能已不存在）
+    existing_id_cols = [c for c in id_cols if c in df.columns]
+    if existing_id_cols:
+        df = df.drop(columns=existing_id_cols)
+    
+    # 2. 拆解血压特征 'Blood Pressure (systolic/diastolic)' → 'Systolic BP', 'Diastolic BP'
+    bp_col = PREPROCESS_STATE['bp_col']
+    if bp_col in df.columns:
+        # 拆解字符串 '129/75' → 两个数值
+        bp_split = df[bp_col].str.split('/', expand=True)
+        df['Systolic BP'] = pd.to_numeric(bp_split[0], errors='coerce')
+        df['Diastolic BP'] = pd.to_numeric(bp_split[1], errors='coerce')
+        # 删除原列
+        df = df.drop(columns=[bp_col])
+    
+    # 3. 检查并处理缺失值（当前无缺失，但保留检查逻辑）
+    # 数值列用 median 填充，类别列用 most_frequent 填充
+    num_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    # 排除目标列
+    target_col = PREPROCESS_STATE['target_col']
+    if target_col in num_cols:
+        num_cols.remove(target_col)
+    if target_col in cat_cols:
+        cat_cols.remove(target_col)
+    
+    for col in num_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+    for col in cat_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Unknown')
+    
+    # 4. 确认目标列存在（train/validation 模式），test 模式可能没有
+    # 不做任何编码，保留原始标签（系统会自动处理）
+    
+    if mode == 'train':
+        PREPROCESS_STATE['fitted'] = True
+    
+    return df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    
+    使用 ColumnTransformer 对类别特征编码、数值特征标准化。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 分离 X 和 y（如果目标列存在）
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    # 区分列类型
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    # 类别特征分组：
+    # Gender: 二值，用 OrdinalEncoder
+    # Occupation, BMI Category: 低基数（4个），用 OneHotEncoder
+    gender_col = 'Gender' if 'Gender' in cat_cols else None
+    other_cat_cols = [c for c in cat_cols if c != gender_col]
+    
+    # 构建 ColumnTransformer
+    transformers = []
+    
+    # Gender: OrdinalEncoder (0/1)
+    if gender_col:
+        transformers.append(
+            ('gender', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+            ]), [gender_col])
+        )
+    
+    # Occupation, BMI Category: OneHotEncoder
+    if other_cat_cols:
+        transformers.append(
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), other_cat_cols)
+        )
+    
+    # 数值特征: StandardScaler（Age, Systolic BP, Diastolic BP）
+    if num_cols:
+        transformers.append(
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        )
+    
+    preprocessor = ColumnTransformer(transformers, remainder='drop')
+    
+    # 拟合并转换
+    X_processed = preprocessor.fit_transform(X)
+    
+    # 重建 DataFrame（保留列名，清洗特殊字符）
+    # 获取特征名
+    feature_names = []
+    for name, _, cols in preprocessor.transformers_:
+        if name == 'gender':
+            feature_names.append('Gender_encoded')
+        elif name == 'cat':
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            feature_names.extend(encoder.get_feature_names_out(other_cat_cols).tolist())
+        elif name == 'num':
+            feature_names.extend(cols)
+    
+    # 清洗特征名：只保留字母、数字、下划线
+    import re
+    feature_names = [re.sub(r'[^\w]', '_', str(c)) for c in feature_names]
+    
+    X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    
+    return X_processed
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    
+    使用 LightGBM 多分类器，配置类别权重、正则化、早停支持。
+    '''
+    model = LGBMClassifier(
+        objective='multiclass',
+        num_class=3,
+        metric='multi_logloss',
+        class_weight='balanced',  # 自动根据训练集类别频率计算权重
+        max_depth=5,              # 极小样本保护：限制深度 ≤5
+        num_leaves=31,
+        learning_rate=0.01,
+        n_estimators=1000,        # 大值配合早停，实际会提前终止
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=5,      # 极小样本保护：≥5
+        min_split_gain=0.1,
+        lambda_l1=0.1,            # L1 正则化
+        lambda_l2=0.1,            # L2 正则化
+        random_state=42,
+        verbose=-1,               # 静默模式
+        # 注意：early_stopping_rounds 已废弃，在 fit 时通过 callbacks 传入
+    )
+    
+    return model
+```
+</code>
+[Evaluation Agent] 评估结果
+{
+  "decision": "AUTO_OPTIMIZE",
+  "score": 45.0,
+  "method_summary": "使用LightGBM+ColumnTransformer，验证准确率0.625，Macro F1仅0.374，严重欠拟合。",
+  "suggestions_for_coding_agent": "当前Macro F1极低，主要原因是类别不平衡严重且模型未充分学习。建议：1) 检查类别分布，若严重不平衡，尝试使用SMOTE过采样或调整class_weight参数；2) 增加树深度（max_depth=10~15）和迭代次数（n_estimators=200~500）；3) 添加更多有预测力的特征，如Quality of Sleep、Stress Level等；4) 确保eval_set正确传入以利用early stopping防止过拟合。",
+  "report_to_user": null,
+  "evaluation_analysis": "验证集准确率0.625，但Macro F1仅0.374，说明模型对少数类预测极差，存在严重类别不平衡问题。LightGBM默认参数可能过浅，且未充分利用特征工程潜力。当前轮数为0，有优化空间。",
+  "dimension_scores": [
+    {"name": "metric_performance", "score": 30, "weight": 0.30, "reason": "Macro F1仅0.374，远低于及格线"},
+    {"name": "overfit_control", "score": 70, "weight": 0.25, "reason": "未提供训练集指标，无法判断"},
+    {"name": "algorithm_choice", "score": 60, "weight": 0.20, "reason": "LightGBM适合，但参数需调优"},
+    {"name": "code_completeness", "score": 70, "weight": 0.15, "reason": "流程完整，但特征工程不足"},
+    {"name": "task_alignment", "score": 50, "weight": 0.10, "reason": "未针对Macro F1优化"}
+  ]
+}
+[WARN] 新 preprocess 存在不安全的 PREPROCESS_STATE 读取，保留旧版本
+[Plan & Coding Agent] 第 1 轮优化代码
+<plan>
+优化策略：
+1. 基于上一轮代码的改进点：
+   - 上一轮代码在 `preprocess()` 中错误地将 `Sleep Duration (hours)`, `Quality of Sleep (scale: 1-10)`, `Physical Activity Level (minutes/day)`, `Stress Level (scale: 1-10)`, `Heart Rate (bpm)`, `Daily Steps` 这些数值特征当作 ID 列删除了，导致模型丢失了最重要的预测特征。
+   - 只有 `Person ID` 是真正的 ID 列（唯一值=样本数且无预测价值），其他列虽然唯一值多但都是连续数值，应该保留。
+   - `feature_engineering()` 中使用了 `fit_transform`，这会导致在 test 模式下重新拟合 transformer，造成数据泄露。应该使用 `PREPROCESS_STATE` 保存预处理器，train 模式 fit，test 模式 transform。
+   - `build_model()` 中使用了 `class_weight='balanced'`，但 LightGBM 的 `class_weight` 参数在多分类中可能效果不佳，应改用 `scale_pos_weight` 或通过 `sample_weight` 处理，或者直接使用 `is_unbalance=True` 参数。
+   - 模型参数可以进一步调优：增加正则化强度、调整学习率和树深度以更好地适应小样本数据。
+
+2. 具体修改的函数和参数：
+   - `preprocess()`: 只删除 `Person ID`，保留所有数值特征；血压拆解逻辑保持不变。
+   - `feature_engineering()`: 将 `ColumnTransformer` 保存到 `PREPROCESS_STATE`，train 模式 fit_transform，test 模式 transform。
+   - `build_model()`: 移除 `class_weight='balanced'`，添加 `is_unbalance=True` 或使用 `scale_pos_weight`；调整超参数以提升 Macro F1。
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import re
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+
+# 全局变量：存储预处理状态（用于 test 模式）
+PREPROCESS_STATE = {
+    'id_cols': ['Person ID'],
+    'bp_col': 'Blood Pressure (systolic/diastolic)',
+    'target_col': 'Sleep Disorder',
+    'fitted': False,
+    'preprocessor': None  # 保存 ColumnTransformer
+}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    df = df.copy()
+    
+    # 1. 剔除真正的 ID 特征（Person ID 是唯一标识符，无预测价值）
+    id_cols = PREPROCESS_STATE.get('id_cols', ['Person ID'])
+    existing_id_cols = [c for c in id_cols if c in df.columns]
+    if existing_id_cols:
+        df = df.drop(columns=existing_id_cols)
+    
+    # 2. 拆解血压特征 'Blood Pressure (systolic/diastolic)' → 'Systolic BP', 'Diastolic BP'
+    bp_col = PREPROCESS_STATE['bp_col']
+    if bp_col in df.columns:
+        bp_split = df[bp_col].str.split('/', expand=True)
+        df['Systolic BP'] = pd.to_numeric(bp_split[0], errors='coerce')
+        df['Diastolic BP'] = pd.to_numeric(bp_split[1], errors='coerce')
+        df = df.drop(columns=[bp_col])
+    
+    # 3. 处理缺失值
+    target_col = PREPROCESS_STATE['target_col']
+    num_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    if target_col in num_cols:
+        num_cols.remove(target_col)
+    if target_col in cat_cols:
+        cat_cols.remove(target_col)
+    
+    for col in num_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+    for col in cat_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Unknown')
+    
+    if mode == 'train':
+        PREPROCESS_STATE['fitted'] = True
+    
+    return df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    
+    使用 ColumnTransformer 对类别特征编码、数值特征标准化。
+    train 模式：fit_transform 并保存预处理器到 PREPROCESS_STATE。
+    test 模式：使用已保存的预处理器 transform。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 分离 X
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    # 区分列类型
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    # 类别特征分组
+    gender_col = 'Gender' if 'Gender' in cat_cols else None
+    other_cat_cols = [c for c in cat_cols if c != gender_col]
+    
+    # 检查是否已有保存的预处理器（test 模式）
+    preprocessor = PREPROCESS_STATE.get('preprocessor', None)
+    
+    if preprocessor is None:
+        # train 模式：构建新的 ColumnTransformer
+        transformers = []
+        
+        if gender_col:
+            transformers.append(
+                ('gender', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+                ]), [gender_col])
+            )
+        
+        if other_cat_cols:
+            transformers.append(
+                ('cat', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+                ]), other_cat_cols)
+            )
+        
+        if num_cols:
+            transformers.append(
+                ('num', Pipeline([
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler())
+                ]), num_cols)
+            )
+        
+        preprocessor = ColumnTransformer(transformers, remainder='drop')
+        
+        # fit_transform
+        X_processed = preprocessor.fit_transform(X)
+        
+        # 保存预处理器到全局状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+    else:
+        # test 模式：使用已保存的预处理器
+        X_processed = preprocessor.transform(X)
+    
+    # 获取特征名
+    feature_names = []
+    for name, _, cols in preprocessor.transformers_:
+        if name == 'gender':
+            feature_names.append('Gender_encoded')
+        elif name == 'cat':
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            feature_names.extend(encoder.get_feature_names_out(other_cat_cols).tolist())
+        elif name == 'num':
+            feature_names.extend(cols)
+    
+    # 清洗特征名
+    feature_names = [re.sub(r'[^\w]', '_', str(c)) for c in feature_names]
+    
+    X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    
+    return X_processed
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    
+    使用 LightGBM 多分类器，针对小样本数据优化参数。
+    '''
+    model = LGBMClassifier(
+        objective='multiclass',
+        num_class=3,
+        metric='multi_logloss',
+        is_unbalance=True,        # 自动处理类别不平衡，比 class_weight 更适合小样本
+        max_depth=4,              # 限制深度防止过拟合
+        num_leaves=15,            # 减少叶子数，配合小样本
+        learning_rate=0.05,       # 适当提高学习率，减少迭代次数
+        n_estimators=500,         # 减少树数量，配合早停
+        subsample=0.7,            # 降低采样率增加随机性
+        colsample_bytree=0.7,
+        min_child_samples=10,     # 增加最小样本数防止过拟合
+        min_split_gain=0.01,      # 降低分裂增益阈值
+        reg_alpha=0.5,            # L1 正则化
+        reg_lambda=0.5,           # L2 正则化
+        random_state=42,
+        verbose=-1,
+    )
+    
+    return model
+```
+</code>
+[Evaluation Agent] 评估结果
+{
+  "decision": "AUTO_OPTIMIZE",
+  "score": 42.5,
+  "method_summary": "本轮使用LightGBM+ColumnTransformer，验证准确率0.625，Macro F1仅0.326，严重欠拟合且类别不平衡未有效解决。",
+  "suggestions_for_coding_agent": "当前Macro F1极低，主要原因是类别不平衡严重且模型未充分学习。建议：1) 检查类别分布，若严重不平衡，尝试使用SMOTE过采样或调整class_weight参数；2) 增加树深度（max_depth从默认值提升至6~10），并增加迭代轮数（n_estimators至200~300）；3) 尝试使用XGBoost替代LightGBM，并设置scale_pos_weight或sample_weight；4) 确保eval_set正确传入以利用early_stopping防止过拟合。",
+  "report_to_user": null,
+  "evaluation_analysis": "验证准确率0.625尚可，但Macro F1仅0.326，表明模型对少数类预测能力极差，类别不平衡问题严重。LightGBM的is_unbalance参数可能未充分缓解不平衡，且默认树深度过浅导致欠拟合。需针对性优化。",
+  "dimension_scores": [
+    {"name": "metric_performance", "score": 30, "weight": 0.30, "reason": "Macro F1仅0.326，远低于及格线"},
+    {"name": "overfit_control", "score": 70, "weight": 0.25, "reason": "训练与验证差距不大"},
+    {"name": "algorithm_choice", "score": 60, "weight": 0.20, "reason": "LightGBM适合但参数未调优"},
+    {"name": "code_completeness", "score": 75, "weight": 0.15, "reason": "流程完整但缺少过采样"},
+    {"name": "task_alignment", "score": 50, "weight": 0.10, "reason": "未针对Macro F1优化"}
+  ]
+}
+[WARN] 新 preprocess 存在不安全的 PREPROCESS_STATE 读取，保留旧版本
+[Plan & Coding Agent] 第 2 轮优化代码
+<plan>
+优化策略：
+1. 基于上一轮代码的改进点：
+   - 上一轮代码在 `preprocess()` 中错误地将 `Sleep Duration (hours)`、`Quality of Sleep (scale: 1-10)`、`Physical Activity Level (minutes/day)`、`Stress Level (scale: 1-10)`、`Heart Rate (bpm)`、`Daily Steps` 这些数值特征当作 ID 列删除了，导致模型丢失了最重要的预测特征。
+   - 只有 `Person ID` 是真正的 ID 列（唯一值=样本数），其他列虽然唯一值多但都是有效的数值特征，应该保留。
+   - 需要修复 `preprocess()` 中的 ID 列判断逻辑，只删除 `Person ID`。
+   - `feature_engineering()` 和 `build_model()` 保持不变。
+2. 具体修改的函数和参数：
+   - 只修改 `preprocess()` 函数中的 `id_cols` 列表，将 `Person ID` 以外的列移除。
+   - 其他函数原样保留。
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+import re
+
+# 全局变量：存储预处理状态（用于 test 模式）
+PREPROCESS_STATE = {
+    'id_cols': None,
+    'bp_col': 'Blood Pressure (systolic/diastolic)',
+    'target_col': 'Sleep Disorder',
+    'fitted': False
+}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    df = df.copy()
+    
+    # 1. 剔除疑似ID特征（只有 Person ID 是真正的 ID 列）
+    id_cols = ['Person ID']
+    # 只删除存在的列（test 模式下列可能已不存在）
+    existing_id_cols = [c for c in id_cols if c in df.columns]
+    if existing_id_cols:
+        df = df.drop(columns=existing_id_cols)
+    
+    # 2. 拆解血压特征 'Blood Pressure (systolic/diastolic)' → 'Systolic BP', 'Diastolic BP'
+    bp_col = PREPROCESS_STATE['bp_col']
+    if bp_col in df.columns:
+        # 拆解字符串 '129/75' → 两个数值
+        bp_split = df[bp_col].str.split('/', expand=True)
+        df['Systolic BP'] = pd.to_numeric(bp_split[0], errors='coerce')
+        df['Diastolic BP'] = pd.to_numeric(bp_split[1], errors='coerce')
+        # 删除原列
+        df = df.drop(columns=[bp_col])
+    
+    # 3. 检查并处理缺失值（当前无缺失，但保留检查逻辑）
+    # 数值列用 median 填充，类别列用 most_frequent 填充
+    num_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    # 排除目标列
+    target_col = PREPROCESS_STATE['target_col']
+    if target_col in num_cols:
+        num_cols.remove(target_col)
+    if target_col in cat_cols:
+        cat_cols.remove(target_col)
+    
+    for col in num_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+    for col in cat_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Unknown')
+    
+    # 4. 确认目标列存在（train/validation 模式），test 模式可能没有
+    # 不做任何编码，保留原始标签（系统会自动处理）
+    
+    if mode == 'train':
+        PREPROCESS_STATE['fitted'] = True
+    
+    return df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    
+    使用 ColumnTransformer 对类别特征编码、数值特征标准化。
+    train 模式：fit_transform 并保存预处理器到 PREPROCESS_STATE。
+    test 模式：使用已保存的预处理器 transform。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 分离 X
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    # 区分列类型
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    # 类别特征分组
+    gender_col = 'Gender' if 'Gender' in cat_cols else None
+    other_cat_cols = [c for c in cat_cols if c != gender_col]
+    
+    # 检查是否已有保存的预处理器（test 模式）
+    preprocessor = PREPROCESS_STATE.get('preprocessor', None)
+    
+    if preprocessor is None:
+        # train 模式：构建新的 ColumnTransformer
+        transformers = []
+        
+        if gender_col:
+            transformers.append(
+                ('gender', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+                ]), [gender_col])
+            )
+        
+        if other_cat_cols:
+            transformers.append(
+                ('cat', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+                ]), other_cat_cols)
+            )
+        
+        if num_cols:
+            transformers.append(
+                ('num', Pipeline([
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler())
+                ]), num_cols)
+            )
+        
+        preprocessor = ColumnTransformer(transformers, remainder='drop')
+        
+        # fit_transform
+        X_processed = preprocessor.fit_transform(X)
+        
+        # 保存预处理器到全局状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+    else:
+        # test 模式：使用已保存的预处理器
+        X_processed = preprocessor.transform(X)
+    
+    # 获取特征名
+    feature_names = []
+    for name, _, cols in preprocessor.transformers_:
+        if name == 'gender':
+            feature_names.append('Gender_encoded')
+        elif name == 'cat':
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            feature_names.extend(encoder.get_feature_names_out(other_cat_cols).tolist())
+        elif name == 'num':
+            feature_names.extend(cols)
+    
+    # 清洗特征名
+    feature_names = [re.sub(r'[^\w]', '_', str(c)) for c in feature_names]
+    
+    X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    
+    return X_processed
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    
+    使用 LightGBM 多分类器，针对小样本数据优化参数。
+    '''
+    model = LGBMClassifier(
+        objective='multiclass',
+        num_class=3,
+        metric='multi_logloss',
+        is_unbalance=True,        # 自动处理类别不平衡，比 class_weight 更适合小样本
+        max_depth=4,              # 限制深度防止过拟合
+        num_leaves=15,            # 减少叶子数，配合小样本
+        learning_rate=0.05,       # 适当提高学习率，减少迭代次数
+        n_estimators=500,         # 减少树数量，配合早停
+        subsample=0.7,            # 降低采样率增加随机性
+        colsample_bytree=0.7,
+        min_child_samples=10,     # 增加最小样本数防止过拟合
+        min_split_gain=0.01,      # 降低分裂增益阈值
+        reg_alpha=0.5,            # L1 正则化
+        reg_lambda=0.5,           # L2 正则化
+        random_state=42,
+        verbose=-1,
+    )
+    
+    return model
+```
+</code>
+[Evaluation Agent] 评估结果
+{
+  "decision": "AUTO_OPTIMIZE",
+  "score": 42.0,
+  "method_summary": "本轮使用LightGBM+ColumnTransformer，验证准确率0.625，Macro F1仅0.326，严重欠拟合且类别不平衡未有效解决。",
+  "suggestions_for_coding_agent": "当前Macro F1极低，主要原因是类别不平衡严重且模型未充分学习。建议：1) 检查类别分布，若严重不平衡，尝试使用SMOTE过采样或调整class_weight参数；2) 增加树深度（max_depth=6~10）和叶子节点数（num_leaves=31~50）；3) 尝试使用XGBoost并设置scale_pos_weight或sample_weight；4) 若数据量小，考虑使用随机森林或增加迭代次数。",
+  "report_to_user": null,
+  "evaluation_analysis": "验证准确率0.625，但Macro F1仅0.326，表明模型对少数类预测极差，类别不平衡问题未解决。LightGBM的is_unbalance=True可能未充分生效，或树深度过浅导致欠拟合。历史两轮均未改善，需换用更强的不平衡处理策略。",
+  "dimension_scores": [
+    {"name": "metric_performance", "score": 20, "weight": 0.30, "reason": "Macro F1仅0.326，远低于及格线"},
+    {"name": "overfit_control", "score": 70, "weight": 0.25, "reason": "训练与验证差距不大，但均差"},
+    {"name": "algorithm_choice", "score": 50, "weight": 0.20, "reason": "LightGBM适合但参数未调优"},
+    {"name": "code_completeness", "score": 75, "weight": 0.15, "reason": "流程完整，含预处理和eval_set"},
+    {"name": "task_alignment", "score": 60, "weight": 0.10, "reason": "匹配多分类任务但效果差"}
+  ]
+}
+[WARN] 新 preprocess 存在不安全的 PREPROCESS_STATE 读取，保留旧版本
+[Plan & Coding Agent] 第 3 轮优化代码
+<plan>
+优化策略：
+1. 基于上一轮代码的改进点：
+   - 上一轮代码在 `preprocess()` 中错误地将 `Sleep Duration (hours)`、`Quality of Sleep (scale: 1-10)`、`Physical Activity Level (minutes/day)`、`Stress Level (scale: 1-10)`、`Heart Rate (bpm)`、`Daily Steps` 这些数值特征当作 ID 列删除了，导致模型丢失了大量重要特征。
+   - 这些列虽然 `uniqueCount` 等于样本数，但它们是连续数值特征（float64），不是真正的 ID 列。真正的 ID 列只有 `Person ID`（字符串类型，唯一值=样本数）。
+   - 修复后，只删除 `Person ID`，保留所有数值特征。
+   - 同时优化 LightGBM 参数：由于特征数量增加（从约10个增加到约20+个），适当调整模型复杂度。
+2. 具体修改的函数和参数：
+   - `preprocess()`: 修改 `id_cols` 列表，只保留 `Person ID`，移除所有数值特征列。
+   - `feature_engineering()`: 保持不变（上一轮代码无错误）。
+   - `build_model()`: 微调参数，增加 `num_leaves` 到 31（特征增多后需要更多叶子节点），增加 `n_estimators` 到 1000（配合早停），降低 `min_child_samples` 到 5（样本量小，允许更细粒度分裂）。
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import re
+
+# 全局变量：存储预处理状态（用于 test 模式）
+PREPROCESS_STATE = {
+    'id_cols': None,
+    'bp_col': 'Blood Pressure (systolic/diastolic)',
+    'target_col': 'Sleep Disorder',
+    'fitted': False
+}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    df = df.copy()
+    
+    # 1. 剔除真正的ID特征（Person ID 是字符串类型，唯一值=样本数，属于噪声）
+    # 注意：Sleep Duration、Quality of Sleep 等虽然是唯一值但它们是连续数值特征，不能删除
+    id_cols = ['Person ID']
+    # 只删除存在的列（test 模式下列可能已不存在）
+    existing_id_cols = [c for c in id_cols if c in df.columns]
+    if existing_id_cols:
+        df = df.drop(columns=existing_id_cols)
+    
+    # 2. 拆解血压特征 'Blood Pressure (systolic/diastolic)' → 'Systolic BP', 'Diastolic BP'
+    bp_col = PREPROCESS_STATE['bp_col']
+    if bp_col in df.columns:
+        # 拆解字符串 '129/75' → 两个数值
+        bp_split = df[bp_col].str.split('/', expand=True)
+        df['Systolic BP'] = pd.to_numeric(bp_split[0], errors='coerce')
+        df['Diastolic BP'] = pd.to_numeric(bp_split[1], errors='coerce')
+        # 删除原列
+        df = df.drop(columns=[bp_col])
+    
+    # 3. 检查并处理缺失值（当前无缺失，但保留检查逻辑）
+    # 数值列用 median 填充，类别列用 most_frequent 填充
+    num_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    # 排除目标列
+    target_col = PREPROCESS_STATE['target_col']
+    if target_col in num_cols:
+        num_cols.remove(target_col)
+    if target_col in cat_cols:
+        cat_cols.remove(target_col)
+    
+    for col in num_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+    for col in cat_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Unknown')
+    
+    if mode == 'train':
+        PREPROCESS_STATE['fitted'] = True
+    
+    return df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    
+    使用 ColumnTransformer 对类别特征编码、数值特征标准化。
+    train 模式：fit_transform 并保存预处理器到 PREPROCESS_STATE。
+    test 模式：使用已保存的预处理器 transform。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 分离 X
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    # 区分列类型
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    # 类别特征分组
+    gender_col = 'Gender' if 'Gender' in cat_cols else None
+    other_cat_cols = [c for c in cat_cols if c != gender_col]
+    
+    # 检查是否已有保存的预处理器（test 模式）
+    preprocessor = PREPROCESS_STATE.get('preprocessor', None)
+    
+    if preprocessor is None:
+        # train 模式：构建新的 ColumnTransformer
+        transformers = []
+        
+        if gender_col:
+            transformers.append(
+                ('gender', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+                ]), [gender_col])
+            )
+        
+        if other_cat_cols:
+            transformers.append(
+                ('cat', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+                ]), other_cat_cols)
+            )
+        
+        if num_cols:
+            transformers.append(
+                ('num', Pipeline([
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler())
+                ]), num_cols)
+            )
+        
+        preprocessor = ColumnTransformer(transformers, remainder='drop')
+        
+        # fit_transform
+        X_processed = preprocessor.fit_transform(X)
+        
+        # 保存预处理器到全局状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+    else:
+        # test 模式：使用已保存的预处理器
+        X_processed = preprocessor.transform(X)
+    
+    # 获取特征名
+    feature_names = []
+    for name, _, cols in preprocessor.transformers_:
+        if name == 'gender':
+            feature_names.append('Gender_encoded')
+        elif name == 'cat':
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            feature_names.extend(encoder.get_feature_names_out(other_cat_cols).tolist())
+        elif name == 'num':
+            feature_names.extend(cols)
+    
+    # 清洗特征名
+    feature_names = [re.sub(r'[^\w]', '_', str(c)) for c in feature_names]
+    
+    X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    
+    return X_processed
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    
+    使用 LightGBM 多分类器，针对小样本数据优化参数。
+    特征数量约20+个（数值特征 + OneHot编码后的类别特征），适当增加模型容量。
+    '''
+    model = LGBMClassifier(
+        objective='multiclass',
+        num_class=3,
+        metric='multi_logloss',
+        is_unbalance=True,        # 自动处理类别不平衡
+        max_depth=5,              # 适当增加深度（特征增多后需要更多交互）
+        num_leaves=31,            # 增加叶子数，配合更多特征
+        learning_rate=0.03,       # 降低学习率，配合更多迭代
+        n_estimators=1000,        # 增加树数量，配合早停
+        subsample=0.7,            # 行采样
+        colsample_bytree=0.7,     # 列采样
+        min_child_samples=5,      # 小样本允许更细粒度分裂
+        min_split_gain=0.01,      # 分裂增益阈值
+        reg_alpha=0.5,            # L1 正则化
+        reg_lambda=0.5,           # L2 正则化
+        random_state=42,
+        verbose=-1,
+    )
+    
+    return model
+```
+</code>
+[Evaluation Agent] 评估结果
+{
+  "decision": "YIELD_TO_USER",
+  "score": 50.8,
+  "method_summary": "本轮使用LightGBM+ColumnTransformer，验证准确率0.625，Macro F1仅0.326，类别不平衡问题未解决，模型欠拟合严重。",
+  "suggestions_for_coding_agent": null,
+  "report_to_user": "您好！经过3轮自动优化，模型在验证集上的准确率为62.5%，但Macro F1分数仅为0.326，说明模型对少数类别的预测效果很差。主要原因是数据存在严重的类别不平衡，且模型未能有效学习少数类特征。由于已达到最大优化轮数，建议您手动尝试以下方向：1）检查数据类别分布，使用SMOTE过采样或调整class_weight参数；2）增加树深度或换用XGBoost；3）尝试特征工程或集成方法。",
+  "evaluation_analysis": "模型在3轮优化中Macro F1始终在0.33左右徘徊，准确率稳定在0.625，说明模型对多数类预测尚可，但完全忽略了少数类。LightGBM默认参数下欠拟合严重，且类别不平衡处理不足。由于优化轮数已满，无法继续自动调优。",
+  "dimension_scores": [
+    {"name": "metric_performance", "score": 30, "weight": 0.30, "reason": "Macro F1仅0.326，远低于及格线"},
+    {"name": "overfit_control", "score": 70, "weight": 0.25, "reason": "训练与验证差距不大，但整体偏低"},
+    {"name": "algorithm_choice", "score": 50, "weight": 0.20, "reason": "LightGBM适合但参数未调优"},
+    {"name": "code_completeness", "score": 75, "weight": 0.15, "reason": "流程完整，预处理规范"},
+    {"name": "task_alignment", "score": 40, "weight": 0.10, "reason": "未针对Macro F1优化"}
+  ]
+}
+[Plan & Coding Agent] 正在单独生成配套预测脚本 predict.py...
+[Plan & Coding Agent] predict.py 生成完成, 长度=5995
+[Plan & Coding Agent] 正在调用 LLM 生成产物代码...
+[Plan & Coding Agent] 产物代码生成完成, 长度=19698
+[FastEngine] 正在沙箱中执行产物代码（允许文件写入）...
+[ERROR] 产物代码执行失败 (第1次):
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_myn3h0fn\script.py", line 305, in <module>
+    cm = confusion_matrix(y_train_labels, train_preds_labels)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_param_validation.py", line 218, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\metrics\_classification.py", line 565, in confusion_matrix
+    labels = unique_labels(y_true, y_pred)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\multiclass.py", line 117, in unique_labels
+    raise ValueError("Mix of label input types (string and number)")
+ValueError: Mix of label input types (string and number)
+
+[FastEngine] 正在第 1 次修复产物代码...
+[Plan & Coding Agent] 产物代码修复完成, 长度=21884
+[FastEngine] 正在沙箱中执行产物代码（允许文件写入）...
+[ERROR] 产物代码执行失败 (第2次):
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_vzn11i11\script.py", line 391, in <module>
+    cm_html_rows += f'<tr><td><b>{class_names[i]}</b></td>' + ''.join(f'<td>{v}</td>' for v in row) + '</tr>'
+                                  ~~~~~~~~~~~^^^
+IndexError: list index out of range
+
+[FastEngine] 正在第 2 次修复产物代码...
+[Plan & Coding Agent] 产物代码修复完成, 长度=20588
+[FastEngine] 正在沙箱中执行产物代码（允许文件写入）...
+[ERROR] 产物代码执行失败 (第3次):
+[LightGBM] [Fatal] The number of features in data (3) is not the same as it was in training data (12).
+You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ix5lmdx5\script.py", line 185, in <module>
+    test_preds_encoded = model.predict(X_test_fe)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1597, in predict
+    result = self.predict_proba(
+             ^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1627, in predict_proba
+    result = super().predict(
+             ^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1144, in predict
+    return self._Booster.predict(  # type: ignore[union-attr]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 4767, in predict
+    return predictor.predict(
+           ^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 1204, in predict
+    preds, nrow = self.__pred_for_np2d(
+                  ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 1361, in __pred_for_np2d
+    return self.__inner_predict_np2d(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 1307, in __inner_predict_np2d
+    _safe_call(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 313, in _safe_call
+    raise LightGBMError(_LIB.LGBM_GetLastError().decode("utf-8"))
+lightgbm.basic.LightGBMError: The number of features in data (3) is not the same as it was in training data (12).
+You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.
+
+[FastEngine] 正在第 3 次修复产物代码...
+[Plan & Coding Agent] 产物代码修复完成, 长度=15941
+[FastEngine] 正在沙箱中执行产物代码（允许文件写入）...
+[FastEngine] 产物代码执行成功，正在解析产物...
+[FastEngine] 测试预测文件: 20 行, 列=['id', 'prediction', 'proba_Insomnia', 'proba_No Disorder', 'proba_Sleep Apnea']
+[FastEngine] 产物生成完成
+产物文件: ['feature_importance.csv', 'feature_importance.png', 'model.pkl', 'predict.py', 'report.html', 'report_fig.png', 'test_predictions.csv']
+[NOTE] 本次产物生成已跳过以下项目（数据集较大或生成超时）：Pipeline 代码。核心模型与指标已就绪。
+[FastEngine] 任务已完成

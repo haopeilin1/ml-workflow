@@ -1,0 +1,180 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于NASA翼型自噪声实验数据，构建回归模型预测不同工况下NACA 0012翼型的缩放声压级（SSPL）。输入特征包括频率、攻角、弦长、来流速度及吸力面位移厚度，输出为连续型声压级值。模型需学习气动参数与噪声水平的映射关系，实现精准预测。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 1202,
+  "col_count": 7,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 1202,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        799.0,
+        1349.0,
+        1428.0,
+        1150.0,
+        1100.0
+      ],
+      "min": 0.0,
+      "max": 1502.0,
+      "mean": 750.9292845257903,
+      "std": 436.5211566741454,
+      "median": 749.5,
+      "skewness": 0.00506053895200756,
+      "isMonotonic": false
+    },
+    {
+      "name": "f",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 21,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1000.0,
+        2000.0,
+        400.0,
+        400.0,
+        400.0
+      ],
+      "min": 200.0,
+      "max": 20000.0,
+      "mean": 2872.0382695507487,
+      "std": 3193.4617721407853,
+      "median": 1600.0,
+      "skewness": 2.2077759981155234
+    },
+    {
+      "name": "alpha",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 27,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        8.4,
+        6.7,
+        12.3,
+        17.4,
+        9.5
+      ],
+      "min": 0.0,
+      "max": 22.2,
+      "mean": 6.766222961730449,
+      "std": 5.836720065750422,
+      "median": 5.4,
+      "skewness": 0.6928550324099035
+    },
+    {
+      "name": "c",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 6,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0508,
+        0.1016,
+        0.1016,
+        0.0254,
+        0.0254
+      ],
+      "min": 0.0254,
+      "max": 0.3048,
+      "mean": 0.13756572379367718,
+      "std": 0.0934535815967257,
+      "median": 0.1016,
+      "skewness": 0.46372454459735873
+    },
+    {
+      "name": "U_infinity",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        71.3,
+        71.3,
+        55.5,
+        71.3,
+        31.7
+      ],
+      "min": 31.7,
+      "max": 71.3,
+      "mean": 51.30998336106489,
+      "std": 15.583769503549929,
+      "median": 55.5,
+      "skewness": 0.19386588174891098
+    },
+    {
+      "name": "delta",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 105,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.00529514,
+        0.00478288,
+        0.0368233,
+        0.016104,
+        0.00461377
+      ],
+      "min": 0.000400682,
+      "max": 0.0584113,
+      "mean": 0.011079245730449251,
+      "std": 0.013024109350877238,
+      "median": 0.00495741,
+      "skewness": 1.7163799982259322
+    },
+    {
+      "name": "SSPL",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1166,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        129.946,
+        134.568,
+        136.414,
+        117.396,
+        124.756
+      ],
+      "min": 103.38,
+      "max": 140.987,
+      "mean": 124.87696006655574,
+      "std": 6.852350759967073,
+      "median": 125.81649999999999,
+      "skewness": -0.4065456268748266
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

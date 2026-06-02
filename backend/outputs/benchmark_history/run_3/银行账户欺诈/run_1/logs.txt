@@ -1,0 +1,1765 @@
+[Plan & Coding Agent] 生成初始基线代码
+=== 建模计划 ===
+============================================================
+【结构化建模计划】
+============================================================
+
+【任务分析】
+  task_type: binary_classification
+  primary_metric: ROC-AUC
+  secondary_metrics: ['Average Precision (AP)', 'Recall at high precision']
+  dataset_size: 40000行
+  class_balance: 极度不平衡 (正例占1.14%，不平衡比86.34)
+  time_series: False
+  key_features: 信用评分(credit_risk_score)、收入(income)、地址稳定性(prev_address_months_count, current_address_months_count)、设备信息(device_os, device_distinct_emails_8w)、行为速度(velocity_6h, velocity_24h, velocity_4w)
+  data_quality_issues: ['多个特征存在-1缺失标记', '多个特征高度右偏(偏度>3)', 'device_fraud_count和month为常数零值', '多个疑似ID列(高基数浮点特征)']
+
+【核心挑战】
+  1. 极度类别不平衡：正例仅占1.14%（约456条），负例占98.86%（约39544条）。如果不采用专门的不平衡处理策略，模型会倾向于将所有样本预测为负类，导致ROC-AUC虚高但实际无预测能力。
+  2. 缺失值标记混淆：prev_address_months_count、current_address_months_count、bank_months_count、session_length_in_minutes、device_distinct_emails_8w等特征中存在-1值，这些是缺失标记而非有效数值。如果不处理，模型会学习到'-1'这个虚假模式，导致泛化能力下降。
+  3. 高基数疑似ID特征：name_email_similarity、days_since_request、intended_balcon_amount、velocity_6h/24h/4w、session_length_in_minutes等特征具有接近40000的唯一值，本质上是ID列。如果不剔除，模型会过拟合到这些噪声特征上。
+  4. 特征分布高度偏斜：prev_address_months_count(偏度3.74)、days_since_request(偏度11.03)、intended_balcon_amount(偏度2.26)、bank_branch_count_8w(偏度2.63)等特征严重右偏。如果不进行变换，树模型虽不受影响，但线性模型或嵌入层会受极端值主导。
+  5. 常数零值特征：device_fraud_count和month两列所有值均为0，完全不包含信息。如果不剔除，会增加维度噪声，对模型无任何贡献。
+  6. 评估指标单一风险：用户仅指定ROC-AUC作为评估指标。在极度不平衡场景下，ROC-AUC容易虚高（即使模型完全不预测正类，AUC也可能>0.5）。必须同时监控Average Precision(AP)和Recall来确保模型实际有效。
+
+【必须执行 (MUST DO) —— 后续代码必须逐项实现】
+  1. 【关键】剔除所有疑似ID特征：id、name_email_similarity、days_since_request、intended_balcon_amount、velocity_6h、velocity_24h、velocity_4w、session_length_in_minutes
+     原因: 这些特征唯一值接近样本数（39985-40000），本质上是ID列。保留它们会导致模型严重过拟合，在测试集上泛化能力极差。
+  2. 【关键】剔除常数零值特征：device_fraud_count和month
+     原因: 这两列所有值均为0，不包含任何区分信息。保留它们只会增加特征维度噪声，对模型无贡献。
+  3. 【关键】将-1值识别为缺失标记并进行合理填充，而非视为有效数值
+     原因: prev_address_months_count、current_address_months_count、bank_months_count、session_length_in_minutes、device_distinct_emails_8w等特征中的-1是缺失标记。如果不处理，模型会错误学习到'-1'这个虚假模式，导致在真实缺失值场景下预测错误。
+  4. 对高度右偏的数值特征进行log1p变换：prev_address_months_count、days_since_request、intended_balcon_amount、bank_branch_count_8w、session_length_in_minutes
+     原因: 这些特征偏度>2，极端值会主导模型学习。log1p变换可以压缩极端值的影响，使分布更接近正态，提升模型稳定性。注意：days_since_request和intended_balcon_amount虽被标记为疑似ID，但若保留则必须变换。
+  5. 【关键】所有类别特征必须编码为数值形式：payment_type、employment_status、housing_status、source、device_os
+     原因: XGBoost和LightGBM虽然原生支持类别特征，但需要指定为category dtype或进行整数编码。直接传入字符串会导致编码错误或性能下降。
+  6. 【关键】在验证集上计算最优分类阈值（以F1或AP最优为准），并记录该阈值用于测试集预测
+     原因: 默认0.5阈值在极度不平衡场景下完全不适用（正类概率通常<0.1）。必须在验证集上确定最优阈值，避免在测试集上调优导致数据泄露。
+  7. 【关键】除ROC-AUC外，必须同时计算Average Precision(AP)和混淆矩阵来评估模型实际效果
+     原因: 用户仅指定ROC-AUC，但极度不平衡下AUC容易虚高。AP能反映模型在低假正例率下的表现，混淆矩阵能确保正类Recall>0。如果AP<0.1或Recall=0，说明模型实际无效。
+
+【必须避免 (AVOID) —— 代码中严禁出现】
+  1. 使用默认0.5阈值直接预测
+     原因: 极度不平衡下正类概率通常远低于0.5，使用0.5阈值会导致所有样本被预测为负类，Recall=0，模型完全失效。
+  2. 对树模型（XGBoost/LightGBM）使用class_weight='balanced'
+     原因: 知识库明确指出这会损害AUC。树模型应使用scale_pos_weight参数来控制正负类权重，而非class_weight。
+  3. 使用简单复制过采样（如RandomOverSampler）
+     原因: 简单复制正类样本不会增加信息量，只会增加训练时间，对模型提升无效。
+  4. 使用下采样（如RandomUnderSampler）
+     原因: 下采样会丢失大量负类信息，虽然AUC可能升高，但Precision会崩溃，实际部署效果极差。
+  5. 在测试集上调优阈值或超参数
+     原因: 所有调优必须在验证集上完成，在测试集上调优会导致数据泄露，评估结果不可信。
+  6. 对类别特征使用One-Hot编码
+     原因: 类别特征基数低（2-7个类别），One-Hot编码会引入稀疏性。XGBoost/LightGBM原生支持类别特征，使用Label Encoding或Ordinal Encoding即可。
+  7. 对所有缺失值使用统一的填充策略（如全部fillna(0)）
+     原因: 不同特征的缺失含义不同（如-1表示未知，0表示无），统一填充会丢失信息。应根据特征语义分别处理。
+  8. 使用线性模型（如Logistic Regression）作为主要模型
+     原因: 数据包含非线性关系和交互效应，线性模型表达能力不足。树模型（XGBoost/LightGBM）更适合此类任务。
+
+【Pipeline 计划】
+  ▶ 数据预处理
+    - 剔除疑似ID特征：id, name_email_similarity, days_since_request, intended_balcon_amount, velocity_6h, velocity_24h, velocity_4w, session_length_in_minutes
+    - 剔除常数零值特征：device_fraud_count, month
+    - 将-1值识别为缺失标记：对prev_address_months_count、current_address_months_count、bank_months_count、session_length_in_minutes、device_distinct_emails_8w中的-1替换为NaN
+    - 对缺失值进行合理填充：数值特征用中位数填充，类别特征用众数填充
+    - 对高度右偏特征进行log1p变换：prev_address_months_count, bank_branch_count_8w（注意：days_since_request和intended_balcon_amount已被剔除）
+    - 对类别特征进行Label Encoding：payment_type, employment_status, housing_status, source, device_os
+  ▶ 特征工程
+    - 创建交叉特征：考虑device_os与source的组合、housing_status与employment_status的组合
+    - 创建比率特征：velocity_6h/velocity_24h比率、velocity_24h/velocity_4w比率
+    - 创建聚合特征：按zip_count_4w分组计算credit_risk_score的均值
+    - 对二值特征（email_is_free, phone_home_valid, phone_mobile_valid, has_other_cards, foreign_request, keep_alive_session）保持原样，无需额外处理
+  ▶ 模型训练
+    - 选择XGBoost作为主要模型，设置scale_pos_weight=86.34（负类数/正类数）
+    - 设置初始超参数：learning_rate=0.05, max_depth=4, subsample=0.8, colsample_bytree=0.8, n_estimators=500
+    - 使用早停法（early_stopping_rounds=50）在验证集上监控ROC-AUC，防止过拟合
+    - 训练LightGBM作为对比模型，同样设置scale_pos_weight=86.34
+    - 记录训练过程中的验证集ROC-AUC和AP曲线
+  ▶ 验证与调优
+    - 在验证集上计算不同阈值下的F1和AP，选择最优阈值（非0.5）
+    - 使用Optuna或GridSearch对关键超参数进行调优：max_depth, learning_rate, subsample, colsample_bytree, min_child_weight
+    - 调优目标：最大化验证集ROC-AUC，同时监控AP确保>0.1
+    - 检查混淆矩阵：确保正类Recall>0，避免模型完全忽略正类
+    - 对比XGBoost和LightGBM在验证集上的表现，选择最优模型
+    - 在测试集上进行最终评估，报告ROC-AUC、AP、最优阈值下的混淆矩阵
+
+【模型选择】XGBoost
+【选择理由】选择XGBoost作为主要模型，原因：(1)树模型能自动处理非线性关系和特征交互，适合欺诈检测场景；(2)XGBoost的scale_pos_weight参数能有效处理不平衡问题；(3)XGBoost对缺失值有原生支持，无需额外填充；(4)相比LightGBM，XGBoost在小数据集（4万条）上更稳定，不易过拟合。关键超参设定：max_depth=4防止过拟合，learning_rate=0.05配合500棵树确保充分学习，scale_pos_weight=86.34平衡正负类权重。
+
+【预期表现】验证集ROC-AUC > 0.85，Average Precision > 0.15，最优阈值下正类Recall > 0.4
+
+【风险预判】
+  ⚠ 风险1：即使ROC-AUC较高（>0.9），AP可能仍然很低（<0.1），说明模型在高精度区域表现差。必须同时监控AP，如果AP过低则需要重新调整策略。
+  ⚠ 风险2：scale_pos_weight设置过大（86.34）可能导致模型过度关注正类，产生大量假正例。需要通过验证集监控Precision-Recall曲线来平衡。
+  ⚠ 风险3：特征工程中创建的交叉特征可能引入噪声，导致过拟合。需要通过特征重要性分析来筛选有效特征。
+  ⚠ 风险4：验证集和测试集分布不一致（如时间漂移），导致验证集上的最优阈值在测试集上失效。需要检查训练/验证/测试集的目标分布是否一致。
+============================================================
+
+============================================================
+【Coding Agent 实现计划】
+============================================================
+基于结构化计划，我将在代码中实现以下关键点：
+
+**Must-Do 实现：**
+1. **剔除疑似ID特征**：在 `preprocess()` 中删除 id, name_email_similarity, days_since_request, intended_balcon_amount, velocity_6h, velocity_24h, velocity_4w, session_length_in_minutes
+2. **剔除常数零值特征**：删除 device_fraud_count 和 month
+3. **-1值处理**：将 prev_address_months_count, current_address_months_count, bank_months_count, device_distinct_emails_8w 中的 -1 替换为 NaN，然后用中位数填充
+4. **log1p变换**：对 prev_address_months_count 和 bank_branch_count_8w 做 log1p 变换（days_since_request 和 intended_balcon_amount 已被剔除）
+5. **类别特征编码**：payment_type, employment_status, housing_status, source, device_os 使用 OrdinalEncoder（避免One-Hot编码）
+6. **最优阈值**：在 `evaluate_model()` 中计算最优阈值（以F1最优为准），并返回 AP 和混淆矩阵指标
+7. **scale_pos_weight=86.34**：在 `build_model()` 中设置
+
+**Avoid 规避：**
+1. 不使用默认0.5阈值 → 在 evaluate_model 中计算最优阈值
+2. 不使用 class_weight='balanced' → 使用 scale_pos_weight
+3. 不使用 RandomOverSampler/RandomUnderSampler
+4. 不在测试集上调优
+5. 不对类别特征使用 One-Hot 编码 → 使用 OrdinalEncoder
+6. 不使用统一填充策略 → 分别处理-1标记和真实缺失值
+7. 不使用线性模型 → 使用 XGBoost
+
+**特征工程实现：**
+- 交叉特征：device_os × source, housing_status × employment_status
+- 比率特征：velocity 已被剔除，跳过
+- 聚合特征：按 zip_count_4w 分组计算 credit_risk_score 的均值
+- 二值特征保持原样
+
+**Pipeline 注意事项：**
+- 使用 ColumnTransformer + OrdinalEncoder 处理类别特征
+- 使用 SimpleImputer 处理缺失值
+- 使用 FunctionTransformer 做 log1p 变换
+- 所有操作在 Pipeline 内完成，避免列丢失问题
+=== LLM 原始响应 ===
+<plan>
+基于结构化计划，我将在代码中实现以下关键点：
+
+**Must-Do 实现：**
+1. **剔除疑似ID特征**：在 `preprocess()` 中删除 id, name_email_similarity, days_since_request, intended_balcon_amount, velocity_6h, velocity_24h, velocity_4w, session_length_in_minutes
+2. **剔除常数零值特征**：删除 device_fraud_count 和 month
+3. **-1值处理**：将 prev_address_months_count, current_address_months_count, bank_months_count, device_distinct_emails_8w 中的 -1 替换为 NaN，然后用中位数填充
+4. **log1p变换**：对 prev_address_months_count 和 bank_branch_count_8w 做 log1p 变换（days_since_request 和 intended_balcon_amount 已被剔除）
+5. **类别特征编码**：payment_type, employment_status, housing_status, source, device_os 使用 OrdinalEncoder（避免One-Hot编码）
+6. **最优阈值**：在 `evaluate_model()` 中计算最优阈值（以F1最优为准），并返回 AP 和混淆矩阵指标
+7. **scale_pos_weight=86.34**：在 `build_model()` 中设置
+
+**Avoid 规避：**
+1. 不使用默认0.5阈值 → 在 evaluate_model 中计算最优阈值
+2. 不使用 class_weight='balanced' → 使用 scale_pos_weight
+3. 不使用 RandomOverSampler/RandomUnderSampler
+4. 不在测试集上调优
+5. 不对类别特征使用 One-Hot 编码 → 使用 OrdinalEncoder
+6. 不使用统一填充策略 → 分别处理-1标记和真实缺失值
+7. 不使用线性模型 → 使用 XGBoost
+
+**特征工程实现：**
+- 交叉特征：device_os × source, housing_status × employment_status
+- 比率特征：velocity 已被剔除，跳过
+- 聚合特征：按 zip_count_4w 分组计算 credit_risk_score 的均值
+- 二值特征保持原样
+
+**Pipeline 注意事项：**
+- 使用 ColumnTransformer + OrdinalEncoder 处理类别特征
+- 使用 SimpleImputer 处理缺失值
+- 使用 FunctionTransformer 做 log1p 变换
+- 所有操作在 Pipeline 内完成，避免列丢失问题
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import f1_score, average_precision_score, confusion_matrix, roc_auc_score
+import xgboost as xgb
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# 全局状态：存储预处理阶段拟合的参数
+PREPROCESS_STATE = {
+    'cat_cols': None,
+    'num_cols': None,
+    'log_cols': None,
+    'drop_cols': None,
+    'target_col': 'fraud_bool',
+    'preprocessor': None,
+    'zip_credit_risk_mean': None,  # 存储按zip_count_4w分组的credit_risk_score均值
+}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 1. 剔除疑似ID特征和常数零值特征
+    drop_cols = [
+        'id', 'name_email_similarity', 'days_since_request',
+        'intended_balcon_amount', 'velocity_6h', 'velocity_24h',
+        'velocity_4w', 'session_length_in_minutes',
+        'device_fraud_count', 'month'
+    ]
+    PREPROCESS_STATE['drop_cols'] = drop_cols
+    
+    # 安全删除：只删除存在的列
+    existing_drop_cols = [c for c in drop_cols if c in df.columns]
+    df = df.drop(columns=existing_drop_cols, errors='ignore')
+    
+    # 2. 将-1值识别为缺失标记，替换为NaN
+    neg_one_cols = [
+        'prev_address_months_count', 'current_address_months_count',
+        'bank_months_count', 'device_distinct_emails_8w'
+    ]
+    for col in neg_one_cols:
+        if col in df.columns:
+            df[col] = df[col].replace(-1, np.nan)
+    
+    # 3. 区分列类型
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    # 排除目标列
+    cat_cols = [c for c in cat_cols if c != target_col]
+    num_cols = df.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    num_cols = [c for c in num_cols if c != target_col]
+    
+    PREPROCESS_STATE['cat_cols'] = cat_cols
+    PREPROCESS_STATE['num_cols'] = num_cols
+    
+    # 4. 确定需要log1p变换的列（高度右偏特征）
+    log_cols = ['prev_address_months_count', 'bank_branch_count_8w']
+    log_cols = [c for c in log_cols if c in num_cols]
+    PREPROCESS_STATE['log_cols'] = log_cols
+    
+    # 5. 构建预处理Pipeline
+    if mode == 'train':
+        # 类别特征处理：填充众数 + OrdinalEncoder
+        cat_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+        ])
+        
+        # 数值特征处理：填充中位数 + StandardScaler
+        num_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        preprocessor = ColumnTransformer([
+            ('cat', cat_pipeline, cat_cols),
+            ('num', num_pipeline, num_cols)
+        ], remainder='passthrough')
+        
+        # 分离特征和目标
+        X = df.drop(columns=[target_col], errors='ignore')
+        y = df[target_col] if target_col in df.columns else None
+        
+        # 拟合预处理器
+        X_processed = preprocessor.fit_transform(X)
+        
+        # 重建DataFrame（ColumnTransformer返回numpy array）
+        # 获取特征名
+        cat_feature_names = cat_cols
+        num_feature_names = num_cols
+        all_feature_names = cat_feature_names + num_feature_names
+        
+        X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+        
+        # 对log_cols做log1p变换（在StandardScaler之后，需要先还原再变换？不，计划要求对原始值做log1p）
+        # 实际上log1p应该在StandardScaler之前做。这里我们在Pipeline外单独处理。
+        # 重新设计：先做log1p变换，再做StandardScaler
+        # 因此需要重新构建Pipeline
+        
+        # 重新构建：先对log_cols做log1p，再整体做StandardScaler
+        def log1p_transform(X):
+            X = X.copy()
+            for col in log_cols:
+                if col in X.columns:
+                    # 确保非负（log1p要求输入 >= -1，我们已经将-1替换为NaN并填充了中位数）
+                    X[col] = np.log1p(X[col].clip(lower=0))
+            return X
+        
+        log_transformer = FunctionTransformer(log1p_transform, validate=False)
+        
+        # 数值Pipeline：填充中位数 -> log1p变换 -> StandardScaler
+        num_pipeline_v2 = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('log1p', log_transformer),
+            ('scaler', StandardScaler())
+        ])
+        
+        preprocessor_v2 = ColumnTransformer([
+            ('cat', cat_pipeline, cat_cols),
+            ('num', num_pipeline_v2, num_cols)
+        ], remainder='passthrough')
+        
+        X_processed_v2 = preprocessor_v2.fit_transform(X)
+        X_df = pd.DataFrame(X_processed_v2, index=X.index, columns=all_feature_names)
+        
+        # 保存预处理器
+        PREPROCESS_STATE['preprocessor'] = preprocessor_v2
+        
+        # 将目标列加回
+        if y is not None:
+            X_df[target_col] = y.values
+        
+        return X_df
+    
+    else:
+        # mode='test'：应用已保存的预处理器
+        preprocessor = PREPROCESS_STATE.get('preprocessor')
+        if preprocessor is None:
+            raise ValueError("Preprocessor not fitted. Run preprocess with mode='train' first.")
+        
+        X = df.drop(columns=[target_col], errors='ignore')
+        y = df[target_col] if target_col in df.columns else None
+        
+        X_processed = preprocessor.transform(X)
+        
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        all_feature_names = cat_cols + num_cols
+        
+        X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+        
+        if y is not None:
+            X_df[target_col] = y.values
+        
+        return X_df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 分离特征和目标
+    X = df.drop(columns=[target_col], errors='ignore')
+    y = df[target_col] if target_col in df.columns else None
+    
+    # 确保所有列名是字符串且不含特殊字符
+    X.columns = [str(c).replace(' ', '_').replace('(', '').replace(')', '').replace('/', '_') for c in X.columns]
+    
+    # 1. 创建交叉特征：device_os × source, housing_status × employment_status
+    # 注意：这些列已经被OrdinalEncoder编码为数值，列名保持不变
+    cat_cols = PREPROCESS_STATE.get('cat_cols', [])
+    
+    # device_os 和 source 的交叉
+    if 'device_os' in X.columns and 'source' in X.columns:
+        X['device_os_x_source'] = X['device_os'].astype(str) + '_' + X['source'].astype(str)
+        # 对交叉特征做Label Encoding（简单映射）
+        cross_map = {val: idx for idx, val in enumerate(X['device_os_x_source'].unique())}
+        X['device_os_x_source'] = X['device_os_x_source'].map(cross_map)
+    
+    # housing_status 和 employment_status 的交叉
+    if 'housing_status' in X.columns and 'employment_status' in X.columns:
+        X['housing_x_employment'] = X['housing_status'].astype(str) + '_' + X['employment_status'].astype(str)
+        cross_map = {val: idx for idx, val in enumerate(X['housing_x_employment'].unique())}
+        X['housing_x_employment'] = X['housing_x_employment'].map(cross_map)
+    
+    # 2. 创建聚合特征：按zip_count_4w分组计算credit_risk_score的均值
+    # 注意：zip_count_4w和credit_risk_score都已被StandardScaler缩放
+    # 但聚合特征仍然有意义（相对排序不变）
+    if 'zip_count_4w' in X.columns and 'credit_risk_score' in X.columns:
+        # 使用分位数分箱来模拟分组（因为zip_count_4w已被缩放）
+        # 更好的做法：在preprocess中保留原始值。这里用分位数近似。
+        try:
+            zip_bins = pd.qcut(X['zip_count_4w'], q=20, labels=False, duplicates='drop')
+            zip_mean = X.groupby(zip_bins)['credit_risk_score'].transform('mean')
+            X['zip_credit_risk_mean'] = zip_mean
+        except Exception:
+            # 如果分箱失败（如唯一值太少），跳过
+            pass
+    
+    # 3. 二值特征保持原样（email_is_free, phone_home_valid, phone_mobile_valid, has_other_cards, foreign_request, keep_alive_session）
+    # 这些特征已经在preprocess中被StandardScaler处理，无需额外操作
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 填充任何剩余的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    '''
+    # 使用XGBoost，设置scale_pos_weight=86.34
+    scale_pos_weight = 86.34
+    
+    model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_estimators=500,
+        min_child_weight=1,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0,
+        use_label_encoder=False
+    )
+    
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    '''
+    自定义验证集评估指标。
+    在极度不平衡场景下，计算最优阈值（以F1最优为准），
+    并返回ROC-AUC、Average Precision、最优阈值下的F1和Recall。
+    '''
+    # 预测概率
+    y_proba = model.predict_proba(X_val)[:, 1]
+    
+    # ROC-AUC
+    roc_auc = roc_auc_score(y_val, y_proba)
+    
+    # Average Precision
+    ap = average_precision_score(y_val, y_proba)
+    
+    # 寻找最优阈值（以F1最优为准）
+    thresholds = np.linspace(0.01, 0.99, 99)
+    best_f1 = 0
+    best_threshold = 0.5
+    best_recall = 0
+    best_precision = 0
+    
+    for threshold in thresholds:
+        y_pred = (y_proba >= threshold).astype(int)
+        f1 = f1_score(y_val, y_pred, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+            y_pred_best = y_pred
+    
+    # 在最优阈值下计算指标
+    y_pred_best = (y_proba >= best_threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_val, y_pred_best).ravel()
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    
+    # 保存最优阈值到全局状态（供测试集预测使用）
+    PREPROCESS_STATE['best_threshold'] = best_threshold
+    
+    return {
+        'val_roc_auc': float(roc_auc),
+        'val_average_precision': float(ap),
+        'val_best_f1': float(best_f1),
+        'val_best_threshold': float(best_threshold),
+        'val_recall_at_best_threshold': float(recall),
+        'val_precision_at_best_threshold': float(precision),
+        'val_true_positives': int(tp),
+        'val_false_positives': int(fp),
+        'val_true_negatives': int(tn),
+        'val_false_negatives': int(fn)
+    }
+```
+</code>
+[ERROR] 初始代码执行失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ywl67n81\script.py", line 336, in <module>
+    train_clean = preprocess(train, mode='train')
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ywl67n81\script.py", line 145, in preprocess
+    X_processed_v2 = preprocessor_v2.fit_transform(X)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 999, in fit_transform
+    result = self._call_func_on_transformers(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 901, in _call_func_on_transformers
+    return Parallel(n_jobs=self.n_jobs)(jobs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 91, in __call__
+    return super().__call__(iterable_with_config_and_warning_filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1986, in __call__
+    return output if self.return_generator else list(output)
+                                                ^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1914, in _get_sequential_output
+    res = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 184, in __call__
+    return self.function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 677, in fit_transform
+    Xt = self._fit(X, y, routed_params)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 547, in _fit
+    X, fitted_transformer = fit_transform_one_cached(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\memory.py", line 326, in __call__
+    return self.func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 907, in fit_transform
+    return self.fit(X, **fit_params).transform(X)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 254, in transform
+    out = self._transform(X, func=self.func, kw_args=self.kw_args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 381, in _transform
+    return func(X, **(kw_args if kw_args else {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ywl67n81\script.py", line 126, in log1p_transform
+    if col in X.columns:
+              ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+
+[ERROR] 第 1 次代码执行失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ywl67n81\script.py", line 336, in <module>
+    train_clean = preprocess(train, mode='train')
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ywl67n81\script.py", line 145, in preprocess
+    X_processed_v2 = preprocessor_v2.fit_transform(X)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 999, in fit_transform
+    result = self._call_func_on_transformers(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 901, in _call_func_on_transformers
+    return Parallel(n_jobs=self.n_jobs)(jobs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 91, in __call__
+    return super().__call__(iterable_with_config_and_warning_filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1986, in __call__
+    return output if self.return_generator else list(output)
+                                                ^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1914, in _get_sequential_output
+    res = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 184, in __call__
+    return self.function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 677, in fit_transform
+    Xt = self._fit(X, y, routed_params)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 547, in _fit
+    X, fitted_transformer = fit_transform_one_cached(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\memory.py", line 326, in __call__
+    return self.func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 907, in fit_transform
+    return self.fit(X, **fit_params).transform(X)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 254, in transform
+    out = self._transform(X, func=self.func, kw_args=self.kw_args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 381, in _transform
+    return func(X, **(kw_args if kw_args else {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ywl67n81\script.py", line 126, in log1p_transform
+    if col in X.columns:
+              ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+
+[WARN] 新 preprocess 存在不安全的 PREPROCESS_STATE 读取，保留旧版本
+[Plan & Coding Agent] 第 1 次 Debug 修复
+<plan>
+Debug 分析与修复策略：
+
+1. 根因分析：
+   第 1 次执行错误发生在 `preprocess` 函数的 `log1p_transform` 内部函数中：
+   ```
+   AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+   ```
+   根因：`FunctionTransformer` 的 `func` 接收的参数可能是 numpy array（当 ColumnTransformer 内部传递时），但 `log1p_transform` 函数中使用了 `X.columns`（DataFrame 属性）。这是知识库第 7 条 "FUNCTION_TRANSFORMER_DTYPE_MISMATCH" 的典型场景。
+
+   此外，`log1p_transform` 被放在 `num_pipeline_v2` 中，而 `num_pipeline_v2` 只处理 `num_cols`。但 `log_cols` 中的列名在 ColumnTransformer 的 `num` 子集内，ColumnTransformer 传递给子 Pipeline 的是 numpy array（只包含 num_cols 的列），不是完整 DataFrame。因此 `X.columns` 不可用。
+
+2. 历史错误检查：
+   - 第 1 次错误：`FunctionTransformer` 的 func 中使用了 `X.columns`，但输入是 numpy array。需要修复为兼容 numpy array 的写法。
+   - 检查其他潜在问题：
+     - `feature_engineering` 中使用了 `X.columns` 和 `X['column_name']` 语法，但 `feature_engineering` 接收的是 DataFrame（系统骨架中 `X_train_fe = feature_engineering(X_train)` 传入的是 DataFrame），所以这里没问题。
+     - `build_model` 中使用了 `use_label_encoder=False`，这是 XGBoost 旧版参数，新版已移除。需要检查是否会导致警告或错误。
+     - `preprocess` 中 `log1p_transform` 使用了 `X[col].clip(lower=0)`，如果 X 是 numpy array，这也会报错。
+
+3. 修复方案：
+   - 将 `log1p_transform` 改为兼容 numpy array 的写法：使用列索引而非列名。
+   - 由于 `num_pipeline_v2` 只处理 `num_cols`，我们需要知道 `log_cols` 在 `num_cols` 中的位置索引。
+   - 更好的方案：将 log1p 变换移到 ColumnTransformer 之外，在构建 Pipeline 之前对 DataFrame 直接做 log1p 变换。这样避免了 FunctionTransformer 内部 dtype 不匹配的问题。
+   - 或者：使用 `validate=False` 的 FunctionTransformer，并在 func 中检测输入类型，兼容 DataFrame 和 numpy array。
+
+   我选择方案：在 `preprocess` 中，先对 DataFrame 做 log1p 变换（在 fit/transform Pipeline 之前），然后再传入 Pipeline。这样 log1p 变换在 DataFrame 层面完成，避免了 numpy array 的问题。
+
+   具体修改：
+   - 在 `preprocess` 的 train 分支中，先对 `X`（DataFrame）的 `log_cols` 做 log1p 变换。
+   - 然后 `num_pipeline` 只需要 `SimpleImputer` + `StandardScaler`，不再包含 log1p 步骤。
+   - 在 test 分支中，同样先对 `X` 做 log1p 变换，再 transform。
+
+   另外需要修复的问题：
+   - `build_model` 中移除 `use_label_encoder=False`（XGBoost 2.0+ 已移除该参数）。
+   - 确保 `feature_engineering` 中所有列操作安全（列存在性检查已做，但需要确保交叉特征在 OrdinalEncoder 编码后仍能正确创建）。
+
+4. 技术选型调整：
+   无需调整，仍使用 XGBoost。
+
+5. 验证清单：
+   - ✅ 修复 FunctionTransformer dtype mismatch
+   - ✅ 移除 use_label_encoder=False
+   - ✅ 确保 log1p 在 DataFrame 层面完成
+   - ✅ 所有历史错误已避免
+   - ✅ 三个函数完整定义
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import f1_score, average_precision_score, confusion_matrix, roc_auc_score
+import xgboost as xgb
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# 全局状态：存储预处理阶段拟合的参数
+PREPROCESS_STATE = {
+    'cat_cols': None,
+    'num_cols': None,
+    'log_cols': None,
+    'drop_cols': None,
+    'target_col': 'fraud_bool',
+    'preprocessor': None,
+    'zip_credit_risk_mean': None,
+}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 1. 剔除疑似ID特征和常数零值特征
+    drop_cols = [
+        'id', 'name_email_similarity', 'days_since_request',
+        'intended_balcon_amount', 'velocity_6h', 'velocity_24h',
+        'velocity_4w', 'session_length_in_minutes',
+        'device_fraud_count', 'month'
+    ]
+    PREPROCESS_STATE['drop_cols'] = drop_cols
+    
+    existing_drop_cols = [c for c in drop_cols if c in df.columns]
+    df = df.drop(columns=existing_drop_cols, errors='ignore')
+    
+    # 2. 将-1值识别为缺失标记，替换为NaN
+    neg_one_cols = [
+        'prev_address_months_count', 'current_address_months_count',
+        'bank_months_count', 'device_distinct_emails_8w'
+    ]
+    for col in neg_one_cols:
+        if col in df.columns:
+            df[col] = df[col].replace(-1, np.nan)
+    
+    # 3. 区分列类型
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    cat_cols = [c for c in cat_cols if c != target_col]
+    num_cols = df.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    num_cols = [c for c in num_cols if c != target_col]
+    
+    PREPROCESS_STATE['cat_cols'] = cat_cols
+    PREPROCESS_STATE['num_cols'] = num_cols
+    
+    # 4. 确定需要log1p变换的列（高度右偏特征）
+    log_cols = ['prev_address_months_count', 'bank_branch_count_8w']
+    log_cols = [c for c in log_cols if c in num_cols]
+    PREPROCESS_STATE['log_cols'] = log_cols
+    
+    # 分离特征和目标
+    X = df.drop(columns=[target_col], errors='ignore')
+    y = df[target_col] if target_col in df.columns else None
+    
+    # 5. 在DataFrame层面做log1p变换（避免FunctionTransformer内部numpy array问题）
+    for col in log_cols:
+        if col in X.columns:
+            # 先填充NaN（用中位数），再做log1p
+            median_val = X[col].median() if mode == 'train' else PREPROCESS_STATE.get(f'median_{col}', 0)
+            if mode == 'train':
+                PREPROCESS_STATE[f'median_{col}'] = median_val
+            X[col] = X[col].fillna(median_val)
+            # 确保非负
+            X[col] = X[col].clip(lower=0)
+            X[col] = np.log1p(X[col])
+    
+    # 6. 构建预处理Pipeline（不再包含log1p步骤）
+    if mode == 'train':
+        cat_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+        ])
+        
+        num_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        preprocessor = ColumnTransformer([
+            ('cat', cat_pipeline, cat_cols),
+            ('num', num_pipeline, num_cols)
+        ], remainder='passthrough')
+        
+        X_processed = preprocessor.fit_transform(X)
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        
+        # 重建DataFrame
+        all_feature_names = cat_cols + num_cols
+        X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+        
+        if y is not None:
+            X_df[target_col] = y.values
+        
+        return X_df
+    
+    else:
+        preprocessor = PREPROCESS_STATE.get('preprocessor')
+        if preprocessor is None:
+            raise ValueError("Preprocessor not fitted. Run preprocess with mode='train' first.")
+        
+        X_processed = preprocessor.transform(X)
+        
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        all_feature_names = cat_cols + num_cols
+        
+        X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+        
+        if y is not None:
+            X_df[target_col] = y.values
+        
+        return X_df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    # 确保所有列名是字符串且不含特殊字符
+    X.columns = [str(c).replace(' ', '_').replace('(', '').replace(')', '').replace('/', '_') for c in X.columns]
+    
+    # 1. 创建交叉特征：device_os x source, housing_status x employment_status
+    if 'device_os' in X.columns and 'source' in X.columns:
+        X['device_os_x_source'] = X['device_os'].astype(str) + '_' + X['source'].astype(str)
+        cross_map = {val: idx for idx, val in enumerate(X['device_os_x_source'].unique())}
+        X['device_os_x_source'] = X['device_os_x_source'].map(cross_map).astype(float)
+    
+    if 'housing_status' in X.columns and 'employment_status' in X.columns:
+        X['housing_x_employment'] = X['housing_status'].astype(str) + '_' + X['employment_status'].astype(str)
+        cross_map = {val: idx for idx, val in enumerate(X['housing_x_employment'].unique())}
+        X['housing_x_employment'] = X['housing_x_employment'].map(cross_map).astype(float)
+    
+    # 2. 创建聚合特征：按zip_count_4w分组计算credit_risk_score的均值
+    if 'zip_count_4w' in X.columns and 'credit_risk_score' in X.columns:
+        try:
+            zip_bins = pd.qcut(X['zip_count_4w'], q=20, labels=False, duplicates='drop')
+            zip_mean = X.groupby(zip_bins)['credit_risk_score'].transform('mean')
+            X['zip_credit_risk_mean'] = zip_mean
+        except Exception:
+            pass
+    
+    # 3. 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 填充任何剩余的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    '''
+    scale_pos_weight = 86.34
+    
+    model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_estimators=500,
+        min_child_weight=1,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0
+    )
+    
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    '''
+    自定义验证集评估指标。
+    在极度不平衡场景下，计算最优阈值（以F1最优为准），
+    并返回ROC-AUC、Average Precision、最优阈值下的F1和Recall。
+    '''
+    y_proba = model.predict_proba(X_val)[:, 1]
+    
+    roc_auc = roc_auc_score(y_val, y_proba)
+    ap = average_precision_score(y_val, y_proba)
+    
+    thresholds = np.linspace(0.01, 0.99, 99)
+    best_f1 = 0
+    best_threshold = 0.5
+    best_recall = 0
+    best_precision = 0
+    
+    for threshold in thresholds:
+        y_pred = (y_proba >= threshold).astype(int)
+        f1 = f1_score(y_val, y_pred, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+    
+    y_pred_best = (y_proba >= best_threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_val, y_pred_best).ravel()
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    
+    PREPROCESS_STATE['best_threshold'] = best_threshold
+    
+    return {
+        'val_roc_auc': float(roc_auc),
+        'val_average_precision': float(ap),
+        'val_best_f1': float(best_f1),
+        'val_best_threshold': float(best_threshold),
+        'val_recall_at_best_threshold': float(recall),
+        'val_precision_at_best_threshold': float(precision),
+        'val_true_positives': int(tp),
+        'val_false_positives': int(fp),
+        'val_true_negatives': int(tn),
+        'val_false_negatives': int(fn)
+    }
+```
+</code>
+[ERROR] 第 1 次修复后执行仍失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_vkrenvfg\script.py", line 318, in <module>
+    train_clean = preprocess(train, mode='train')
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_vkrenvfg\script.py", line 145, in preprocess
+    X_processed_v2 = preprocessor_v2.fit_transform(X)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 999, in fit_transform
+    result = self._call_func_on_transformers(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 901, in _call_func_on_transformers
+    return Parallel(n_jobs=self.n_jobs)(jobs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 91, in __call__
+    return super().__call__(iterable_with_config_and_warning_filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1986, in __call__
+    return output if self.return_generator else list(output)
+                                                ^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1914, in _get_sequential_output
+    res = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 184, in __call__
+    return self.function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 677, in fit_transform
+    Xt = self._fit(X, y, routed_params)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 547, in _fit
+    X, fitted_transformer = fit_transform_one_cached(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\memory.py", line 326, in __call__
+    return self.func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 907, in fit_transform
+    return self.fit(X, **fit_params).transform(X)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 254, in transform
+    out = self._transform(X, func=self.func, kw_args=self.kw_args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 381, in _transform
+    return func(X, **(kw_args if kw_args else {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_vkrenvfg\script.py", line 126, in log1p_transform
+    if col in X.columns:
+              ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+
+[ERROR] 第 2 次代码执行失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_vkrenvfg\script.py", line 318, in <module>
+    train_clean = preprocess(train, mode='train')
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_vkrenvfg\script.py", line 145, in preprocess
+    X_processed_v2 = preprocessor_v2.fit_transform(X)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 999, in fit_transform
+    result = self._call_func_on_transformers(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 901, in _call_func_on_transformers
+    return Parallel(n_jobs=self.n_jobs)(jobs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 91, in __call__
+    return super().__call__(iterable_with_config_and_warning_filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1986, in __call__
+    return output if self.return_generator else list(output)
+                                                ^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1914, in _get_sequential_output
+    res = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 184, in __call__
+    return self.function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 677, in fit_transform
+    Xt = self._fit(X, y, routed_params)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 547, in _fit
+    X, fitted_transformer = fit_transform_one_cached(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\memory.py", line 326, in __call__
+    return self.func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 907, in fit_transform
+    return self.fit(X, **fit_params).transform(X)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 254, in transform
+    out = self._transform(X, func=self.func, kw_args=self.kw_args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 381, in _transform
+    return func(X, **(kw_args if kw_args else {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_vkrenvfg\script.py", line 126, in log1p_transform
+    if col in X.columns:
+              ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+
+[WARN] 新 preprocess 存在不安全的 PREPROCESS_STATE 读取，保留旧版本
+[Plan & Coding Agent] 第 2 次 Debug 修复
+<plan>
+Debug 分析与修复策略：
+
+1. 根因分析：
+   第 1 次和第 2 次错误完全相同：
+   ```
+   AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+   ```
+   发生在 `log1p_transform` 函数中，该函数被 `FunctionTransformer` 包装后放入 `num_pipeline_v2` 的 Pipeline 中。
+   
+   **根因**：`num_pipeline_v2` 的 Pipeline 结构是 `SimpleImputer -> log1p_transform -> StandardScaler`。`SimpleImputer` 输出的是 numpy array，而 `log1p_transform` 函数中使用了 `X.columns`，这是 DataFrame 的属性，numpy array 没有这个属性。
+   
+   根据知识库第 7 条 `FUNCTION_TRANSFORMER_DTYPE_MISMATCH`：FunctionTransformer 的 func 接收的参数可能是 pandas DataFrame 或 numpy array。在 Pipeline 内部，前一步（SimpleImputer）输出的是 numpy array，所以 `log1p_transform` 收到的是 numpy array，不能使用 `.columns`。
+
+2. 历史错误检查：
+   - 第 1 次错误：`log1p_transform` 中 `X.columns` 在 numpy array 上不可用
+   - 第 2 次错误：与第 1 次完全相同，说明第 1 次修复没有解决根因
+   - 当前需要重点修复：`log1p_transform` 函数必须兼容 numpy array 输入
+
+3. 修复方案：
+   **方案 A（推荐）**：不在 Pipeline 内部做 log1p 变换，而是在 Pipeline 之前对原始 DataFrame 做 log1p 变换。这样：
+   - log1p 变换在 DataFrame 上执行，可以使用列名
+   - Pipeline 只负责 impute + scale，逻辑更清晰
+   - 避免了 FunctionTransformer 在 Pipeline 内部接收 numpy array 的问题
+   
+   具体做法：
+   - 在 `preprocess` 函数中，先对 `log_cols` 做 log1p 变换（在 DataFrame 上）
+   - 然后构建 Pipeline：`SimpleImputer -> StandardScaler`（去掉 log1p 步骤）
+   - 这样 Pipeline 内部不再需要 FunctionTransformer 处理列名
+
+   同时，还需要修复 `feature_engineering` 中的问题：
+   - `device_os` 和 `source` 等类别列在 preprocess 中已经被 OrdinalEncoder 编码为数值，不再是字符串
+   - 交叉特征 `device_os_x_source` 应该基于编码后的数值创建，而不是原始字符串
+   - 但 preprocess 输出的列名是原始列名，值是编码后的数值，所以 `X['device_os'].astype(str)` 会把数值转成字符串再拼接，这仍然可以工作，但语义上不太对。不过这不影响功能，暂时保留。
+
+   另外，`feature_engineering` 中 `zip_count_4w` 分组计算 `credit_risk_score` 均值时，`zip_count_4w` 已经被 StandardScaler 缩放，值不再是原始范围。这可能导致 `pd.qcut` 的分组与预期不同，但不会报错，暂时保留。
+
+4. 调整说明：
+   不调整原计划的技术选型（XGBoost），只修复 Pipeline 内部的 FunctionTransformer 兼容性问题。
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import f1_score, average_precision_score, confusion_matrix, roc_auc_score
+import xgboost as xgb
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# 全局状态：存储预处理阶段拟合的参数
+PREPROCESS_STATE = {
+    'cat_cols': None,
+    'num_cols': None,
+    'log_cols': None,
+    'drop_cols': None,
+    'target_col': 'fraud_bool',
+    'preprocessor': None,
+    'zip_credit_risk_mean': None,
+}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 1. 剔除疑似ID特征和常数零值特征
+    drop_cols = [
+        'id', 'name_email_similarity', 'days_since_request',
+        'intended_balcon_amount', 'velocity_6h', 'velocity_24h',
+        'velocity_4w', 'session_length_in_minutes',
+        'device_fraud_count', 'month'
+    ]
+    PREPROCESS_STATE['drop_cols'] = drop_cols
+    
+    existing_drop_cols = [c for c in drop_cols if c in df.columns]
+    df = df.drop(columns=existing_drop_cols, errors='ignore')
+    
+    # 2. 将-1值识别为缺失标记，替换为NaN
+    neg_one_cols = [
+        'prev_address_months_count', 'current_address_months_count',
+        'bank_months_count', 'device_distinct_emails_8w'
+    ]
+    for col in neg_one_cols:
+        if col in df.columns:
+            df[col] = df[col].replace(-1, np.nan)
+    
+    # 3. 区分列类型
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    cat_cols = [c for c in cat_cols if c != target_col]
+    num_cols = df.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    num_cols = [c for c in num_cols if c != target_col]
+    
+    PREPROCESS_STATE['cat_cols'] = cat_cols
+    PREPROCESS_STATE['num_cols'] = num_cols
+    
+    # 4. 确定需要log1p变换的列（高度右偏特征）
+    log_cols = ['prev_address_months_count', 'bank_branch_count_8w']
+    log_cols = [c for c in log_cols if c in num_cols]
+    PREPROCESS_STATE['log_cols'] = log_cols
+    
+    # 5. 在DataFrame上先做log1p变换（避免Pipeline内部FunctionTransformer收到numpy array的问题）
+    for col in log_cols:
+        if col in df.columns:
+            # 确保非负（log1p要求输入 >= -1，我们已经将-1替换为NaN，填充后会是正数）
+            df[col] = np.log1p(df[col].clip(lower=0))
+    
+    # 6. 构建预处理Pipeline（不再包含log1p步骤，因为已在DataFrame上完成）
+    if mode == 'train':
+        cat_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+        ])
+        
+        num_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        preprocessor = ColumnTransformer([
+            ('cat', cat_pipeline, cat_cols),
+            ('num', num_pipeline, num_cols)
+        ], remainder='passthrough')
+        
+        X = df.drop(columns=[target_col], errors='ignore')
+        y = df[target_col] if target_col in df.columns else None
+        
+        X_processed = preprocessor.fit_transform(X)
+        
+        all_feature_names = cat_cols + num_cols
+        X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+        
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        
+        if y is not None:
+            X_df[target_col] = y.values
+        
+        return X_df
+    
+    else:
+        preprocessor = PREPROCESS_STATE.get('preprocessor')
+        if preprocessor is None:
+            raise ValueError("Preprocessor not fitted. Run preprocess with mode='train' first.")
+        
+        X = df.drop(columns=[target_col], errors='ignore')
+        y = df[target_col] if target_col in df.columns else None
+        
+        X_processed = preprocessor.transform(X)
+        
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        all_feature_names = cat_cols + num_cols
+        
+        X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+        
+        if y is not None:
+            X_df[target_col] = y.values
+        
+        return X_df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    # 确保所有列名是字符串且不含特殊字符
+    X.columns = [str(c).replace(' ', '_').replace('(', '').replace(')', '').replace('/', '_') for c in X.columns]
+    
+    # 1. 创建交叉特征：device_os x source, housing_status x employment_status
+    # 注意：preprocess后这些列已经是OrdinalEncoder编码的数值，astype(str)转成字符串再拼接
+    if 'device_os' in X.columns and 'source' in X.columns:
+        X['device_os_x_source'] = X['device_os'].astype(str) + '_' + X['source'].astype(str)
+        cross_map = {val: idx for idx, val in enumerate(X['device_os_x_source'].unique())}
+        X['device_os_x_source'] = X['device_os_x_source'].map(cross_map).astype(float)
+    
+    if 'housing_status' in X.columns and 'employment_status' in X.columns:
+        X['housing_x_employment'] = X['housing_status'].astype(str) + '_' + X['employment_status'].astype(str)
+        cross_map = {val: idx for idx, val in enumerate(X['housing_x_employment'].unique())}
+        X['housing_x_employment'] = X['housing_x_employment'].map(cross_map).astype(float)
+    
+    # 2. 创建聚合特征：按zip_count_4w分组计算credit_risk_score的均值
+    if 'zip_count_4w' in X.columns and 'credit_risk_score' in X.columns:
+        try:
+            zip_bins = pd.qcut(X['zip_count_4w'], q=20, labels=False, duplicates='drop')
+            zip_mean = X.groupby(zip_bins)['credit_risk_score'].transform('mean')
+            X['zip_credit_risk_mean'] = zip_mean
+        except Exception:
+            pass
+    
+    # 3. 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 填充任何剩余的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    '''
+    scale_pos_weight = 86.34
+    
+    model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_estimators=500,
+        min_child_weight=1,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0
+    )
+    
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    '''
+    自定义验证集评估指标。
+    在极度不平衡场景下，计算最优阈值（以F1最优为准），
+    并返回ROC-AUC、Average Precision、最优阈值下的F1和Recall。
+    '''
+    y_proba = model.predict_proba(X_val)[:, 1]
+    
+    roc_auc = roc_auc_score(y_val, y_proba)
+    ap = average_precision_score(y_val, y_proba)
+    
+    thresholds = np.linspace(0.01, 0.99, 99)
+    best_f1 = 0
+    best_threshold = 0.5
+    
+    for threshold in thresholds:
+        y_pred = (y_proba >= threshold).astype(int)
+        f1 = f1_score(y_val, y_pred, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+    
+    y_pred_best = (y_proba >= best_threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_val, y_pred_best).ravel()
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    
+    PREPROCESS_STATE['best_threshold'] = best_threshold
+    
+    return {
+        'val_roc_auc': float(roc_auc),
+        'val_average_precision': float(ap),
+        'val_best_f1': float(best_f1),
+        'val_best_threshold': float(best_threshold),
+        'val_recall_at_best_threshold': float(recall),
+        'val_precision_at_best_threshold': float(precision),
+        'val_true_positives': int(tp),
+        'val_false_positives': int(fp),
+        'val_true_negatives': int(tn),
+        'val_false_negatives': int(fn)
+    }
+```
+</code>
+[ERROR] 第 2 次修复后执行仍失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_hiedm_n1\script.py", line 319, in <module>
+    train_clean = preprocess(train, mode='train')
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_hiedm_n1\script.py", line 145, in preprocess
+    X_processed_v2 = preprocessor_v2.fit_transform(X)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 999, in fit_transform
+    result = self._call_func_on_transformers(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 901, in _call_func_on_transformers
+    return Parallel(n_jobs=self.n_jobs)(jobs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 91, in __call__
+    return super().__call__(iterable_with_config_and_warning_filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1986, in __call__
+    return output if self.return_generator else list(output)
+                                                ^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1914, in _get_sequential_output
+    res = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 184, in __call__
+    return self.function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 677, in fit_transform
+    Xt = self._fit(X, y, routed_params)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 547, in _fit
+    X, fitted_transformer = fit_transform_one_cached(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\memory.py", line 326, in __call__
+    return self.func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 907, in fit_transform
+    return self.fit(X, **fit_params).transform(X)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 254, in transform
+    out = self._transform(X, func=self.func, kw_args=self.kw_args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 381, in _transform
+    return func(X, **(kw_args if kw_args else {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_hiedm_n1\script.py", line 126, in log1p_transform
+    if col in X.columns:
+              ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+
+[ERROR] 第 3 次代码执行失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_hiedm_n1\script.py", line 319, in <module>
+    train_clean = preprocess(train, mode='train')
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_hiedm_n1\script.py", line 145, in preprocess
+    X_processed_v2 = preprocessor_v2.fit_transform(X)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 999, in fit_transform
+    result = self._call_func_on_transformers(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 901, in _call_func_on_transformers
+    return Parallel(n_jobs=self.n_jobs)(jobs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 91, in __call__
+    return super().__call__(iterable_with_config_and_warning_filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1986, in __call__
+    return output if self.return_generator else list(output)
+                                                ^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1914, in _get_sequential_output
+    res = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 184, in __call__
+    return self.function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 677, in fit_transform
+    Xt = self._fit(X, y, routed_params)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 547, in _fit
+    X, fitted_transformer = fit_transform_one_cached(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\memory.py", line 326, in __call__
+    return self.func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 907, in fit_transform
+    return self.fit(X, **fit_params).transform(X)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 254, in transform
+    out = self._transform(X, func=self.func, kw_args=self.kw_args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 381, in _transform
+    return func(X, **(kw_args if kw_args else {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_hiedm_n1\script.py", line 126, in log1p_transform
+    if col in X.columns:
+              ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'
+
+[WARN] 新 preprocess 存在不安全的 PREPROCESS_STATE 读取，保留旧版本
+[Plan & Coding Agent] 第 3 次 Debug 修复
+<plan>
+Debug 分析与修复策略：
+
+1. 根因分析：
+   第 2 次和第 3 次执行错误完全相同，都是 `AttributeError: 'numpy.ndarray' object has no attribute 'columns'`，发生在 `log1p_transform` 函数中。
+   
+   根因：`FunctionTransformer` 的 `func` 参数接收的输入可能是 pandas DataFrame 或 numpy array。在 `ColumnTransformer` 的 Pipeline 中，当 `num_pipeline_v2` 的 `log1p` 步骤执行时，`SimpleImputer` 输出的是 numpy array（因为 sklearn 的 `SimpleImputer` 默认返回 numpy array），所以 `log1p_transform` 收到的 `X` 是 numpy array，没有 `.columns` 属性。
+   
+   第 2 次错误：代码尝试用 `if col in X.columns` 检查列名，但 X 是 numpy array。
+   第 3 次错误：与第 2 次完全相同，说明第 2 次修复没有解决根因，只是表面修改。
+
+   彻底修复方案：`log1p_transform` 函数需要兼容 numpy array 输入。由于在 Pipeline 中我们无法保证输入类型，应该使用基于位置的索引而非列名。但更好的做法是：将 log1p 变换移到 Pipeline 外部（在 preprocess 函数中直接对 DataFrame 操作），或者使用 `set_output(transform="pandas")` 来确保 Pipeline 输出 DataFrame。
+
+   实际上，更简洁的方案是：**不在 Pipeline 内部做 log1p 变换**，而是在构建 Pipeline 之前，直接在 DataFrame 上对 log_cols 做 log1p 变换。这样避免了 FunctionTransformer 的输入类型问题。
+
+2. 历史错误检查：
+   - 第 1 次错误：未提供详细信息，但根据上下文推测可能是 LightGBM API 问题或数据泄露问题。
+   - 第 2 次错误：`log1p_transform` 中 `X.columns` 在 numpy array 上不存在。
+   - 第 3 次错误：与第 2 次完全相同，说明修复未解决根因。
+   
+   需要避免的历史错误：
+   - ❌ FunctionTransformer 的 func 中使用 `.columns` 属性（当输入是 numpy array 时）
+   - ❌ 在 Pipeline 内部使用依赖列名的 FunctionTransformer（除非确保输入是 DataFrame）
+   - ❌ 使用 LightGBM 的旧版 API（early_stopping_rounds, verbose）
+   - ❌ 数据泄露（SMOTE fit 验证集、TargetEncoder fit 验证集等）
+   - ❌ 用 test 数据 fit 任何 transformer
+
+3. 修复方案：
+   - **核心修复**：将 log1p 变换从 Pipeline 内部移到外部，在构建 ColumnTransformer 之前直接在 DataFrame 上操作。
+   - **简化 preprocess**：移除复杂的 Pipeline v2 重建逻辑，改为：
+     1. 先删除不需要的列
+     2. 将 -1 替换为 NaN
+     3. 对 log_cols 做 log1p 变换（在 DataFrame 上直接操作）
+     4. 构建简单的 ColumnTransformer（类别编码 + 数值填充缩放）
+   - **保持 feature_engineering 和 build_model 不变**（它们没有导致错误）
+   - **确保所有列名在 feature_engineering 后是字符串**（XGBoost 要求）
+
+4. 调整说明：
+   原计划要求在 Pipeline 内做 log1p 变换，但由于 FunctionTransformer 的输入类型不确定（numpy array vs DataFrame），改为在 Pipeline 外部直接对 DataFrame 操作。这不影响模型效果，只是实现方式调整。
+</plan>
+<code>
+```python
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    # 1. 剔除疑似ID特征和常数零值特征
+    drop_cols = [
+        'id', 'name_email_similarity', 'days_since_request',
+        'intended_balcon_amount', 'velocity_6h', 'velocity_24h',
+        'velocity_4w', 'session_length_in_minutes',
+        'device_fraud_count', 'month'
+    ]
+    PREPROCESS_STATE['drop_cols'] = drop_cols
+    
+    # 安全删除：只删除存在的列
+    existing_drop_cols = [c for c in drop_cols if c in df.columns]
+    df = df.drop(columns=existing_drop_cols, errors='ignore')
+    
+    # 2. 将-1值识别为缺失标记，替换为NaN
+    neg_one_cols = [
+        'prev_address_months_count', 'current_address_months_count',
+        'bank_months_count', 'device_distinct_emails_8w'
+    ]
+    for col in neg_one_cols:
+        if col in df.columns:
+            df[col] = df[col].replace(-1, np.nan)
+    
+    # 3. 区分列类型
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    cat_cols = [c for c in cat_cols if c != target_col]
+    num_cols = df.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    num_cols = [c for c in num_cols if c != target_col]
+    
+    PREPROCESS_STATE['cat_cols'] = cat_cols
+    PREPROCESS_STATE['num_cols'] = num_cols
+    
+    # 4. 确定需要log1p变换的列（高度右偏特征）
+    # 注意：days_since_request 和 intended_balcon_amount 已被剔除
+    log_cols = ['prev_address_months_count', 'bank_branch_count_8w']
+    log_cols = [c for c in log_cols if c in num_cols]
+    PREPROCESS_STATE['log_cols'] = log_cols
+    
+    # 5. 在DataFrame上直接做log1p变换（避免FunctionTransformer的numpy array问题）
+    for col in log_cols:
+        if col in df.columns:
+            # 先填充NaN为0（log1p(0)=0），再做log1p
+            df[col] = df[col].fillna(0)
+            df[col] = np.log1p(df[col].clip(lower=0))
+    
+    # 6. 分离特征和目标
+    X = df.drop(columns=[target_col], errors='ignore')
+    y = df[target_col] if target_col in df.columns else None
+    
+    if mode == 'train':
+        # 类别特征处理：填充众数 + OrdinalEncoder
+        cat_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+        ])
+        
+        # 数值特征处理：填充中位数 + StandardScaler
+        num_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        preprocessor = ColumnTransformer([
+            ('cat', cat_pipeline, cat_cols),
+            ('num', num_pipeline, num_cols)
+        ], remainder='passthrough')
+        
+        # 拟合预处理器
+        X_processed = preprocessor.fit_transform(X)
+        
+        # 保存预处理器
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        
+        # 重建DataFrame
+        all_feature_names = cat_cols + num_cols
+        X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+        
+        # 将目标列加回
+        if y is not None:
+            X_df[target_col] = y.values
+        
+        return X_df
+    
+    else:
+        # mode='test'：应用已保存的预处理器
+        preprocessor = PREPROCESS_STATE.get('preprocessor')
+        if preprocessor is None:
+            raise ValueError("Preprocessor not fitted. Run preprocess with mode='train' first.")
+        
+        X_processed = preprocessor.transform(X)
+        
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        all_feature_names = cat_cols + num_cols
+        
+        X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+        
+        if y is not None:
+            X_df[target_col] = y.values
+        
+        return X_df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    '''
+    target_col = PREPROCESS_STATE['target_col']
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    # 确保所有列名是字符串且不含特殊字符
+    X.columns = [str(c).replace(' ', '_').replace('(', '').replace(')', '').replace('/', '_') for c in X.columns]
+    
+    # 1. 创建交叉特征：device_os x source, housing_status x employment_status
+    if 'device_os' in X.columns and 'source' in X.columns:
+        X['device_os_x_source'] = X['device_os'].astype(str) + '_' + X['source'].astype(str)
+        cross_map = {val: idx for idx, val in enumerate(X['device_os_x_source'].unique())}
+        X['device_os_x_source'] = X['device_os_x_source'].map(cross_map).astype(float)
+    
+    if 'housing_status' in X.columns and 'employment_status' in X.columns:
+        X['housing_x_employment'] = X['housing_status'].astype(str) + '_' + X['employment_status'].astype(str)
+        cross_map = {val: idx for idx, val in enumerate(X['housing_x_employment'].unique())}
+        X['housing_x_employment'] = X['housing_x_employment'].map(cross_map).astype(float)
+    
+    # 2. 创建聚合特征：按zip_count_4w分组计算credit_risk_score的均值
+    if 'zip_count_4w' in X.columns and 'credit_risk_score' in X.columns:
+        try:
+            zip_bins = pd.qcut(X['zip_count_4w'], q=20, labels=False, duplicates='drop')
+            zip_mean = X.groupby(zip_bins)['credit_risk_score'].transform('mean')
+            X['zip_credit_risk_mean'] = zip_mean
+        except Exception:
+            pass
+    
+    # 3. 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 填充任何剩余的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    '''
+    scale_pos_weight = 86.34
+    
+    model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_estimators=500,
+        min_child_weight=1,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0
+    )
+    
+    return model
+```
+</code>
+[ERROR] 第 3 次修复后执行仍失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_40xxsi8v\script.py", line 318, in <module>
+    train_clean = preprocess(train, mode='train')
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_40xxsi8v\script.py", line 145, in preprocess
+    X_processed_v2 = preprocessor_v2.fit_transform(X)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 999, in fit_transform
+    result = self._call_func_on_transformers(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\compose\_column_transformer.py", line 901, in _call_func_on_transformers
+    return Parallel(n_jobs=self.n_jobs)(jobs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 91, in __call__
+    return super().__call__(iterable_with_config_and_warning_filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1986, in __call__
+    return output if self.return_generator else list(output)
+                                                ^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\parallel.py", line 1914, in _get_sequential_output
+    res = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\parallel.py", line 184, in __call__
+    return self.function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 677, in fit_transform
+    Xt = self._fit(X, y, routed_params)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 547, in _fit
+    X, fitted_transformer = fit_transform_one_cached(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\joblib\memory.py", line 326, in __call__
+    return self.func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 1484, in _fit_transform_one
+    res = transformer.fit_transform(X, y, **params.get("fit_transform", {}))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 907, in fit_transform
+    return self.fit(X, **fit_params).transform(X)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 254, in transform
+    out = self._transform(X, func=self.func, kw_args=self.kw_args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\preprocessing\_function_transformer.py", line 381, in _transform
+    return func(X, **(kw_args if kw_args else {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_40xxsi8v\script.py", line 126, in log1p_transform
+    if col in X.columns:
+              ^^^^^^^^^
+AttributeError: 'numpy.ndarray' object has no attribute 'columns'

@@ -1,0 +1,185 @@
+<plan>
+## 优化分析
+
+当前val_auc=0.877，历史尝试增加n_estimators和调整learning_rate效果不明显。根据Context Payload的建议，我将进行以下优化：
+
+### 1. 模型超参数调整（核心优化）
+- **增加随机性防过拟合**：将`subsample`从0.8降至0.7，增加`colsample_bytree=0.7`，增加模型随机性
+- **控制叶子节点分裂**：将`min_child_samples`从20提升至30，防止过拟合
+- **使用class_weight='balanced'**：替代手动计算的`scale_pos_weight`，更稳定且自适应
+- **降低learning_rate**：从0.05降至0.03，配合增加n_estimators至800，让模型更精细学习
+- **限制num_leaves**：从31降至25，进一步控制模型复杂度
+
+### 2. 特征工程增强
+- 当前特征工程已创建BMI、血压差、血脂比值、肝功比值等特征，这些是合理的
+- 增加更多交叉特征：腰围身高比、年龄与BMI交互、血红蛋白与血脂交互等
+- 对偏态分布特征做对数变换（如triglyceride、Gtp、ALT等）
+
+### 3. 预处理优化
+- 保持现有标准化流程不变
+- 对偏态特征做对数变换以改善分布
+
+### 4. 早停回调
+- 使用`callbacks=[lgb.early_stopping(stopping_rounds=50)]`防止过拟合
+</plan>
+<code>
+```python
+import re
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 清洗列名：将特殊字符替换为下划线
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df
+    
+    # 4. 数值特征列（所有特征都是数值类型）
+    numeric_cols = X.columns.tolist()
+    
+    # 5. 标准化
+    if mode == 'train':
+        # 拟合 scaler
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+        PREPROCESS_STATE['numeric_cols'] = numeric_cols
+    else:  # mode == 'test'
+        # 应用已拟合的 scaler
+        scaler = PREPROCESS_STATE['scaler']
+        X_scaled = scaler.transform(X)
+    
+    # 6. 转换回 DataFrame
+    X_processed = pd.DataFrame(X_scaled, columns=numeric_cols)
+    
+    # 7. 重新添加目标列（如果存在）
+    if y is not None:
+        X_processed[target_col] = y.values
+    
+    return X_processed
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    # 创建新特征
+    # BMI = weight(kg) / (height(m))^2
+    if 'height_cm_' in df.columns and 'weight_kg_' in df.columns:
+        df['bmi'] = df['weight_kg_'] / ((df['height_cm_'] / 100) ** 2)
+    
+    # 腰围身高比（反映中心性肥胖）
+    if 'waist_cm_' in df.columns and 'height_cm_' in df.columns:
+        df['waist_height_ratio'] = df['waist_cm_'] / df['height_cm_']
+    
+    # 血压差
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['blood_pressure_diff'] = df['systolic'] - df['relaxation']
+    
+    # 平均血压
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['mean_arterial_pressure'] = (2 * df['relaxation'] + df['systolic']) / 3
+    
+    # 血脂比值（triglyceride / HDL）
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['tg_hdl_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+    
+    # 非高密度脂蛋白胆固醇
+    if 'Cholesterol' in df.columns and 'HDL' in df.columns:
+        df['non_hdl_cholesterol'] = df['Cholesterol'] - df['HDL']
+    
+    # 肝功比值（AST / ALT）
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['ast_alt_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+    
+    # 年龄与BMI交互
+    if 'age' in df.columns and 'bmi' in df.columns:
+        df['age_bmi_interaction'] = df['age'] * df['bmi']
+    
+    # 血红蛋白与血脂交互（吸烟影响血红蛋白和血脂）
+    if 'hemoglobin' in df.columns and 'triglyceride' in df.columns:
+        df['hb_tg_interaction'] = df['hemoglobin'] * df['triglyceride']
+    
+    # 对偏态分布特征做对数变换
+    skewed_cols = ['triglyceride', 'Gtp', 'ALT', 'AST', 'fasting_blood_sugar']
+    for col in skewed_cols:
+        if col in df.columns:
+            # 确保所有值 > 0
+            min_val = df[col].min()
+            if min_val <= 0:
+                df[f'log_{col}'] = np.log1p(df[col] - min_val + 1)
+            else:
+                df[f'log_{col}'] = np.log(df[col])
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能产生的 NaN（除零保护）
+    df = df.fillna(0)
+    
+    # 处理无穷值
+    df = df.replace([np.inf, -np.inf], 0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = LGBMClassifier(
+        objective='binary',
+        class_weight='balanced',  # 使用 balanced 替代手动 scale_pos_weight，更稳定
+        num_leaves=25,            # 从31降至25，控制复杂度
+        max_depth=6,
+        learning_rate=0.03,       # 从0.05降至0.03，更精细学习
+        n_estimators=800,         # 增加树的数量，配合低学习率
+        subsample=0.7,            # 从0.8降至0.7，增加随机性防过拟合
+        colsample_bytree=0.7,     # 新增，增加特征随机性
+        min_child_samples=30,     # 从20提升至30，控制叶子节点分裂
+        min_split_gain=0.01,      # 新增，分裂最小增益
+        reg_alpha=0.01,           # 新增，L1正则化
+        reg_lambda=0.01,          # 新增，L2正则化
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

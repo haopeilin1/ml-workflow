@@ -1,0 +1,63 @@
+============================================================
+  任务运行摘要: 信用卡欺诈-二分类-类别极度不平衡 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: IsFraud
+  评估指标: ROC-AUC
+  复杂度判定: complex (LLM直接判定为complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ❌ 否
+
+【核心指标】
+  Best Score: 54.00
+  总耗时: 0.0s
+  验证集 AUC: 0.7526
+  测试集 AUC: 0.6361
+
+【各阶段耗时】
+  意图识别: 2.0s
+  代码生成: 98.4s
+  沙箱执行: 38.6s
+  评估优化: 19.5s
+  产物生成: 71.6s
+  测试预测: 0.0s
+  总计: 373.6s
+
+【Token 消耗】
+  Plan/Coding 调用: 1 次, 10306 tokens
+  Evaluation 调用: 4 次, 9410 tokens
+  总计: 5 次, 19716 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 10906tokens | 1.7s
+    - qwen3.5-flash@openai: 1 calls, 10906 tokens, 1.7s
+  plan_coding : deepseek-v4-pro@openai | 1calls | 10306tokens | 67.1s
+    - deepseek-v4-pro@openai: 1 calls, 10306 tokens, 67.1s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9410tokens | 19.4s
+    - deepseek-v4-flash@openai: 4 calls, 9410 tokens, 19.4s
+  judge       : qwen3.5-flash@openai | 1calls | 1577tokens | 3.1s
+    - qwen3.5-flash@openai: 1 calls, 1577 tokens, 3.1s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：ROC-AUC】为核心标准。验证集 AUC 为 0.7526，表现尚可；但测试集 AUC 骤降至 0.6361。首先，测试集核心指标 0.6361 仅略高于随机水平（0.5），未达到二分类任务通常可接受的基线（AUC > 0.7）。其次，泛化一致性严重不足，验证集与测试集的相对差距高达 (0.7526 - 0.6361) / 0.7526 ≈ 15.48%，表明模型在未见数据上出现了严重的性能衰退和过拟合现象。综合来看，模型在测试集上的预测能力极弱，无法满足交付要求。...
+
+【维度评分】
+  unknown: 45.0 (weight=0.3)
+  unknown: 70.0 (weight=0.25)
+  unknown: 50.0 (weight=0.2)
+  unknown: 60.0 (weight=0.15)
+  unknown: 40.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 11:36:06 UTC
+============================================================

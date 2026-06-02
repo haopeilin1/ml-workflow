@@ -1,0 +1,1 @@
+1.不平衡处理：SMOTE或class_weight='balanced'；2. 特征工程：极端值截断、构建质押比率×偿债能力交互项；3. 模型：优先XGBoost/LightGBM/CatBoost，辅以逻辑回归基准；4. 验证：StratifiedKFold（5折）保持违约比例；5. 调参：优化AUC，关注scale_pos_weight；6. 输出违约概率，仅以AUC评估。

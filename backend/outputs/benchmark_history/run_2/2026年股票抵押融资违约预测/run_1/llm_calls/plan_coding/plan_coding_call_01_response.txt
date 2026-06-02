@@ -1,0 +1,780 @@
+<plan>
+产物生成计划：二分类任务，目标列 IsDefault，评估指标 ROC-AUC。
+1. 优先加载 data/best_model.pkl，如果失败则回退重新训练。
+2. 加载测试集 data/test.csv 进行预测。
+3. 生成所有必需产物：model.pkl、feature_importance.csv、feature_importance.png、report.html、test_predictions.csv、predict.py、report_fig.png（PR曲线）。
+4. 特征重要性从模型属性直接获取，排除目标列。
+5. 报告包含混淆矩阵、分类报告、PR曲线等二分类特有内容。
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import os
+import json
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, f1_score, 
+    recall_score, precision_score, accuracy_score,
+    confusion_matrix, classification_report,
+    precision_recall_curve
+)
+from sklearn.preprocessing import LabelEncoder
+import lightgbm as lgb
+
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {}
+TARGET_COL = 'IsDefault'
+
+# ========== 预处理参数（与最佳代码一致）==========
+DROP_COLS = [
+    'Stock code', 'Z-SCORE', 'Stock Volatility', 'P/B ratio',
+    'Stock price rise and fall in the last year', 'Annual turnover rate',
+    'changes in operating income', 'Net business cycle (days)',
+    'Turnover rate of accounts receivable (Times)', 'Inventory turnover rate (Times)',
+    'Cash ratio', 'Ratio of accounts receivable to operating income',
+    'Ratio of prepayments to operating income', 'Ratio of other receivables to total assets',
+    'Company size (LN)', 'Equity checks and balances (2-5 large/1 large)',
+    'Total institutional shareholding ratio'
+]
+
+LOG1P_COLS = [
+    'Pledge ratio of limited sale shares', 'ST', 'ROE',
+    'changes in net assets', 'Total asset turnover rate (Times)',
+    'Current ratio', 'Monetary capital/short-term debt',
+    'EBITDA/interest bearing debt', 'EBIT interest cover',
+    'EBITDA interest cover',
+    'Net cash flow from operations has been negative for three consecutive years',
+    'Average cash income ratio in recent three years', 'Cash income ratio',
+    'Ratio of construction in progress to total assets',
+    "Minority shareholders' equity/owners' equity",
+    'The proportion of goodwill in total assets exceeds',
+    'Downgrade or negative', 'audit opinion ',
+    'High deposit and loan of 90p', 'Audit fee'
+]
+
+WINSOR_COLS = [
+    'Pledge ratio of limited sale shares', 'ST', 'ROE',
+    'changes in net assets', 'Total asset turnover rate (Times)',
+    'Current ratio', 'Monetary capital/short-term debt',
+    'EBITDA/interest bearing debt', 'EBIT interest cover',
+    'EBITDA interest cover',
+    'Net cash flow from operations has been negative for three consecutive years',
+    'Average cash income ratio in recent three years', 'Cash income ratio',
+    'Ratio of construction in progress to total assets',
+    "Minority shareholders' equity/owners' equity",
+    'The proportion of goodwill in total assets exceeds',
+    'Downgrade or negative', 'audit opinion ',
+    'High deposit and loan of 90p', 'Audit fee',
+    'Share pledge ratio of controlling shareholders',
+    'Pledge ratio of unlimited shares', 'ROA',
+    'Gross profit margin on sales', 'Asset liability ratio',
+    'Asset liability ratio (excluding advance receipts)',
+    'Asset liability ratio (total liabilities - contract liabilities - advance receipts)/(total assets - goodwill - contract liabilities - advance receipts)',
+    'Current liabilities/total liabilities', 'Company nature (state owned assets 0, others 1)',
+    'Proportion of independent directors', 'Equity concentration (the first largest shareholder)',
+    'Number of research institutions concerned', 'Number of research reports (+1 LN)',
+    'Financial cycle m2/gdp', 'Two positions in one (1 for the same, 0 for the different)',
+    'Whether there are four major audits'
+]
+
+
+def preprocess(df, mode='train'):
+    global PREPROCESS_STATE
+    df = df.copy()
+    
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    drop_cols_clean = [re.sub(r'[^\w]', '_', str(c)) for c in DROP_COLS]
+    log1p_cols_clean = [re.sub(r'[^\w]', '_', str(c)) for c in LOG1P_COLS]
+    winsor_cols_clean = [re.sub(r'[^\w]', '_', str(c)) for c in WINSOR_COLS]
+    
+    df = df.drop(columns=[c for c in drop_cols_clean if c in df.columns], errors='ignore')
+    
+    pe_col = 'P_E_ratio'
+    if pe_col in df.columns:
+        df[pe_col] = pd.to_numeric(df[pe_col], errors='coerce')
+    
+    for col in df.columns:
+        if col == TARGET_COL:
+            continue
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    if mode == 'train':
+        PREPROCESS_STATE['num_medians'] = {}
+        PREPROCESS_STATE['cat_modes'] = {}
+        
+        num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        
+        num_cols = [c for c in num_cols if c != TARGET_COL]
+        cat_cols = [c for c in cat_cols if c != TARGET_COL]
+        
+        for col in num_cols:
+            PREPROCESS_STATE['num_medians'][col] = df[col].median()
+        for col in cat_cols:
+            PREPROCESS_STATE['cat_modes'][col] = df[col].mode()[0] if not df[col].mode().empty else 'MISSING'
+        
+        PREPROCESS_STATE['num_cols'] = num_cols
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['log1p_cols'] = [c for c in log1p_cols_clean if c in df.columns]
+        PREPROCESS_STATE['winsor_cols'] = [c for c in winsor_cols_clean if c in df.columns]
+        PREPROCESS_STATE['all_feature_cols'] = [c for c in df.columns if c != TARGET_COL]
+    
+    if 'num_medians' in PREPROCESS_STATE:
+        for col, val in PREPROCESS_STATE['num_medians'].items():
+            if col in df.columns:
+                df[col] = df[col].fillna(val)
+    if 'cat_modes' in PREPROCESS_STATE:
+        for col, val in PREPROCESS_STATE['cat_modes'].items():
+            if col in df.columns:
+                df[col] = df[col].fillna(val)
+    
+    if TARGET_COL in df.columns:
+        df[TARGET_COL] = pd.to_numeric(df[TARGET_COL], errors='coerce')
+    
+    return df
+
+
+def feature_engineering(df):
+    global PREPROCESS_STATE
+    df = df.copy()
+    
+    log1p_cols = PREPROCESS_STATE.get('log1p_cols', [])
+    for col in log1p_cols:
+        if col in df.columns:
+            min_val = df[col].min()
+            shift = 0
+            if min_val < 0:
+                shift = abs(min_val) + 1
+            df[col] = np.log1p(df[col] + shift)
+    
+    winsor_cols = PREPROCESS_STATE.get('winsor_cols', [])
+    if 'winsor_bounds' not in PREPROCESS_STATE:
+        PREPROCESS_STATE['winsor_bounds'] = {}
+        for col in winsor_cols:
+            if col in df.columns:
+                lower = df[col].quantile(0.01)
+                upper = df[col].quantile(0.99)
+                PREPROCESS_STATE['winsor_bounds'][col] = (lower, upper)
+    
+    for col, (lower, upper) in PREPROCESS_STATE.get('winsor_bounds', {}).items():
+        if col in df.columns:
+            df[col] = df[col].clip(lower, upper)
+    
+    pledge_col = 'Share_pledge_ratio_of_controlling_shareholders'
+    asset_liability_col = 'Asset_liability_ratio'
+    if pledge_col in df.columns and asset_liability_col in df.columns:
+        df['pledge_x_asset_liability'] = df[pledge_col] * df[asset_liability_col]
+    
+    equity_conc_col = 'Equity_concentration__the_first_largest_shareholder_'
+    equity_checks_col = None
+    for c in df.columns:
+        if 'Equity_checks' in c or 'equity_checks' in c.lower():
+            equity_checks_col = c
+            break
+    if equity_conc_col in df.columns and equity_checks_col is not None:
+        df['equity_balance_ratio'] = df[equity_checks_col] / (df[equity_conc_col] + 1e-8)
+    
+    roa_col = 'ROA'
+    roe_col = 'ROE'
+    if roa_col in df.columns and roe_col in df.columns:
+        df['profitability_composite'] = (df[roa_col] + df[roe_col]) / 2
+    
+    for col in df.columns:
+        if col == TARGET_COL:
+            continue
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            df[col] = df[col].fillna(0)
+    
+    X = df.drop(columns=[TARGET_COL], errors='ignore')
+    
+    for col in X.columns:
+        if not np.issubdtype(X[col].dtype, np.number):
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    return X
+
+
+def build_model():
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    
+    scale_pos_weight = 4.4
+    
+    num_cols = PREPROCESS_STATE.get('num_cols', [])
+    cat_cols = PREPROCESS_STATE.get('cat_cols', [])
+    
+    if not cat_cols:
+        preprocessor = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+    else:
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+    
+    model = lgb.LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        min_child_samples=20,
+        lambda_l1=0.1,
+        lambda_l2=0.1,
+        random_state=42,
+        verbose=-1
+    )
+    
+    pipeline = Pipeline([
+        ('preprocess', preprocessor),
+        ('model', model)
+    ])
+    
+    return pipeline
+
+
+# ========== 主流程 ==========
+os.makedirs('output', exist_ok=True)
+
+# 1. 加载或训练模型
+model = None
+if os.path.exists('data/best_model.pkl'):
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        print("Successfully loaded model from data/best_model.pkl")
+    except Exception as e:
+        print(f"Failed to load best_model.pkl: {e}, will retrain")
+
+if model is None:
+    print("Retraining model...")
+    train = pd.read_csv('data/train.csv')
+    val = pd.read_csv('data/validation.csv')
+    
+    train_clean = preprocess(train, mode='train')
+    val_clean = preprocess(val, mode='test')
+    
+    if TARGET_COL in train_clean.columns:
+        y_train = train_clean[TARGET_COL]
+        X_train = train_clean.drop(columns=[TARGET_COL])
+    else:
+        y_train = train[TARGET_COL]
+        X_train = train_clean
+    
+    if TARGET_COL in val_clean.columns:
+        y_val = val_clean[TARGET_COL]
+        X_val = val_clean.drop(columns=[TARGET_COL])
+    else:
+        y_val = val[TARGET_COL]
+        X_val = val_clean
+    
+    X_train_fe = feature_engineering(X_train)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+    X_val_fe = feature_engineering(X_val)
+    if isinstance(X_val_fe, np.ndarray):
+        X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+    
+    for _df in [X_train_fe, X_val_fe]:
+        _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+    for _df in [X_train_fe, X_val_fe]:
+        if _df.columns.duplicated().any():
+            _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+    
+    model = build_model()
+    try:
+        model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+    except Exception:
+        model.fit(X_train_fe, y_train)
+
+# 2. 保存模型
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# 3. 加载测试集
+test = pd.read_csv('data/test.csv')
+id_col = 'Stock code'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+test_clean = preprocess(test, mode='test')
+X_test = test_clean.drop(columns=[TARGET_COL], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+X_test_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# 4. 测试集预测
+test_probs = model.predict_proba(X_test_fe)[:, 1]
+test_preds = (test_probs >= 0.5).astype(int)
+
+test_result = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+    'probability': test_probs
+})
+test_result.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# 5. 特征重要性
+feature_names = X_test_fe.columns.tolist()
+try:
+    # 尝试从Pipeline中提取特征重要性
+    if hasattr(model, 'named_steps') and 'model' in model.named_steps:
+        lgb_model = model.named_steps['model']
+        importances = lgb_model.feature_importances_
+    elif hasattr(model, 'feature_importances_'):
+        importances = model.feature_importances_
+    else:
+        importances = np.ones(len(feature_names)) / len(feature_names)
+except Exception:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 如果特征数量不匹配（Pipeline中有OneHotEncoder），使用模型最终特征数
+if len(importances) != len(feature_names):
+    # 尝试获取Pipeline中预处理后的特征名
+    try:
+        preprocess_step = model.named_steps['preprocess']
+        if hasattr(preprocess_step, 'get_feature_names_out'):
+            feature_names = preprocess_step.get_feature_names_out().tolist()
+        else:
+            feature_names = [f'feature_{i}' for i in range(len(importances))]
+    except Exception:
+        feature_names = [f'feature_{i}' for i in range(len(importances))]
+
+# 确保长度一致
+min_len = min(len(importances), len(feature_names))
+feature_names = feature_names[:min_len]
+importances = importances[:min_len]
+
+# 保存特征重要性CSV
+fi_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+fi_df = fi_df.sort_values('importance', ascending=False)
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# 6. 特征重要性图（Top 20）
+top_n = min(20, len(fi_df))
+top_fi = fi_df.head(top_n).iloc[::-1]
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(top_fi)), top_fi['importance'].values)
+plt.yticks(range(len(top_fi)), top_fi['name'].values)
+plt.xlabel('Importance')
+plt.title('Top 20 Feature Importance')
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# 7. 计算验证集指标（用于报告）
+val_metrics = {}
+if os.path.exists('data/validation.csv'):
+    val = pd.read_csv('data/validation.csv')
+    val_clean = preprocess(val, mode='test')
+    
+    if TARGET_COL in val_clean.columns:
+        y_val = val_clean[TARGET_COL]
+        X_val = val_clean.drop(columns=[TARGET_COL])
+    else:
+        y_val = val[TARGET_COL]
+        X_val = val_clean
+    
+    X_val_fe = feature_engineering(X_val)
+    if isinstance(X_val_fe, np.ndarray):
+        X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+    X_val_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_val_fe.columns]
+    if X_val_fe.columns.duplicated().any():
+        X_val_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_val_fe.columns)]
+    
+    val_probs = model.predict_proba(X_val_fe)[:, 1]
+    val_preds = (val_probs >= 0.5).astype(int)
+    
+    val_metrics = {
+        'roc_auc': float(roc_auc_score(y_val, val_probs)),
+        'average_precision': float(average_precision_score(y_val, val_probs)),
+        'accuracy': float(accuracy_score(y_val, val_preds)),
+        'f1': float(f1_score(y_val, val_preds)),
+        'recall': float(recall_score(y_val, val_preds)),
+        'precision': float(precision_score(y_val, val_preds))
+    }
+    
+    # 混淆矩阵
+    cm = confusion_matrix(y_val, val_preds)
+    cm_dict = {
+        'tn': int(cm[0, 0]),
+        'fp': int(cm[0, 1]),
+        'fn': int(cm[1, 0]),
+        'tp': int(cm[1, 1])
+    }
+    
+    # 分类报告
+    cr = classification_report(y_val, val_preds, target_names=['Non-Default', 'Default'], output_dict=True)
+    
+    # PR曲线图
+    precision_vals, recall_vals, _ = precision_recall_curve(y_val, val_probs)
+    ap_score = val_metrics['average_precision']
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(recall_vals, precision_vals, label=f'PR Curve (AP={ap_score:.4f})')
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title('Precision-Recall Curve')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("PR curve saved to output/report_fig.png")
+
+# 8. 生成HTML报告
+# 构建特征重要性表格HTML
+fi_html_rows = ''
+for _, row in fi_df.head(20).iterrows():
+    fi_html_rows += f'<tr><td>{row["name"]}</td><td>{row["importance"]:.6f}</td></tr>'
+
+# 构建测试集预览HTML
+test_preview_rows = ''
+for _, row in test_result.head(10).iterrows():
+    test_preview_rows += f'<tr><td>{row["id"]}</td><td>{row["prediction"]}</td><td>{row["probability"]:.4f}</td></tr>'
+
+# 混淆矩阵HTML
+cm_html = ''
+if 'cm_dict' in dir():
+    cm_html = f'''
+    <h3>Confusion Matrix (Validation Set)</h3>
+    <table border="1" cellpadding="5" cellspacing="0">
+        <tr><th></th><th>Predicted Negative</th><th>Predicted Positive</th></tr>
+        <tr><th>Actual Negative</th><td>{cm_dict["tn"]}</td><td>{cm_dict["fp"]}</td></tr>
+        <tr><th>Actual Positive</th><td>{cm_dict["fn"]}</td><td>{cm_dict["tp"]}</td></tr>
+    </table>
+    '''
+
+# 分类报告HTML
+cr_html = ''
+if 'cr' in dir():
+    cr_html = '''
+    <h3>Classification Report (Validation Set)</h3>
+    <table border="1" cellpadding="5" cellspacing="0">
+        <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>
+    '''
+    for cls_name, cls_metrics in cr.items():
+        if isinstance(cls_metrics, dict):
+            cr_html += f'''<tr>
+                <td>{cls_name}</td>
+                <td>{cls_metrics["precision"]:.4f}</td>
+                <td>{cls_metrics["recall"]:.4f}</td>
+                <td>{cls_metrics["f1-score"]:.4f}</td>
+                <td>{cls_metrics["support"]}</td>
+            </tr>'''
+    cr_html += '</table>'
+
+# 指标摘要HTML
+metrics_html = ''
+if val_metrics:
+    metrics_html = '''
+    <h3>Model Performance Metrics (Validation Set)</h3>
+    <table border="1" cellpadding="5" cellspacing="0">
+        <tr><th>Metric</th><th>Value</th></tr>
+    '''
+    for k, v in val_metrics.items():
+        metrics_html += f'<tr><td>{k}</td><td>{v:.4f}</td></tr>'
+    metrics_html += '</table>'
+
+html_content = f'''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Model Report - Binary Classification</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        h1 {{ color: #333; }}
+        h2 {{ color: #555; }}
+        h3 {{ color: #777; }}
+        table {{ border-collapse: collapse; margin: 10px 0; }}
+        th {{ background-color: #4CAF50; color: white; padding: 8px; }}
+        td {{ padding: 8px; text-align: center; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .section {{ margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <h1>Binary Classification Model Report</h1>
+    <p>Target: IsDefault | Task: Binary Classification | Evaluation Metric: ROC-AUC</p>
+    
+    <div class="section">
+        {metrics_html}
+    </div>
+    
+    <div class="section">
+        {cm_html}
+    </div>
+    
+    <div class="section">
+        {cr_html}
+    </div>
+    
+    <div class="section">
+        <h3>Feature Importance (Top 20)</h3>
+        <table border="1" cellpadding="5" cellspacing="0">
+            <tr><th>Feature Name</th><th>Importance</th></tr>
+            {fi_html_rows}
+        </table>
+    </div>
+    
+    <div class="section">
+        <h3>Test Set Predictions Preview (First 10 Rows)</h3>
+        <table border="1" cellpadding="5" cellspacing="0">
+            <tr><th>ID</th><th>Prediction</th><th>Probability</th></tr>
+            {test_preview_rows}
+        </table>
+    </div>
+    
+    <div class="section">
+        <h3>Visualizations</h3>
+        <p><img src="feature_importance.png" alt="Feature Importance" style="max-width:600px;"></p>
+        <p><img src="report_fig.png" alt="PR Curve" style="max-width:600px;"></p>
+    </div>
+</body>
+</html>
+'''
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("Report saved to output/report.html")
+
+# 9. 生成独立预测脚本
+predict_script = '''
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+import sys
+
+# 预处理参数（与训练时一致）
+DROP_COLS = [
+    'Stock code', 'Z-SCORE', 'Stock Volatility', 'P/B ratio',
+    'Stock price rise and fall in the last year', 'Annual turnover rate',
+    'changes in operating income', 'Net business cycle (days)',
+    'Turnover rate of accounts receivable (Times)', 'Inventory turnover rate (Times)',
+    'Cash ratio', 'Ratio of accounts receivable to operating income',
+    'Ratio of prepayments to operating income', 'Ratio of other receivables to total assets',
+    'Company size (LN)', 'Equity checks and balances (2-5 large/1 large)',
+    'Total institutional shareholding ratio'
+]
+
+LOG1P_COLS = [
+    'Pledge ratio of limited sale shares', 'ST', 'ROE',
+    'changes in net assets', 'Total asset turnover rate (Times)',
+    'Current ratio', 'Monetary capital/short-term debt',
+    'EBITDA/interest bearing debt', 'EBIT interest cover',
+    'EBITDA interest cover',
+    'Net cash flow from operations has been negative for three consecutive years',
+    'Average cash income ratio in recent three years', 'Cash income ratio',
+    'Ratio of construction in progress to total assets',
+    "Minority shareholders' equity/owners' equity",
+    'The proportion of goodwill in total assets exceeds',
+    'Downgrade or negative', 'audit opinion ',
+    'High deposit and loan of 90p', 'Audit fee'
+]
+
+WINSOR_COLS = [
+    'Pledge ratio of limited sale shares', 'ST', 'ROE',
+    'changes in net assets', 'Total asset turnover rate (Times)',
+    'Current ratio', 'Monetary capital/short-term debt',
+    'EBITDA/interest bearing debt', 'EBIT interest cover',
+    'EBITDA interest cover',
+    'Net cash flow from operations has been negative for three consecutive years',
+    'Average cash income ratio in recent three years', 'Cash income ratio',
+    'Ratio of construction in progress to total assets',
+    "Minority shareholders' equity/owners' equity",
+    'The proportion of goodwill in total assets exceeds',
+    'Downgrade or negative', 'audit opinion ',
+    'High deposit and loan of 90p', 'Audit fee',
+    'Share pledge ratio of controlling shareholders',
+    'Pledge ratio of unlimited shares', 'ROA',
+    'Gross profit margin on sales', 'Asset liability ratio',
+    'Asset liability ratio (excluding advance receipts)',
+    'Asset liability ratio (total liabilities - contract liabilities - advance receipts)/(total assets - goodwill - contract liabilities - advance receipts)',
+    'Current liabilities/total liabilities', 'Company nature (state owned assets 0, others 1)',
+    'Proportion of independent directors', 'Equity concentration (the first largest shareholder)',
+    'Number of research institutions concerned', 'Number of research reports (+1 LN)',
+    'Financial cycle m2/gdp', 'Two positions in one (1 for the same, 0 for the different)',
+    'Whether there are four major audits'
+]
+
+TARGET_COL = 'IsDefault'
+
+def preprocess(df):
+    df = df.copy()
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    
+    drop_cols_clean = [re.sub(r'[^\\w]', '_', str(c)) for c in DROP_COLS]
+    df = df.drop(columns=[c for c in drop_cols_clean if c in df.columns], errors='ignore')
+    
+    pe_col = 'P_E_ratio'
+    if pe_col in df.columns:
+        df[pe_col] = pd.to_numeric(df[pe_col], errors='coerce')
+    
+    for col in df.columns:
+        if col == TARGET_COL:
+            continue
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 使用中位数填充（简化版，实际应使用训练时的值）
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = [c for c in num_cols if c != TARGET_COL]
+    for col in num_cols:
+        df[col] = df[col].fillna(df[col].median() if not df[col].isna().all() else 0)
+    
+    return df
+
+def feature_engineering(df):
+    df = df.copy()
+    
+    log1p_cols_clean = [re.sub(r'[^\\w]', '_', str(c)) for c in LOG1P_COLS]
+    for col in log1p_cols_clean:
+        if col in df.columns:
+            min_val = df[col].min()
+            shift = 0
+            if min_val < 0:
+                shift = abs(min_val) + 1
+            df[col] = np.log1p(df[col] + shift)
+    
+    pledge_col = 'Share_pledge_ratio_of_controlling_shareholders'
+    asset_liability_col = 'Asset_liability_ratio'
+    if pledge_col in df.columns and asset_liability_col in df.columns:
+        df['pledge_x_asset_liability'] = df[pledge_col] * df[asset_liability_col]
+    
+    equity_conc_col = 'Equity_concentration__the_first_largest_shareholder_'
+    equity_checks_col = None
+    for c in df.columns:
+        if 'Equity_checks' in c or 'equity_checks' in c.lower():
+            equity_checks_col = c
+            break
+    if equity_conc_col in df.columns and equity_checks_col is not None:
+        df['equity_balance_ratio'] = df[equity_checks_col] / (df[equity_conc_col] + 1e-8)
+    
+    roa_col = 'ROA'
+    roe_col = 'ROE'
+    if roa_col in df.columns and roe_col in df.columns:
+        df['profitability_composite'] = (df[roa_col] + df[roe_col]) / 2
+    
+    for col in df.columns:
+        if col == TARGET_COL:
+            continue
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
+    X = df.drop(columns=[TARGET_COL], errors='ignore')
+    for col in X.columns:
+        if not np.issubdtype(X[col].dtype, np.number):
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    return X
+
+def predict(input_path, output_path):
+    """对新数据进行预测"""
+    # 加载模型
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(input_path)
+    id_col = 'Stock code' if 'Stock code' in df.columns else df.columns[0]
+    
+    # 预处理
+    df_clean = preprocess(df)
+    X = feature_engineering(df_clean)
+    
+    # 清洗列名
+    X.columns = [re.sub('[^\\w]', '_', str(c)) for c in X.columns]
+    if X.columns.duplicated().any():
+        X.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X.columns)]
+    
+    # 预测
+    probs = model.predict_proba(X)[:, 1]
+    preds = (probs >= 0.5).astype(int)
+    
+    # 保存结果
+    result = pd.DataFrame({
+        'id': df[id_col] if id_col in df.columns else range(len(preds)),
+        'prediction': preds,
+        'probability': probs
+    })
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    return result
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3:
+        print("Usage: python predict.py <input_csv> <output_csv>")
+        sys.exit(1)
+    predict(sys.argv[1], sys.argv[2])
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# 10. 输出摘要
+summary = {
+    'status': 'success',
+    'model_loaded_from_best': os.path.exists('data/best_model.pkl'),
+    'test_samples': len(test_result),
+    'test_positive_rate': float(test_preds.mean()),
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/test_predictions.csv',
+        'output/report_fig.png',
+        'output/predict.py'
+    ]
+}
+if val_metrics:
+    summary['validation_metrics'] = val_metrics
+
+print(json.dumps(summary))
+```
+</code>

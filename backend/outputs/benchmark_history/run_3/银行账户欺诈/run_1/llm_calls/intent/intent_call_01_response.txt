@@ -1,0 +1,7 @@
+{
+  "target_column": "fraud_bool",
+  "task_type": "binary_classification",
+  "eval_metric": "ROC-AUC",
+  "complexity": "complex",
+  "is_time_series": false
+}

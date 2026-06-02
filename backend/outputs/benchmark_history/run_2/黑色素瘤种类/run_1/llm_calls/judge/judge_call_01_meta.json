@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-05-27T15:44:42.380313",
+  "model": "qwen3.5-flash",
+  "provider": "openai",
+  "prompt_tokens": 1294,
+  "completion_tokens": 203,
+  "total_tokens": 1497,
+  "latency_seconds": 2.26
+}

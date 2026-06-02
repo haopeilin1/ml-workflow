@@ -1,0 +1,242 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于患者生理与人口统计指标，构建二分类模型预测糖尿病发病风险（Outcome=1/0）。特征8维。评估指标：AUC。要求模型在测试集上输出患病概率或类别标签，以id对齐提交结果用于验证。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 491,
+  "col_count": 10,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 491,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        351.0,
+        378.0,
+        164.0,
+        610.0,
+        133.0
+      ],
+      "min": 1.0,
+      "max": 614.0,
+      "mean": 308.979633401222,
+      "std": 177.40705986650468,
+      "median": 308.0,
+      "skewness": 0.0031067004817401946,
+      "isMonotonic": false
+    },
+    {
+      "name": "Pregnancies",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 15,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        4.0,
+        0.0,
+        0.0,
+        2.0,
+        8.0
+      ],
+      "min": 0.0,
+      "max": 14.0,
+      "mean": 3.769857433808554,
+      "std": 3.309539054784458,
+      "median": 3.0,
+      "skewness": 0.8892353605738218
+    },
+    {
+      "name": "Glucose",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 124,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        96.0,
+        78.0,
+        162.0,
+        134.0,
+        100.0
+      ],
+      "min": 0.0,
+      "max": 198.0,
+      "mean": 120.5091649694501,
+      "std": 30.64013337070794,
+      "median": 117.0,
+      "skewness": 0.17446540610569214
+    },
+    {
+      "name": "BloodPressure",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 43,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        56.0,
+        88.0,
+        76.0,
+        70.0,
+        76.0
+      ],
+      "min": 0.0,
+      "max": 114.0,
+      "mean": 69.27698574338086,
+      "std": 18.00239949646737,
+      "median": 72.0,
+      "skewness": -1.7749597069479242
+    },
+    {
+      "name": "SkinThickness",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 49,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        17.0,
+        29.0,
+        56.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 99.0,
+      "mean": 20.507128309572302,
+      "std": 15.810789718811726,
+      "median": 23.0,
+      "skewness": 0.16802971003261294
+    },
+    {
+      "name": "Insulin",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 146,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        49.0,
+        40.0,
+        100.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 744.0,
+      "mean": 78.69042769857434,
+      "std": 105.42236668743482,
+      "median": 42.0,
+      "skewness": 1.9467562979100888
+    },
+    {
+      "name": "BMI",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 207,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        20.8,
+        36.9,
+        53.2,
+        28.9,
+        38.7
+      ],
+      "min": 0.0,
+      "max": 67.1,
+      "mean": 31.681262729124235,
+      "std": 8.049189034713175,
+      "median": 32.0,
+      "skewness": -0.601473403940426
+    },
+    {
+      "name": "DiabetesPedigreeFunction",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 377,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.34,
+        0.434,
+        0.759,
+        0.542,
+        0.19
+      ],
+      "min": 0.085,
+      "max": 2.329,
+      "mean": 0.4786232179226069,
+      "std": 0.31473763383762277,
+      "median": 0.394,
+      "skewness": 1.5536476570596605
+    },
+    {
+      "name": "Age",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 50,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        26.0,
+        21.0,
+        25.0,
+        23.0,
+        42.0
+      ],
+      "min": 21.0,
+      "max": 81.0,
+      "mean": 33.29327902240326,
+      "std": 12.12551432284075,
+      "median": 29.0,
+      "skewness": 1.1763146648699936
+    },
+    {
+      "name": "Outcome",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.3380855397148676,
+      "std": 0.47354029289444316,
+      "median": 0.0,
+      "skewness": 0.6866435213900769
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

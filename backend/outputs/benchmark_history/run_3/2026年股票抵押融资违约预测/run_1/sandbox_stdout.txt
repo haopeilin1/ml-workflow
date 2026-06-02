@@ -1,0 +1,3 @@
+METRICS_JSON_START
+{"val_auc": 0.8857001484413656, "val_ap": 0.7017311211864036, "val_f1": 0.6133333333333333, "val_recall": 0.5348837209302325, "val_precision": 0.71875, "val_optimal_threshold": 0.02, "val_tp": 23, "val_fp": 9, "val_tn": 179, "val_fn": 20}
+METRICS_JSON_END

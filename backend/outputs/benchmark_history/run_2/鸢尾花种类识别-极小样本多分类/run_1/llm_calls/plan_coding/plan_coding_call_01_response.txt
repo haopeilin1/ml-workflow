@@ -1,0 +1,522 @@
+<plan>
+产物生成计划：
+1. 加载已保存的模型 data/best_model.pkl（优先）或重新训练
+2. 对测试集 data/test.csv 进行预测
+3. 生成多分类任务所需的所有产物文件到 output/ 目录
+4. 产物包括：model.pkl、feature_importance.csv、feature_importance.png、report.html、test_predictions.csv、report_fig.png（混淆矩阵热力图）、predict.py
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import warnings
+import re
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.svm import SVC
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+warnings.filterwarnings('ignore')
+
+# ========== 确保输出目录存在 ==========
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {
+    'scaler': None,
+    'label_encoder': None,
+    'feature_cols': ['sepal_length', 'sepal_width', 'petal_length', 'petal_width'],
+    'target_col': 'species',
+    'id_col': 'id'
+}
+
+# ========== 数据加载 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'species'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# ========== 预处理函数 ==========
+def preprocess(df, mode='train'):
+    df = df.copy()
+    
+    if mode == 'train':
+        PREPROCESS_STATE.setdefault('scaler', None)
+        PREPROCESS_STATE.setdefault('label_encoder', None)
+        PREPROCESS_STATE.setdefault('id_col', 'id')
+        PREPROCESS_STATE.setdefault('target_col', 'species')
+        PREPROCESS_STATE.setdefault('feature_cols', ['sepal_length', 'sepal_width', 'petal_length', 'petal_width'])
+        
+        target_col_local = PREPROCESS_STATE['target_col']
+        feature_cols_local = PREPROCESS_STATE['feature_cols']
+        
+        if PREPROCESS_STATE['id_col'] in df.columns:
+            df = df.drop(columns=[PREPROCESS_STATE['id_col']])
+        
+        if target_col_local in df.columns:
+            le = LabelEncoder()
+            df[target_col_local] = le.fit_transform(df[target_col_local])
+            PREPROCESS_STATE['label_encoder'] = le
+        
+        scaler = StandardScaler()
+        df[feature_cols_local] = scaler.fit_transform(df[feature_cols_local])
+        PREPROCESS_STATE['scaler'] = scaler
+        
+    elif mode == 'test':
+        target_col_local = PREPROCESS_STATE.get('target_col', 'species')
+        feature_cols_local = PREPROCESS_STATE.get('feature_cols', ['sepal_length', 'sepal_width', 'petal_length', 'petal_width'])
+        
+        if PREPROCESS_STATE.get('id_col', 'id') in df.columns:
+            df = df.drop(columns=[PREPROCESS_STATE['id_col']])
+        
+        if target_col_local in df.columns and PREPROCESS_STATE.get('label_encoder') is not None:
+            le = PREPROCESS_STATE['label_encoder']
+            known_classes = set(le.classes_)
+            df[target_col_local] = df[target_col_local].apply(
+                lambda x: x if x in known_classes else le.classes_[0]
+            )
+            df[target_col_local] = le.transform(df[target_col_local])
+        
+        if PREPROCESS_STATE.get('scaler') is not None:
+            scaler = PREPROCESS_STATE['scaler']
+            df[feature_cols_local] = scaler.transform(df[feature_cols_local])
+    
+    return df
+
+
+def feature_engineering(df):
+    df = df.copy()
+    
+    if 'feature_cols' not in PREPROCESS_STATE or PREPROCESS_STATE['feature_cols'] is None:
+        target_col_local = PREPROCESS_STATE.get('target_col', 'species')
+        id_col_local = PREPROCESS_STATE.get('id_col', 'id')
+        feature_cols_local = [c for c in df.columns if c not in [target_col_local, id_col_local]]
+        PREPROCESS_STATE['feature_cols'] = feature_cols_local
+    else:
+        feature_cols_local = PREPROCESS_STATE['feature_cols']
+    
+    target_col_local = PREPROCESS_STATE.get('target_col', 'species')
+    
+    X = df.drop(columns=[target_col_local], errors='ignore')
+    
+    available_cols = [c for c in feature_cols_local if c in X.columns]
+    X = X[available_cols]
+    
+    for col in X.columns:
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    return X
+
+
+# ========== 预处理训练数据（用于拟合预处理参数） ==========
+train_clean = preprocess(train, mode='train')
+
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+# 强制编码目标列
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+# 特征工程
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+
+# 清洗特征名
+for _df in [X_train_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+if X_train_fe.columns.duplicated().any():
+    X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+
+# ========== 加载或训练模型 ==========
+model = None
+model_loaded_from_file = False
+
+if os.path.exists('data/best_model.pkl'):
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        model_loaded_from_file = True
+        print("[INFO] 成功从 data/best_model.pkl 加载模型")
+    except Exception as e:
+        print(f"[WARN] 加载 data/best_model.pkl 失败: {e}，将重新训练模型")
+
+if model is None:
+    print("[INFO] 重新训练模型...")
+    model = SVC(
+        kernel='rbf',
+        C=1.0,
+        gamma='scale',
+        probability=True,
+        random_state=42
+    )
+    model.fit(X_train_fe, y_train)
+    print("[INFO] 模型训练完成")
+
+# ========== 构建完整的 Pipeline（用于保存） ==========
+feature_cols_final = PREPROCESS_STATE.get('feature_cols', ['sepal_length', 'sepal_width', 'petal_length', 'petal_width'])
+numeric_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='mean')),
+    ('scaler', StandardScaler())
+])
+preprocessor = ColumnTransformer(
+    transformers=[('num', numeric_transformer, feature_cols_final)],
+    remainder='drop'
+)
+pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('classifier', model)
+])
+
+# 用训练数据拟合 pipeline 中的预处理器
+X_train_raw = train[feature_cols_final].copy()
+for col in X_train_raw.columns:
+    X_train_raw[col] = pd.to_numeric(X_train_raw[col], errors='coerce')
+pipeline.fit(X_train_raw, y_train)
+
+# 保存 pipeline 到 output/model.pkl
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(pipeline, f)
+print("[INFO] 模型已保存到 output/model.pkl")
+
+# ========== 测试集预处理和预测 ==========
+test_clean = preprocess(test, mode='test')
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# 清洗特征名
+X_test_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# 预测
+test_probs_all = model.predict_proba(X_test_fe)
+test_preds = model.predict(X_test_fe)
+
+# 反编码预测标签
+label_encoder_final = PREPROCESS_STATE.get('label_encoder', None)
+if label_encoder_final is not None:
+    test_preds_labels = label_encoder_final.inverse_transform(test_preds)
+    class_names = label_encoder_final.classes_.tolist()
+else:
+    test_preds_labels = test_preds
+    class_names = sorted(set(test_preds))
+
+# 保存测试预测结果
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds_labels)),
+    'prediction': test_preds_labels,
+})
+for i in range(test_probs_all.shape[1]):
+    col_name = f'proba_{i}'
+    if label_encoder_final is not None and i < len(class_names):
+        col_name = f'proba_{class_names[i]}'
+    result_df[col_name] = test_probs_all[:, i]
+
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("[INFO] 测试预测结果已保存到 output/test_predictions.csv")
+
+# ========== 特征重要性 ==========
+feature_names = X_train_fe.columns.tolist()
+
+# 对于 SVM，使用系数绝对值作为特征重要性（仅适用于线性核，RBF 核无直接特征重要性）
+# 尝试获取 feature_importances_，如果没有则使用 permutation importance 的简化版本
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    # 多分类 SVM：coef_ shape 为 (n_classes, n_features)，取绝对值平均
+    importances = np.abs(model.coef_).mean(axis=0)
+else:
+    # 兜底：使用均匀重要性
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 保存特征重要性 CSV
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("[INFO] 特征重要性已保存到 output/feature_importance.csv")
+
+# ========== 特征重要性图 ==========
+plt.figure(figsize=(10, 6))
+sorted_idx = np.argsort(importances)
+plt.barh(range(len(sorted_idx)), importances[sorted_idx], color='steelblue')
+plt.yticks(range(len(sorted_idx)), [feature_names[i] for i in sorted_idx])
+plt.xlabel('Importance')
+plt.title('Feature Importance')
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("[INFO] 特征重要性图已保存到 output/feature_importance.png")
+
+# ========== 混淆矩阵热力图（多分类差异化产物） ==========
+# 使用训练数据上的预测来生成混淆矩阵（测试集没有真实标签）
+# 如果有验证集则使用验证集，否则使用训练集
+if os.path.exists('data/validation.csv'):
+    val = pd.read_csv('data/validation.csv')
+    val_clean = preprocess(val, mode='test')
+    if target_col in val_clean.columns:
+        y_val = val_clean[target_col]
+        X_val = val_clean.drop(columns=[target_col])
+    else:
+        y_val = val[target_col]
+        X_val = val_clean
+    
+    X_val_fe = feature_engineering(X_val)
+    if isinstance(X_val_fe, np.ndarray):
+        X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+    X_val_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_val_fe.columns]
+    if X_val_fe.columns.duplicated().any():
+        X_val_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_val_fe.columns)]
+    
+    val_preds = model.predict(X_val_fe)
+    cm = confusion_matrix(y_val, val_preds)
+    val_accuracy = accuracy_score(y_val, val_preds)
+    val_f1_macro = f1_score(y_val, val_preds, average='macro')
+    val_f1_weighted = f1_score(y_val, val_preds, average='weighted')
+    report_dict = classification_report(y_val, val_preds, target_names=class_names if label_encoder_final else None, output_dict=True)
+else:
+    # 使用训练集
+    train_preds = model.predict(X_train_fe)
+    cm = confusion_matrix(y_train, train_preds)
+    val_accuracy = accuracy_score(y_train, train_preds)
+    val_f1_macro = f1_score(y_train, train_preds, average='macro')
+    val_f1_weighted = f1_score(y_train, train_preds, average='weighted')
+    report_dict = classification_report(y_train, train_preds, target_names=class_names if label_encoder_final else None, output_dict=True)
+
+# 绘制混淆矩阵热力图
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=class_names if label_encoder_final else None,
+            yticklabels=class_names if label_encoder_final else None)
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix')
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("[INFO] 混淆矩阵热力图已保存到 output/report_fig.png")
+
+# ========== 生成 HTML 报告 ==========
+metrics_summary = {
+    'accuracy': float(val_accuracy),
+    'f1_macro': float(val_f1_macro),
+    'f1_weighted': float(val_f1_weighted)
+}
+
+# 构建特征重要性表格 HTML
+importance_html_rows = ''
+for _, row in importance_df.iterrows():
+    importance_html_rows += f'<tr><td>{row["name"]}</td><td>{row["importance"]:.6f}</td></tr>'
+
+# 构建分类报告表格 HTML
+report_html_rows = ''
+for cls_name, cls_metrics in report_dict.items():
+    if isinstance(cls_metrics, dict):
+        report_html_rows += f'''<tr>
+            <td>{cls_name}</td>
+            <td>{cls_metrics.get('precision', 0):.4f}</td>
+            <td>{cls_metrics.get('recall', 0):.4f}</td>
+            <td>{cls_metrics.get('f1-score', 0):.4f}</td>
+            <td>{cls_metrics.get('support', 0)}</td>
+        </tr>'''
+
+# 构建测试预测预览表格
+preview_rows = ''
+for i in range(min(10, len(result_df))):
+    row = result_df.iloc[i]
+    preview_rows += f'<tr><td>{row["id"]}</td><td>{row["prediction"]}</td></tr>'
+
+html_content = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>模型报告 - 多分类任务</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        h1 {{ color: #333; text-align: center; }}
+        h2 {{ color: #555; border-bottom: 2px solid #ddd; padding-bottom: 5px; }}
+        .container {{ max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
+        th, td {{ padding: 8px 12px; text-align: left; border: 1px solid #ddd; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        .metrics {{ display: flex; justify-content: space-around; margin: 20px 0; }}
+        .metric-card {{ background: #e8f5e9; padding: 15px; border-radius: 8px; text-align: center; min-width: 120px; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2e7d32; }}
+        .metric-label {{ font-size: 14px; color: #666; }}
+        img {{ max-width: 100%; height: auto; display: block; margin: 20px auto; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>多分类模型报告</h1>
+        
+        <h2>模型指标摘要</h2>
+        <div class="metrics">
+            <div class="metric-card">
+                <div class="metric-value">{val_accuracy:.4f}</div>
+                <div class="metric-label">Accuracy</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{val_f1_macro:.4f}</div>
+                <div class="metric-label">F1 Macro</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{val_f1_weighted:.4f}</div>
+                <div class="metric-label">F1 Weighted</div>
+            </div>
+        </div>
+        
+        <h2>分类报告</h2>
+        <table>
+            <tr>
+                <th>类别</th>
+                <th>Precision</th>
+                <th>Recall</th>
+                <th>F1-Score</th>
+                <th>Support</th>
+            </tr>
+            {report_html_rows}
+        </table>
+        
+        <h2>混淆矩阵</h2>
+        <img src="report_fig.png" alt="Confusion Matrix">
+        
+        <h2>特征重要性</h2>
+        <table>
+            <tr>
+                <th>特征名称</th>
+                <th>重要性</th>
+            </tr>
+            {importance_html_rows}
+        </table>
+        <img src="feature_importance.png" alt="Feature Importance">
+        
+        <h2>测试集预测预览（前10条）</h2>
+        <table>
+            <tr>
+                <th>ID</th>
+                <th>预测类别</th>
+            </tr>
+            {preview_rows}
+        </table>
+    </div>
+</body>
+</html>'''
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("[INFO] HTML 报告已保存到 output/report.html")
+
+# ========== 生成配套预测脚本 ==========
+predict_script = '''import pandas as pd
+import pickle
+import os
+import sys
+
+def predict(input_path, output_path):
+    """
+    加载模型并对新数据进行预测。
+    
+    参数:
+        input_path: 输入 CSV 文件路径（必须包含特征列）
+        output_path: 输出 CSV 文件路径（包含预测结果）
+    """
+    # 加载模型
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"模型文件不存在: {model_path}")
+    
+    with open(model_path, 'rb') as f:
+        pipeline = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(input_path)
+    
+    # 预测
+    predictions = pipeline.predict(df)
+    probabilities = pipeline.predict_proba(df)
+    
+    # 构建输出
+    result = df.copy()
+    result['prediction'] = predictions
+    
+    for i in range(probabilities.shape[1]):
+        result[f'proba_{i}'] = probabilities[:, i]
+    
+    # 保存结果
+    result.to_csv(output_path, index=False)
+    print(f"预测完成，结果已保存到 {output_path}")
+    return result
+
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        print("用法: python predict.py <输入文件路径> <输出文件路径>")
+        sys.exit(1)
+    
+    predict(sys.argv[1], sys.argv[2])
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("[INFO] 预测脚本已保存到 output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_loaded_from_file': model_loaded_from_file,
+    'metrics': metrics_summary,
+    'num_test_samples': len(result_df),
+    'num_classes': len(class_names),
+    'class_names': class_names,
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/test_predictions.csv',
+        'output/report_fig.png',
+        'output/predict.py'
+    ]
+}
+print(json.dumps(summary))
+```
+</code>

@@ -1,0 +1,778 @@
+<plan>
+产物生成计划：加载已保存的最佳模型 data/best_model.pkl，对测试集进行预测，生成二分类任务所需的所有产物文件。由于 data/best_model.pkl 已存在，优先直接加载，无需重新训练。产物包括：模型文件、特征重要性CSV和PNG、HTML报告、测试预测CSV、ROC曲线图、独立预测脚本。
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import (accuracy_score, roc_auc_score, roc_curve,
+                             precision_recall_curve, average_precision_score,
+                             confusion_matrix, classification_report,
+                             precision_score, recall_score, f1_score)
+warnings.filterwarnings('ignore')
+
+# ========== 确保输出目录存在 ==========
+os.makedirs('output', exist_ok=True)
+
+# ========== 1. 加载已保存的最佳模型 ==========
+print("Loading best model from data/best_model.pkl...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Model loaded successfully.")
+    model_loaded = True
+except Exception as e:
+    print(f"Failed to load model: {e}")
+    print("Will retrain model...")
+    model_loaded = False
+
+# ========== 2. 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'label'
+id_col = 'id' if 'id' in test.columns else test.columns[0]
+
+# ========== 3. 如果模型加载失败，重新训练 ==========
+if not model_loaded:
+    print("Retraining model...")
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from xgboost import XGBClassifier
+
+    # 预处理函数
+    def clean_feature_names(df):
+        df = df.copy()
+        df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+        return df
+
+    def preprocess(df):
+        df = df.copy()
+        drop_cols = ['id']
+        drop_cols = [c for c in drop_cols if c in df.columns]
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
+        if 'Category' in df.columns:
+            df['Category'] = df['Category'].fillna('unknown')
+        if 'isWeekend' in df.columns:
+            mode_val = df['isWeekend'].mode()
+            if len(mode_val) > 0:
+                df['isWeekend'] = df['isWeekend'].fillna(mode_val[0])
+        for col in ['numItems', 'paymentMethodAgeDays']:
+            if col in df.columns:
+                min_val = df[col].min()
+                if min_val < 0:
+                    df[col] = df[col] - min_val
+                df[col] = np.log1p(df[col])
+        if 'localTime' in df.columns:
+            df['localTime'] = df['localTime'] ** 2
+        df = clean_feature_names(df)
+        return df
+
+    def feature_engineering(df):
+        df = df.copy()
+        y = None
+        if target_col in df.columns:
+            y = df[target_col]
+            df = df.drop(columns=[target_col])
+
+        payment_col = None
+        category_col = None
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'paymentmethod' in col_lower and 'age' not in col_lower:
+                payment_col = col
+            if 'category' in col_lower:
+                category_col = col
+        if payment_col and category_col:
+            combo_name = f'{payment_col}_{category_col}_combo'
+            df[combo_name] = df[payment_col].astype(str) + '_' + df[category_col].astype(str)
+
+        account_col = None
+        payment_age_col = None
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'accountage' in col_lower:
+                account_col = col
+            if 'paymentmethodage' in col_lower:
+                payment_age_col = col
+        if account_col and payment_age_col:
+            ratio_name = 'accountAge_paymentAge_ratio'
+            df[ratio_name] = df[account_col] / (df[payment_age_col] + 1)
+            df[ratio_name] = df[ratio_name].clip(upper=df[ratio_name].quantile(0.99))
+
+        numitems_col = None
+        for col in df.columns:
+            if 'numitems' in col.lower():
+                numitems_col = col
+                break
+        if numitems_col:
+            bins = [-np.inf, 1, 2, np.inf]
+            labels = ['1_item', '2_items', '3plus_items']
+            bin_col_name = f'{numitems_col}_binned'
+            df[bin_col_name] = pd.cut(df[numitems_col], bins=bins, labels=labels)
+
+        weekend_col = None
+        localtime_col = None
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'isweekend' in col_lower:
+                weekend_col = col
+            if 'localtime' in col_lower:
+                localtime_col = col
+        if weekend_col and localtime_col:
+            weekend_time_name = 'weekend_localtime_interaction'
+            df[weekend_time_name] = df[weekend_col] * df[localtime_col]
+
+        cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        num_cols = df.select_dtypes(exclude=['object', 'category']).columns.tolist()
+
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='constant', fill_value='unknown')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+
+        X_processed = preprocessor.fit_transform(df)
+        try:
+            cat_feature_names = preprocessor.named_transformers_['cat'].named_steps['encoder'].get_feature_names_out(cat_cols)
+            all_feature_names = list(cat_feature_names) + num_cols
+        except:
+            all_feature_names = [f'feature_{i}' for i in range(X_processed.shape[1])]
+
+        X_df = pd.DataFrame(X_processed, columns=all_feature_names, index=df.index)
+        X_df = clean_feature_names(X_df)
+        for col in X_df.columns:
+            if X_df[col].dtype == 'object':
+                X_df[col] = pd.to_numeric(X_df[col], errors='coerce')
+            X_df[col] = X_df[col].astype(float)
+        X_df = X_df.fillna(0)
+
+        return X_df, y, preprocessor
+
+    # 预处理训练数据
+    train_clean = preprocess(train)
+    X_train, y_train, preprocessor_obj = feature_engineering(train_clean)
+
+    # 训练模型
+    scale_pos_weight = 69
+    model = XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        learning_rate=0.05,
+        max_depth=5,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_estimators=500,
+        min_child_weight=1,
+        gamma=0.1,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        eval_metric='logloss',
+        use_label_encoder=False,
+        verbosity=0
+    )
+    model.fit(X_train, y_train)
+    print("Model retrained successfully.")
+
+# ========== 4. 保存模型到 output/model.pkl ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 5. 对测试集进行预测 ==========
+# 需要重新执行预处理和特征工程来获取测试特征
+# 由于模型是从 best_model.pkl 加载的，我们需要用相同的预处理逻辑
+# 重新定义预处理和特征工程（与训练时一致）
+def clean_feature_names(df):
+    df = df.copy()
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    return df
+
+def preprocess_test(df):
+    df = df.copy()
+    drop_cols = ['id']
+    drop_cols = [c for c in drop_cols if c in df.columns]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+    if 'Category' in df.columns:
+        df['Category'] = df['Category'].fillna('unknown')
+    if 'isWeekend' in df.columns:
+        df['isWeekend'] = df['isWeekend'].fillna(0)
+    for col in ['numItems', 'paymentMethodAgeDays']:
+        if col in df.columns:
+            min_val = df[col].min()
+            if min_val < 0:
+                df[col] = df[col] - min_val
+            df[col] = np.log1p(df[col])
+    if 'localTime' in df.columns:
+        df['localTime'] = df['localTime'] ** 2
+    df = clean_feature_names(df)
+    return df
+
+def feature_engineering_test(df):
+    df = df.copy()
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+
+    payment_col = None
+    category_col = None
+    for col in df.columns:
+        col_lower = col.lower()
+        if 'paymentmethod' in col_lower and 'age' not in col_lower:
+            payment_col = col
+        if 'category' in col_lower:
+            category_col = col
+    if payment_col and category_col:
+        combo_name = f'{payment_col}_{category_col}_combo'
+        df[combo_name] = df[payment_col].astype(str) + '_' + df[category_col].astype(str)
+
+    account_col = None
+    payment_age_col = None
+    for col in df.columns:
+        col_lower = col.lower()
+        if 'accountage' in col_lower:
+            account_col = col
+        if 'paymentmethodage' in col_lower:
+            payment_age_col = col
+    if account_col and payment_age_col:
+        ratio_name = 'accountAge_paymentAge_ratio'
+        df[ratio_name] = df[account_col] / (df[payment_age_col] + 1)
+        df[ratio_name] = df[ratio_name].clip(upper=df[ratio_name].quantile(0.99))
+
+    numitems_col = None
+    for col in df.columns:
+        if 'numitems' in col.lower():
+            numitems_col = col
+            break
+    if numitems_col:
+        bins = [-np.inf, 1, 2, np.inf]
+        labels = ['1_item', '2_items', '3plus_items']
+        bin_col_name = f'{numitems_col}_binned'
+        df[bin_col_name] = pd.cut(df[numitems_col], bins=bins, labels=labels)
+
+    weekend_col = None
+    localtime_col = None
+    for col in df.columns:
+        col_lower = col.lower()
+        if 'isweekend' in col_lower:
+            weekend_col = col
+        if 'localtime' in col_lower:
+            localtime_col = col
+    if weekend_col and localtime_col:
+        weekend_time_name = 'weekend_localtime_interaction'
+        df[weekend_time_name] = df[weekend_col] * df[localtime_col]
+
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = df.select_dtypes(exclude=['object', 'category']).columns.tolist()
+
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+
+    preprocessor = ColumnTransformer([
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='constant', fill_value='unknown')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ]), cat_cols),
+        ('num', Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ]), num_cols)
+    ], remainder='passthrough')
+
+    X_processed = preprocessor.fit_transform(df)
+    try:
+        cat_feature_names = preprocessor.named_transformers_['cat'].named_steps['encoder'].get_feature_names_out(cat_cols)
+        all_feature_names = list(cat_feature_names) + num_cols
+    except:
+        all_feature_names = [f'feature_{i}' for i in range(X_processed.shape[1])]
+
+    X_df = pd.DataFrame(X_processed, columns=all_feature_names, index=df.index)
+    X_df = clean_feature_names(X_df)
+    for col in X_df.columns:
+        if X_df[col].dtype == 'object':
+            X_df[col] = pd.to_numeric(X_df[col], errors='coerce')
+        X_df[col] = X_df[col].astype(float)
+    X_df = X_df.fillna(0)
+
+    return X_df
+
+# 处理测试数据
+test_clean = preprocess_test(test)
+X_test = feature_engineering_test(test_clean)
+
+# 预测
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test)[:, 1]
+else:
+    test_probs = model.predict(X_test).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+# 保存测试预测
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+    'probability': test_probs
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 6. 特征重要性 ==========
+# 获取特征名
+feature_names = X_test.columns.tolist()
+
+# 获取特征重要性
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    importances = np.abs(model.coef_).flatten()
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    feature_names = [f'feature_{i}' for i in range(len(importances))]
+
+# 保存特征重要性 CSV
+fi_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+fi_df = fi_df.sort_values('importance', ascending=False)
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# 生成特征重要性图（只显示前20个）
+top_n = min(20, len(fi_df))
+fi_top = fi_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(fi_top)), fi_top['importance'].values, color='steelblue')
+plt.yticks(range(len(fi_top)), fi_top['name'].values)
+plt.xlabel('Importance')
+plt.title('Top {} Feature Importance'.format(top_n))
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 7. 生成 ROC 曲线图 ==========
+# 使用训练数据计算 ROC 曲线（如果有目标列）
+train_clean_full = preprocess_test(train)
+X_train_full, y_train_full = feature_engineering_test(train_clean_full), None
+if target_col in train_clean_full.columns:
+    y_train_full = train_clean_full[target_col]
+elif target_col in train.columns:
+    y_train_full = train[target_col]
+
+if y_train_full is not None:
+    # 对训练集预测
+    if hasattr(model, 'predict_proba'):
+        train_probs = model.predict_proba(X_train_full)[:, 1]
+    else:
+        train_probs = model.predict(X_train_full).astype(float)
+
+    # ROC 曲线
+    fpr, tpr, _ = roc_curve(y_train_full, train_probs)
+    roc_auc = roc_auc_score(y_train_full, train_probs)
+
+    # PR 曲线
+    precision, recall, _ = precision_recall_curve(y_train_full, train_probs)
+    ap = average_precision_score(y_train_full, train_probs)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # ROC
+    axes[0].plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.4f})')
+    axes[0].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    axes[0].set_xlim([0.0, 1.0])
+    axes[0].set_ylim([0.0, 1.05])
+    axes[0].set_xlabel('False Positive Rate')
+    axes[0].set_ylabel('True Positive Rate')
+    axes[0].set_title('ROC Curve')
+    axes[0].legend(loc="lower right")
+
+    # PR
+    axes[1].plot(recall, precision, color='green', lw=2, label=f'PR curve (AP = {ap:.4f})')
+    axes[1].set_xlabel('Recall')
+    axes[1].set_ylabel('Precision')
+    axes[1].set_title('Precision-Recall Curve')
+    axes[1].legend(loc="lower left")
+
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("Report figure saved to output/report_fig.png")
+
+    # 计算指标
+    train_preds = (train_probs >= 0.5).astype(int)
+    accuracy = accuracy_score(y_train_full, train_preds)
+    precision_val = precision_score(y_train_full, train_preds, zero_division=0)
+    recall_val = recall_score(y_train_full, train_preds, zero_division=0)
+    f1 = f1_score(y_train_full, train_preds, zero_division=0)
+    cm = confusion_matrix(y_train_full, train_preds)
+    report_dict = classification_report(y_train_full, train_preds, output_dict=True, zero_division=0)
+
+    metrics_summary = {
+        'accuracy': float(accuracy),
+        'precision': float(precision_val),
+        'recall': float(recall_val),
+        'f1_score': float(f1),
+        'roc_auc': float(roc_auc),
+        'average_precision': float(ap),
+        'confusion_matrix': cm.tolist()
+    }
+else:
+    metrics_summary = {
+        'accuracy': 'N/A',
+        'precision': 'N/A',
+        'recall': 'N/A',
+        'f1_score': 'N/A',
+        'roc_auc': 'N/A',
+        'average_precision': 'N/A',
+        'confusion_matrix': 'N/A'
+    }
+    report_dict = {}
+
+# ========== 8. 生成 HTML 报告 ==========
+html_content = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Binary Classification</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background-color: #f9f9f9; }
+        h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
+        h2 { color: #555; margin-top: 30px; }
+        table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #4CAF50; color: white; }
+        tr:nth-child(even) { background-color: #f2f2f2; }
+        .metrics { display: flex; flex-wrap: wrap; gap: 20px; }
+        .metric-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex: 1; min-width: 200px; }
+        .metric-value { font-size: 24px; font-weight: bold; color: #4CAF50; }
+        .metric-label { font-size: 14px; color: #666; }
+    </style>
+</head>
+<body>
+    <h1>Binary Classification Model Report</h1>
+
+    <h2>Model Performance Metrics</h2>
+    <div class="metrics">
+"""
+
+# 添加指标卡片
+for key, value in metrics_summary.items():
+    if key != 'confusion_matrix':
+        display_value = f"{value:.4f}" if isinstance(value, float) else str(value)
+        html_content += f"""
+        <div class="metric-card">
+            <div class="metric-value">{display_value}</div>
+            <div class="metric-label">{key.replace('_', ' ').title()}</div>
+        </div>
+        """
+
+html_content += """
+    </div>
+"""
+
+# 混淆矩阵
+if isinstance(metrics_summary.get('confusion_matrix'), list):
+    cm_data = metrics_summary['confusion_matrix']
+    html_content += """
+    <h2>Confusion Matrix</h2>
+    <table>
+        <tr><th></th><th>Predicted Negative</th><th>Predicted Positive</th></tr>
+        <tr><td><b>Actual Negative</b></td><td>{}</td><td>{}</td></tr>
+        <tr><td><b>Actual Positive</b></td><td>{}</td><td>{}</td></tr>
+    </table>
+    """.format(cm_data[0][0], cm_data[0][1], cm_data[1][0], cm_data[1][1])
+
+# 分类报告
+if report_dict:
+    html_content += """
+    <h2>Classification Report</h2>
+    <table>
+        <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>
+    """
+    for cls, metrics in report_dict.items():
+        if isinstance(metrics, dict):
+            html_content += f"""
+            <tr>
+                <td>{cls}</td>
+                <td>{metrics['precision']:.4f}</td>
+                <td>{metrics['recall']:.4f}</td>
+                <td>{metrics['f1-score']:.4f}</td>
+                <td>{metrics['support']}</td>
+            </tr>
+            """
+    html_content += "</table>"
+
+# 特征重要性表格
+html_content += """
+    <h2>Feature Importance (Top 20)</h2>
+    <table>
+        <tr><th>Rank</th><th>Feature Name</th><th>Importance</th></tr>
+"""
+for i, row in fi_top.iterrows():
+    html_content += f"""
+        <tr>
+            <td>{list(fi_top.index).index(i) + 1}</td>
+            <td>{row['name']}</td>
+            <td>{row['importance']:.6f}</td>
+        </tr>
+    """
+html_content += "</table>"
+
+# 测试预测预览
+html_content += """
+    <h2>Test Predictions Preview (First 10 Rows)</h2>
+    <table>
+        <tr><th>ID</th><th>Prediction</th><th>Probability</th></tr>
+"""
+for i, row in result_df.head(10).iterrows():
+    html_content += f"""
+        <tr>
+            <td>{row['id']}</td>
+            <td>{row['prediction']}</td>
+            <td>{row['probability']:.6f}</td>
+        </tr>
+    """
+html_content += "</table>"
+
+html_content += """
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 9. 生成独立预测脚本 ==========
+predict_script = '''
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+def clean_feature_names(df):
+    df = df.copy()
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    return df
+
+def preprocess(df):
+    df = df.copy()
+    drop_cols = ['id']
+    drop_cols = [c for c in drop_cols if c in df.columns]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+    if 'Category' in df.columns:
+        df['Category'] = df['Category'].fillna('unknown')
+    if 'isWeekend' in df.columns:
+        df['isWeekend'] = df['isWeekend'].fillna(0)
+    for col in ['numItems', 'paymentMethodAgeDays']:
+        if col in df.columns:
+            min_val = df[col].min()
+            if min_val < 0:
+                df[col] = df[col] - min_val
+            df[col] = np.log1p(df[col])
+    if 'localTime' in df.columns:
+        df['localTime'] = df['localTime'] ** 2
+    df = clean_feature_names(df)
+    return df
+
+def feature_engineering(df):
+    df = df.copy()
+    target_col = 'label'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+
+    payment_col = None
+    category_col = None
+    for col in df.columns:
+        col_lower = col.lower()
+        if 'paymentmethod' in col_lower and 'age' not in col_lower:
+            payment_col = col
+        if 'category' in col_lower:
+            category_col = col
+    if payment_col and category_col:
+        combo_name = f'{payment_col}_{category_col}_combo'
+        df[combo_name] = df[payment_col].astype(str) + '_' + df[category_col].astype(str)
+
+    account_col = None
+    payment_age_col = None
+    for col in df.columns:
+        col_lower = col.lower()
+        if 'accountage' in col_lower:
+            account_col = col
+        if 'paymentmethodage' in col_lower:
+            payment_age_col = col
+    if account_col and payment_age_col:
+        ratio_name = 'accountAge_paymentAge_ratio'
+        df[ratio_name] = df[account_col] / (df[payment_age_col] + 1)
+        df[ratio_name] = df[ratio_name].clip(upper=df[ratio_name].quantile(0.99))
+
+    numitems_col = None
+    for col in df.columns:
+        if 'numitems' in col.lower():
+            numitems_col = col
+            break
+    if numitems_col:
+        bins = [-np.inf, 1, 2, np.inf]
+        labels = ['1_item', '2_items', '3plus_items']
+        bin_col_name = f'{numitems_col}_binned'
+        df[bin_col_name] = pd.cut(df[numitems_col], bins=bins, labels=labels)
+
+    weekend_col = None
+    localtime_col = None
+    for col in df.columns:
+        col_lower = col.lower()
+        if 'isweekend' in col_lower:
+            weekend_col = col
+        if 'localtime' in col_lower:
+            localtime_col = col
+    if weekend_col and localtime_col:
+        weekend_time_name = 'weekend_localtime_interaction'
+        df[weekend_time_name] = df[weekend_col] * df[localtime_col]
+
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = df.select_dtypes(exclude=['object', 'category']).columns.tolist()
+
+    preprocessor = ColumnTransformer([
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='constant', fill_value='unknown')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ]), cat_cols),
+        ('num', Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ]), num_cols)
+    ], remainder='passthrough')
+
+    X_processed = preprocessor.fit_transform(df)
+    try:
+        cat_feature_names = preprocessor.named_transformers_['cat'].named_steps['encoder'].get_feature_names_out(cat_cols)
+        all_feature_names = list(cat_feature_names) + num_cols
+    except:
+        all_feature_names = [f'feature_{i}' for i in range(X_processed.shape[1])]
+
+    X_df = pd.DataFrame(X_processed, columns=all_feature_names, index=df.index)
+    X_df = clean_feature_names(X_df)
+    for col in X_df.columns:
+        if X_df[col].dtype == 'object':
+            X_df[col] = pd.to_numeric(X_df[col], errors='coerce')
+        X_df[col] = X_df[col].astype(float)
+    X_df = X_df.fillna(0)
+
+    return X_df
+
+def predict(input_path, output_path=None):
+    """
+    Load model and make predictions on new data.
+
+    Parameters:
+    - input_path: str, path to input CSV file
+    - output_path: str, optional, path to save predictions
+
+    Returns:
+    - DataFrame with predictions
+    """
+    # Load model
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+
+    # Load data
+    df = pd.read_csv(input_path)
+
+    # Preprocess
+    df_clean = preprocess(df)
+    X = feature_engineering(df_clean)
+
+    # Predict
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X)[:, 1]
+    else:
+        probs = model.predict(X).astype(float)
+    preds = (probs >= 0.5).astype(int)
+
+    # Build result
+    id_col = 'id' if 'id' in df.columns else df.columns[0]
+    result = pd.DataFrame({
+        'id': df[id_col] if id_col in df.columns else range(len(preds)),
+        'prediction': preds,
+        'probability': probs
+    })
+
+    if output_path:
+        result.to_csv(output_path, index=False)
+        print(f"Predictions saved to {output_path}")
+
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv> [output_csv]")
+        sys.exit(1)
+
+    input_file = sys.argv[1]
+    output_file = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+    result = predict(input_file, output_file)
+    print(result.head())
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 10. 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_loaded_from_best': model_loaded,
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/test_predictions.csv',
+        'output/report_fig.png',
+        'output/predict.py'
+    ],
+    'metrics': metrics_summary,
+    'test_predictions_count': len(result_df),
+    'feature_count': len(fi_df)
+}
+print(json.dumps(summary))
+```
+</code>

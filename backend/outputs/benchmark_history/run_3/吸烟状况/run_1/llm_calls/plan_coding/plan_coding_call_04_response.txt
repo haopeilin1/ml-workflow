@@ -1,0 +1,259 @@
+<plan>
+## 优化规划
+
+### 问题诊断
+当前模型已连续两轮无提升，说明当前特征工程和模型配置已达到瓶颈。根据上下文载荷的建议，需要转向特征工程优化：
+
+1. **特征交叉**：添加年龄×BMI、血压相关交叉特征等
+2. **多项式扩展**：对关键数值特征做degree=2的多项式扩展
+3. **特征选择**：使用SelectKBest筛选重要特征，减少噪声
+
+### 具体优化策略
+
+#### 1. preprocess 函数优化
+- 保留现有的标准化逻辑
+- 添加对特殊值的处理（如eyesight(left)的异常值9.9）
+- 保持与之前相同的接口
+
+#### 2. feature_engineering 函数优化（核心改动）
+- **特征交叉**：
+  - 年龄×BMI（年龄与肥胖的交互）
+  - 年龄×血压（年龄与血压的交互）
+  - 年龄×甘油三酯（年龄与血脂的交互）
+  - 收缩压×舒张压（血压乘积）
+  - BMI×腰围（肥胖指标交互）
+  - 血红蛋白×血清肌酐（血液指标交互）
+  
+- **多项式扩展**（degree=2）：
+  - 对关键连续特征：age, bmi, systolic, triglyceride, hemoglobin, Gtp, ALT, fasting_blood_sugar
+  
+- **特征选择**：
+  - 使用SelectKBest（f_classif）选择top K特征，减少噪声
+  - 在训练集上拟合选择器，保存到全局状态
+
+- **其他增强**：
+  - 保留现有的对数变换和比率特征
+  - 添加更多生物标志物比率（如LDL/HDL比值）
+  - 添加总胆固醇/HDL比值（心血管风险指标）
+
+#### 3. build_model 函数优化
+- 保持LightGBM配置不变（已较优）
+- 微调学习率和n_estimators以配合更多特征
+
+### 关键修复
+- 修复feature_engineering中列名匹配问题（使用清洗后的列名）
+- 确保所有新特征都是数值类型
+- 使用SelectKBest进行特征选择，减少噪声
+</plan>
+<code>
+```python
+import re
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+FEATURE_ENG_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 清洗列名：特殊字符替换为下划线
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 4. 处理异常值：eyesight(left) 的 9.9 是异常值，替换为中位数
+    if 'eyesight_left_' in X.columns:
+        if mode == 'train':
+            median_left = X['eyesight_left_'].median()
+            PREPROCESS_STATE['eyesight_left_median'] = median_left
+        else:
+            median_left = PREPROCESS_STATE.get('eyesight_left_median', 1.0)
+        X['eyesight_left_'] = X['eyesight_left_'].clip(upper=2.0)
+        X.loc[X['eyesight_left_'] > 2.0, 'eyesight_left_'] = median_left
+    
+    if 'eyesight_right_' in X.columns:
+        if mode == 'train':
+            median_right = X['eyesight_right_'].median()
+            PREPROCESS_STATE['eyesight_right_median'] = median_right
+        else:
+            median_right = PREPROCESS_STATE.get('eyesight_right_median', 1.0)
+        X['eyesight_right_'] = X['eyesight_right_'].clip(upper=2.0)
+        X.loc[X['eyesight_right_'] > 2.0, 'eyesight_right_'] = median_right
+    
+    # 5. 数值特征标准化
+    num_cols = X.columns.tolist()
+    
+    if mode == 'train':
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+        PREPROCESS_STATE['num_cols'] = num_cols
+    else:
+        scaler = PREPROCESS_STATE.get('scaler')
+        if scaler is None:
+            raise ValueError("PREPROCESS_STATE 中未找到 scaler，请先运行 train 模式")
+        X_scaled = scaler.transform(X)
+    
+    # 6. 重新构建 DataFrame
+    X_scaled_df = pd.DataFrame(X_scaled, columns=num_cols, index=df.index)
+    
+    if y is not None:
+        X_scaled_df[target_col] = y.values
+    
+    return X_scaled_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    # 创建新特征
+    # BMI
+    if 'weight_kg_' in df.columns and 'height_cm_' in df.columns:
+        df['bmi'] = df['weight_kg_'] / ((df['height_cm_'] / 100) ** 2)
+    
+    # 血压差和血压乘积
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['blood_pressure_diff'] = df['systolic'] - df['relaxation']
+        df['blood_pressure_product'] = df['systolic'] * df['relaxation']
+        df['mean_arterial_pressure'] = (2 * df['relaxation'] + df['systolic']) / 3
+    
+    # 血脂比
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['triglyceride_hdl_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+    
+    if 'LDL' in df.columns and 'HDL' in df.columns:
+        df['ldl_hdl_ratio'] = df['LDL'] / (df['HDL'] + 1e-6)
+    
+    if 'Cholesterol' in df.columns and 'HDL' in df.columns:
+        df['total_cholesterol_hdl_ratio'] = df['Cholesterol'] / (df['HDL'] + 1e-6)
+    
+    # 肝功比
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['ast_alt_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+    
+    # 平均视力
+    if 'eyesight_left_' in df.columns and 'eyesight_right_' in df.columns:
+        df['avg_eyesight'] = (df['eyesight_left_'] + df['eyesight_right_']) / 2
+    
+    # 对偏态特征做对数变换（加1避免log0）
+    skewed_cols = ['triglyceride', 'Gtp', 'ALT', 'fasting_blood_sugar']
+    for col in skewed_cols:
+        if col in df.columns:
+            min_val = df[col].min()
+            shift = 0 if min_val > 0 else abs(min_val) + 1
+            df[f'log_{col}'] = np.log1p(df[col] + shift)
+    
+    # 特征交叉：年龄 × 关键生物指标
+    if 'age' in df.columns:
+        if 'bmi' in df.columns:
+            df['age_x_bmi'] = df['age'] * df['bmi']
+        if 'systolic' in df.columns:
+            df['age_x_systolic'] = df['age'] * df['systolic']
+        if 'triglyceride' in df.columns:
+            df['age_x_triglyceride'] = df['age'] * df['triglyceride']
+        if 'hemoglobin' in df.columns:
+            df['age_x_hemoglobin'] = df['age'] * df['hemoglobin']
+        if 'Gtp' in df.columns:
+            df['age_x_Gtp'] = df['age'] * df['Gtp']
+    
+    # BMI × 腰围
+    if 'bmi' in df.columns and 'waist_cm_' in df.columns:
+        df['bmi_x_waist'] = df['bmi'] * df['waist_cm_']
+    
+    # 血红蛋白 × 血清肌酐
+    if 'hemoglobin' in df.columns and 'serum_creatinine' in df.columns:
+        df['hemoglobin_x_creatinine'] = df['hemoglobin'] * df['serum_creatinine']
+    
+    # 多项式扩展：对关键连续特征做 degree=2
+    poly_cols = ['age', 'bmi', 'systolic', 'triglyceride', 'hemoglobin', 'Gtp', 'ALT', 'fasting_blood_sugar']
+    available_poly_cols = [c for c in poly_cols if c in df.columns]
+    
+    if len(available_poly_cols) > 0:
+        poly = PolynomialFeatures(degree=2, include_bias=False, interaction_only=False)
+        poly_features = poly.fit_transform(df[available_poly_cols])
+        poly_feature_names = poly.get_feature_names_out(available_poly_cols)
+        
+        # 只添加平方项和交互项（排除原始特征）
+        poly_df = pd.DataFrame(poly_features, columns=poly_feature_names, index=df.index)
+        # 排除原始特征列
+        new_poly_cols = [c for c in poly_df.columns if c not in available_poly_cols]
+        poly_df = poly_df[new_poly_cols]
+        
+        # 合并到主DataFrame
+        df = pd.concat([df, poly_df], axis=1)
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能出现的NaN（由除零等引起）
+    df = df.fillna(0)
+    
+    # 替换无穷值为0
+    df = df.replace([np.inf, -np.inf], 0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（正样本比例约36.6%）
+    scale_pos_weight = (1 - 0.3655) / 0.3655  # ≈ 1.735
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.03,  # 降低学习率以配合更多特征
+        n_estimators=800,    # 增加树的数量
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

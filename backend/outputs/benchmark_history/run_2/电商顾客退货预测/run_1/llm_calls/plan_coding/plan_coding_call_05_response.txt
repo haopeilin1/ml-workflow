@@ -1,0 +1,688 @@
+<plan>
+产物生成计划：
+1. 加载 data/best_model.pkl（已存在），如果失败则回退重新训练
+2. 加载测试集 data/test.csv 并进行预测
+3. 由于数据集超过10万行（144000行），跳过所有复杂可视化：
+   - 不生成 feature_importance.png
+   - 不生成 report_fig.png（PR/ROC曲线）
+   - 不计算SHAP值
+4. 生成核心产物：
+   - output/model.pkl：完整的sklearn Pipeline（预处理+模型）
+   - output/feature_importance.csv：直接从模型属性获取特征重要性
+   - output/report.html：纯文本HTML报告（指标摘要、特征重要性表格、测试集预测预览）
+   - output/test_predictions.csv：测试集预测结果（含prediction和probability列）
+   - output/predict.py：独立预测脚本
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+from datetime import datetime
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 配置 ==========
+TARGET_COL = 'returned'
+TASK_TYPE = 'binary_classification'
+ID_COL = 'order_id'
+
+# ========== 1. 加载已保存的模型 ==========
+print("正在加载模型...")
+model = None
+preprocess_state = None
+
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        saved_obj = pickle.load(f)
+    
+    # 判断加载的是Pipeline还是裸模型
+    if hasattr(saved_obj, 'predict') and hasattr(saved_obj, 'predict_proba'):
+        model = saved_obj
+        print("成功加载模型（裸模型）")
+    elif isinstance(saved_obj, dict) and 'model' in saved_obj:
+        model = saved_obj['model']
+        preprocess_state = saved_obj.get('preprocess_state', None)
+        print("成功加载模型（字典格式）")
+    else:
+        model = saved_obj
+        print("成功加载模型")
+except Exception as e:
+    print(f"加载模型失败: {e}")
+    print("将尝试重新训练...")
+    model = None
+
+# ========== 2. 如果模型加载失败，重新训练 ==========
+if model is None:
+    print("重新训练模型...")
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from lightgbm import LGBMClassifier
+    
+    # 加载训练数据
+    train = pd.read_csv('data/train.csv')
+    
+    # 预处理函数
+    def preprocess_train(df):
+        df = df.copy()
+        id_cols = ['product_price', 'discount_percent', 'product_rating', 
+                   'past_return_rate', 'delivery_delay_days', 'session_length_minutes', 'order_id']
+        df = df.drop(columns=[col for col in id_cols if col in df.columns], errors='ignore')
+        
+        y = df[TARGET_COL].copy() if TARGET_COL in df.columns else None
+        X = df.drop(columns=[TARGET_COL]) if TARGET_COL in df.columns else df.copy()
+        
+        cat_cols = ['device_type', 'product_category', 'shipping_method', 'payment_method']
+        cat_cols = [col for col in cat_cols if col in X.columns]
+        num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+        num_cols = [col for col in num_cols if col not in cat_cols]
+        
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        X_processed = preprocessor.fit_transform(X)
+        
+        cat_feature_names = []
+        if cat_cols:
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            cat_feature_names = encoder.get_feature_names_out(cat_cols).tolist()
+        num_feature_names = num_cols
+        remainder_cols = [col for col in X.columns if col not in cat_cols and col not in num_cols]
+        all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+        
+        X_processed_df = pd.DataFrame(X_processed, columns=all_feature_names, index=X.index)
+        
+        if y is not None:
+            X_processed_df[TARGET_COL] = y.values
+        
+        return X_processed_df, preprocessor, cat_cols, num_cols
+    
+    train_clean, preprocessor, cat_cols, num_cols = preprocess_train(train)
+    
+    # 特征工程
+    def feature_engineering(df):
+        df = df.copy()
+        if TARGET_COL in df.columns:
+            X = df.drop(columns=[TARGET_COL])
+        else:
+            X = df.copy()
+        
+        non_numeric_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+        for col in non_numeric_cols:
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+        
+        num_cols_fe = X.select_dtypes(include=[np.number]).columns.tolist()
+        
+        if 'num_product_views' in num_cols_fe and 'customer_age' in num_cols_fe:
+            X['views_per_age'] = X['num_product_views'] / (X['customer_age'] + 1)
+        if 'past_purchase_count' in num_cols_fe and 'num_product_views' in num_cols_fe:
+            X['purchase_to_view_ratio'] = X['past_purchase_count'] / (X['num_product_views'] + 1)
+        if 'customer_age' in num_cols_fe:
+            X['age_squared'] = X['customer_age'] ** 2
+            X['age_group'] = (X['customer_age'] // 10).astype(int)
+        if 'num_product_views' in num_cols_fe:
+            X['log_views'] = np.log1p(X['num_product_views'].clip(lower=0))
+        if 'past_purchase_count' in num_cols_fe:
+            X['log_purchases'] = np.log1p(X['past_purchase_count'])
+        if 'used_coupon' in num_cols_fe:
+            X['used_coupon'] = X['used_coupon'].astype(int)
+        
+        X = X.select_dtypes(include=[np.number])
+        X = X.replace([np.inf, -np.inf], np.nan)
+        X = X.fillna(0)
+        
+        return X
+    
+    X_train_fe = feature_engineering(train_clean)
+    y_train = train[TARGET_COL].values
+    
+    # 清洗特征名
+    X_train_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe.columns]
+    if X_train_fe.columns.duplicated().any():
+        X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+    
+    # 训练模型
+    model = LGBMClassifier(
+        objective='binary',
+        metric='auc',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    model.fit(X_train_fe, y_train)
+    
+    # 保存特征名用于后续
+    feature_names = list(X_train_fe.columns)
+    preprocess_state = {
+        'preprocessor': preprocessor,
+        'cat_cols': cat_cols,
+        'num_cols': num_cols,
+        'feature_names': feature_names
+    }
+    print("模型重新训练完成")
+
+# ========== 3. 构建完整的Pipeline（预处理+特征工程+模型）==========
+# 由于特征工程包含自定义逻辑，这里构建一个包装类
+from sklearn.base import BaseEstimator, ClassifierMixin
+
+class FullPipeline(BaseEstimator, ClassifierMixin):
+    """完整的预处理+特征工程+模型Pipeline"""
+    def __init__(self, preprocessor, cat_cols, num_cols, feature_names, model):
+        self.preprocessor = preprocessor
+        self.cat_cols = cat_cols
+        self.num_cols = num_cols
+        self.feature_names = feature_names
+        self.model = model
+        self._estimator_type = "classifier"
+    
+    def _preprocess_and_engineer(self, X):
+        """对原始数据执行预处理和特征工程"""
+        X_copy = X.copy()
+        
+        # 丢弃ID列
+        id_cols = ['product_price', 'discount_percent', 'product_rating', 
+                   'past_return_rate', 'delivery_delay_days', 'session_length_minutes', 'order_id']
+        X_copy = X_copy.drop(columns=[col for col in id_cols if col in X_copy.columns], errors='ignore')
+        
+        # 预处理
+        X_processed = self.preprocessor.transform(X_copy)
+        
+        # 获取特征名
+        cat_feature_names = []
+        if self.cat_cols:
+            encoder = self.preprocessor.named_transformers_['cat'].named_steps['encoder']
+            cat_feature_names = encoder.get_feature_names_out(self.cat_cols).tolist()
+        num_feature_names = self.num_cols
+        remainder_cols = [col for col in X_copy.columns if col not in self.cat_cols and col not in self.num_cols]
+        all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+        
+        X_df = pd.DataFrame(X_processed, columns=all_feature_names, index=X_copy.index)
+        
+        # 特征工程
+        num_cols_fe = X_df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        if 'num_product_views' in num_cols_fe and 'customer_age' in num_cols_fe:
+            X_df['views_per_age'] = X_df['num_product_views'] / (X_df['customer_age'] + 1)
+        if 'past_purchase_count' in num_cols_fe and 'num_product_views' in num_cols_fe:
+            X_df['purchase_to_view_ratio'] = X_df['past_purchase_count'] / (X_df['num_product_views'] + 1)
+        if 'customer_age' in num_cols_fe:
+            X_df['age_squared'] = X_df['customer_age'] ** 2
+            X_df['age_group'] = (X_df['customer_age'] // 10).astype(int)
+        if 'num_product_views' in num_cols_fe:
+            X_df['log_views'] = np.log1p(X_df['num_product_views'].clip(lower=0))
+        if 'past_purchase_count' in num_cols_fe:
+            X_df['log_purchases'] = np.log1p(X_df['past_purchase_count'])
+        if 'used_coupon' in num_cols_fe:
+            X_df['used_coupon'] = X_df['used_coupon'].astype(int)
+        
+        X_df = X_df.select_dtypes(include=[np.number])
+        X_df = X_df.replace([np.inf, -np.inf], np.nan)
+        X_df = X_df.fillna(0)
+        
+        # 清洗特征名
+        X_df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_df.columns]
+        if X_df.columns.duplicated().any():
+            X_df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_df.columns)]
+        
+        # 对齐特征名
+        for col in self.feature_names:
+            if col not in X_df.columns:
+                X_df[col] = 0
+        X_df = X_df[self.feature_names]
+        
+        return X_df
+    
+    def fit(self, X, y):
+        return self
+    
+    def predict(self, X):
+        X_processed = self._preprocess_and_engineer(X)
+        return self.model.predict(X_processed)
+    
+    def predict_proba(self, X):
+        X_processed = self._preprocess_and_engineer(X)
+        return self.model.predict_proba(X_processed)
+    
+    @property
+    def classes_(self):
+        return self.model.classes_
+    
+    @property
+    def feature_importances_(self):
+        return self.model.feature_importances_
+
+# 构建完整Pipeline
+if preprocess_state is not None and 'preprocessor' in preprocess_state:
+    full_pipeline = FullPipeline(
+        preprocessor=preprocess_state['preprocessor'],
+        cat_cols=preprocess_state.get('cat_cols', []),
+        num_cols=preprocess_state.get('num_cols', []),
+        feature_names=preprocess_state.get('feature_names', []),
+        model=model
+    )
+    feature_names = preprocess_state.get('feature_names', [])
+else:
+    # 如果preprocess_state不可用，尝试从模型直接获取特征名
+    full_pipeline = model
+    if hasattr(model, 'feature_name_'):
+        feature_names = list(model.feature_name_)
+    elif hasattr(model, 'feature_names_in_'):
+        feature_names = list(model.feature_names_in_)
+    else:
+        feature_names = [f'feature_{i}' for i in range(model.n_features_in_)] if hasattr(model, 'n_features_in_') else []
+
+# ========== 4. 保存模型到 output/model.pkl ==========
+print("保存模型到 output/model.pkl...")
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(full_pipeline, f)
+print("模型保存完成")
+
+# ========== 5. 生成特征重要性 CSV ==========
+print("生成特征重要性...")
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(full_pipeline, 'feature_importances_'):
+    importances = full_pipeline.feature_importances_
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保特征名和重要性长度一致
+if len(feature_names) != len(importances):
+    feature_names = [f'feature_{i}' for i in range(len(importances))]
+
+feature_importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+feature_importance_df = feature_importance_df.sort_values('importance', ascending=False)
+feature_importance_df.to_csv('output/feature_importance.csv', index=False)
+print(f"特征重要性已保存，共 {len(feature_importance_df)} 个特征")
+
+# ========== 6. 测试集预测 ==========
+print("对测试集进行预测...")
+test = pd.read_csv('data/test.csv')
+
+# 保存ID列
+if ID_COL in test.columns:
+    test_ids = test[ID_COL].copy()
+else:
+    test_ids = pd.Series(range(len(test)), name='id')
+
+# 预测
+try:
+    test_probs = full_pipeline.predict_proba(test)[:, 1]
+    test_preds = (test_probs >= 0.5).astype(int)
+except Exception as e:
+    print(f"使用完整Pipeline预测失败: {e}")
+    # 回退：手动预处理
+    test_clean = test.copy()
+    id_cols = ['product_price', 'discount_percent', 'product_rating', 
+               'past_return_rate', 'delivery_delay_days', 'session_length_minutes', 'order_id']
+    test_clean = test_clean.drop(columns=[col for col in id_cols if col in test_clean.columns], errors='ignore')
+    
+    if preprocess_state and 'preprocessor' in preprocess_state:
+        X_test = preprocess_state['preprocessor'].transform(test_clean)
+        cat_feature_names = []
+        if preprocess_state.get('cat_cols'):
+            encoder = preprocess_state['preprocessor'].named_transformers_['cat'].named_steps['encoder']
+            cat_feature_names = encoder.get_feature_names_out(preprocess_state['cat_cols']).tolist()
+        num_feature_names = preprocess_state.get('num_cols', [])
+        remainder_cols = [col for col in test_clean.columns if col not in preprocess_state.get('cat_cols', []) and col not in num_feature_names]
+        all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+        X_test_df = pd.DataFrame(X_test, columns=all_feature_names)
+    else:
+        X_test_df = test_clean.select_dtypes(include=[np.number])
+    
+    # 特征工程
+    num_cols_fe = X_test_df.select_dtypes(include=[np.number]).columns.tolist()
+    if 'num_product_views' in num_cols_fe and 'customer_age' in num_cols_fe:
+        X_test_df['views_per_age'] = X_test_df['num_product_views'] / (X_test_df['customer_age'] + 1)
+    if 'past_purchase_count' in num_cols_fe and 'num_product_views' in num_cols_fe:
+        X_test_df['purchase_to_view_ratio'] = X_test_df['past_purchase_count'] / (X_test_df['num_product_views'] + 1)
+    if 'customer_age' in num_cols_fe:
+        X_test_df['age_squared'] = X_test_df['customer_age'] ** 2
+        X_test_df['age_group'] = (X_test_df['customer_age'] // 10).astype(int)
+    if 'num_product_views' in num_cols_fe:
+        X_test_df['log_views'] = np.log1p(X_test_df['num_product_views'].clip(lower=0))
+    if 'past_purchase_count' in num_cols_fe:
+        X_test_df['log_purchases'] = np.log1p(X_test_df['past_purchase_count'])
+    if 'used_coupon' in num_cols_fe:
+        X_test_df['used_coupon'] = X_test_df['used_coupon'].astype(int)
+    
+    X_test_df = X_test_df.select_dtypes(include=[np.number])
+    X_test_df = X_test_df.replace([np.inf, -np.inf], np.nan)
+    X_test_df = X_test_df.fillna(0)
+    
+    X_test_df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_df.columns]
+    if X_test_df.columns.duplicated().any():
+        X_test_df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_df.columns)]
+    
+    # 对齐特征
+    for col in feature_names:
+        if col not in X_test_df.columns:
+            X_test_df[col] = 0
+    X_test_df = X_test_df[feature_names]
+    
+    test_probs = model.predict_proba(X_test_df)[:, 1]
+    test_preds = (test_probs >= 0.5).astype(int)
+
+# 保存测试集预测
+test_predictions = pd.DataFrame({
+    'id': test_ids.values,
+    'prediction': test_preds,
+    'probability': test_probs
+})
+test_predictions.to_csv('output/test_predictions.csv', index=False)
+print(f"测试集预测已保存，共 {len(test_predictions)} 条记录")
+
+# ========== 7. 生成 HTML 报告 ==========
+print("生成HTML报告...")
+
+# 计算基本统计
+total_samples = len(test_predictions)
+positive_count = int(test_preds.sum())
+negative_count = total_samples - positive_count
+positive_rate = positive_count / total_samples * 100 if total_samples > 0 else 0
+
+# 概率分布统计
+prob_mean = float(test_probs.mean())
+prob_std = float(test_probs.std())
+prob_median = float(np.median(test_probs))
+prob_min = float(test_probs.min())
+prob_max = float(test_probs.max())
+
+# 特征重要性Top10
+top_features = feature_importance_df.head(10).to_dict('records')
+
+# 构建HTML
+html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型报告 - 二分类任务</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 40px;
+            background-color: #f5f5f5;
+            color: #333;
+        }}
+        .container {{
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #2c3e50;
+            margin-top: 30px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }}
+        th, td {{
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }}
+        th {{
+            background-color: #3498db;
+            color: white;
+        }}
+        tr:hover {{
+            background-color: #f1f1f1;
+        }}
+        .metric-box {{
+            display: inline-block;
+            background: #ecf0f1;
+            padding: 15px 20px;
+            margin: 10px;
+            border-radius: 6px;
+            text-align: center;
+            min-width: 120px;
+        }}
+        .metric-value {{
+            font-size: 24px;
+            font-weight: bold;
+            color: #2c3e50;
+        }}
+        .metric-label {{
+            font-size: 12px;
+            color: #7f8c8d;
+            margin-top: 5px;
+        }}
+        .footer {{
+            margin-top: 30px;
+            padding-top: 15px;
+            border-top: 1px solid #ddd;
+            font-size: 12px;
+            color: #95a5a6;
+        }}
+        .warning {{
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin: 15px 0;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>二分类模型报告</h1>
+        <p>生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p>任务类型: 二分类 (Binary Classification) | 目标列: {TARGET_COL} | 评估指标: ROC-AUC</p>
+        
+        <div class="warning">
+            <strong>注意：</strong> 数据集包含 {total_samples:,} 条测试记录（大数据集），已跳过复杂可视化生成。
+        </div>
+        
+        <h2>测试集预测概览</h2>
+        <div style="display: flex; flex-wrap: wrap;">
+            <div class="metric-box">
+                <div class="metric-value">{total_samples:,}</div>
+                <div class="metric-label">总样本数</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{positive_count:,}</div>
+                <div class="metric-label">预测正类</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{negative_count:,}</div>
+                <div class="metric-label">预测负类</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{positive_rate:.2f}%</div>
+                <div class="metric-label">正类比例</div>
+            </div>
+        </div>
+        
+        <h2>预测概率分布</h2>
+        <table>
+            <tr><th>统计量</th><th>值</th></tr>
+            <tr><td>均值 (Mean)</td><td>{prob_mean:.4f}</td></tr>
+            <tr><td>标准差 (Std)</td><td>{prob_std:.4f}</td></tr>
+            <tr><td>中位数 (Median)</td><td>{prob_median:.4f}</td></tr>
+            <tr><td>最小值 (Min)</td><td>{prob_min:.4f}</td></tr>
+            <tr><td>最大值 (Max)</td><td>{prob_max:.4f}</td></tr>
+        </table>
+        
+        <h2>特征重要性 Top 10</h2>
+        <table>
+            <tr><th>排名</th><th>特征名</th><th>重要性</th></tr>
+"""
+for i, feat in enumerate(top_features):
+    html_content += f"            <tr><td>{i+1}</td><td>{feat['name']}</td><td>{feat['importance']:.6f}</td></tr>\n"
+
+html_content += """        </table>
+        
+        <h2>测试集预测预览（前20条）</h2>
+        <table>
+            <tr><th>ID</th><th>预测类别</th><th>正类概率</th></tr>
+"""
+for i, row in test_predictions.head(20).iterrows():
+    html_content += f"            <tr><td>{row['id']}</td><td>{int(row['prediction'])}</td><td>{row['probability']:.4f}</td></tr>\n"
+
+html_content += f"""        </table>
+        
+        <div class="footer">
+            <p>模型文件: output/model.pkl | 特征重要性: output/feature_importance.csv | 预测结果: output/test_predictions.csv</p>
+            <p>预测脚本: output/predict.py（可独立运行，加载模型对新数据预测）</p>
+        </div>
+    </div>
+</body>
+</html>"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML报告已保存到 output/report.html")
+
+# ========== 8. 生成独立预测脚本 ==========
+print("生成独立预测脚本...")
+predict_script = '''#!/usr/bin/env python3
+"""
+独立预测脚本
+用法: python predict.py <输入CSV文件路径> [输出CSV文件路径]
+示例: python predict.py new_data.csv predictions.csv
+"""
+import pandas as pd
+import numpy as np
+import pickle
+import sys
+import os
+import re
+import warnings
+warnings.filterwarnings('ignore')
+
+def load_model(model_path='output/model.pkl'):
+    """加载已保存的模型"""
+    if not os.path.exists(model_path):
+        # 尝试从当前目录查找
+        if os.path.exists('model.pkl'):
+            model_path = 'model.pkl'
+        else:
+            raise FileNotFoundError(f"模型文件未找到: {model_path}")
+    
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    print(f"模型已加载: {model_path}")
+    return model
+
+def predict(model, input_path, output_path=None):
+    """对输入数据进行预测"""
+    # 读取数据
+    df = pd.read_csv(input_path)
+    print(f"读取数据: {len(df)} 行, {len(df.columns)} 列")
+    
+    # 保存ID列（如果存在）
+    id_col = 'order_id'
+    if id_col in df.columns:
+        ids = df[id_col].copy()
+    else:
+        ids = pd.Series(range(len(df)), name='id')
+    
+    # 预测
+    try:
+        probabilities = model.predict_proba(df)[:, 1]
+    except Exception as e:
+        print(f"predict_proba失败: {e}, 尝试predict...")
+        probabilities = model.predict(df).astype(float)
+    
+    predictions = (probabilities >= 0.5).astype(int)
+    
+    # 构建结果
+    result = pd.DataFrame({
+        'id': ids.values,
+        'prediction': predictions,
+        'probability': probabilities
+    })
+    
+    # 保存结果
+    if output_path is None:
+        output_path = 'predictions.csv'
+    
+    result.to_csv(output_path, index=False)
+    print(f"预测结果已保存: {output_path}")
+    print(f"预测统计: 正类={predictions.sum()}, 负类={len(predictions) - predictions.sum()}, 正类比例={predictions.mean()*100:.2f}%")
+    
+    return result
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("用法: python predict.py <输入CSV文件路径> [输出CSV文件路径]")
+        print("示例: python predict.py new_data.csv predictions.csv")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else None
+    
+    model = load_model()
+    result = predict(model, input_path, output_path)
+    print("\\n预测完成!")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("独立预测脚本已保存到 output/predict.py")
+
+# ========== 9. 输出摘要 ==========
+summary = {
+    "status": "success",
+    "task_type": TASK_TYPE,
+    "target_col": TARGET_COL,
+    "test_samples": total_samples,
+    "positive_predictions": positive_count,
+    "negative_predictions": negative_count,
+    "positive_rate": round(positive_rate, 2),
+    "prob_mean": round(prob_mean, 4),
+    "prob_median": round(prob_median, 4),
+    "num_features": len(feature_importance_df),
+    "top_feature": feature_importance_df.iloc[0]['name'] if len(feature_importance_df) > 0 else "N/A",
+    "output_files": [
+        "output/model.pkl",
+        "output/feature_importance.csv",
+        "output/report.html",
+        "output/test_predictions.csv",
+        "output/predict.py"
+    ],
+    "note": "大数据集模式：已跳过feature_importance.png和report_fig.png生成"
+}
+
+print(json.dumps(summary))
+```
+</code>

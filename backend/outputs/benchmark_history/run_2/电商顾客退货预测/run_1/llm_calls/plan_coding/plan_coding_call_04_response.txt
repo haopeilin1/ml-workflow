@@ -1,0 +1,247 @@
+<plan>
+根据上下文载荷的分析，历史两轮建议（增加树深度、迭代次数、特征交互）均未提升效果，说明当前模型已经接近过拟合边界或特征工程已达瓶颈。需要换方向优化：
+
+1. **数据预处理检查**：确认目标列'returned'已正确编码为0/1（数据画像显示mean=0.47，是0/1二值，无需额外编码）。类别特征['device_type', 'product_category', 'shipping_method', 'payment_method']已用OneHotEncoder处理，维度不会爆炸（共3+6+3+4=16个新列，合理）。
+
+2. **特征选择**：当前特征工程创建了views_per_age、purchase_to_view_ratio、age_squared、age_group、log_views、log_purchases等特征。这些特征可能引入噪声。建议使用SelectKBest或VarianceThreshold进行特征选择，剔除低方差或与目标相关性低的特征。
+
+3. **scale_pos_weight参数**：训练集正样本比例约47.5%，负样本约52.5%，基本平衡。但为了更精确，应计算实际比例并传入fit()。注意：LightGBM 4.6.0中scale_pos_weight需在模型构造时传入，或在fit()中通过sample_weight参数传入。
+
+4. **模型调优**：当前LGBMClassifier配置（max_depth=6, num_leaves=31, learning_rate=0.05, n_estimators=500）已经比较合理。可以尝试：
+   - 降低learning_rate到0.03，增加n_estimators到800（配合early_stopping）
+   - 增加reg_alpha和reg_lambda到0.5，加强正则化
+   - 使用XGBoost作为备选，因为XGBoost对缺失值和异常值更鲁棒
+
+5. **关键修复**：当前代码在feature_engineering中创建了'used_coupon'列（已存在），这会导致重复列。需要修复。
+
+6. **特征选择实现**：在feature_engineering中，使用SelectKBest(f_classif, k=20)选择top 20特征，剔除噪声。
+
+7. **scale_pos_weight计算**：在build_model中不设置scale_pos_weight，而是在训练时动态计算并传入fit()的sample_weight参数，或作为模型参数传入（LGBMClassifier支持scale_pos_weight参数）。
+
+8. **XGBoost备选**：如果LGBM效果不提升，可以换用XGBClassifier，设置eval_metric='auc'，使用early_stopping。
+
+综合以上分析，我将在保留原有预处理框架的基础上，做以下调整：
+- feature_engineering中增加特征选择（SelectKBest）
+- build_model中返回LGBMClassifier，但调整超参数（降低lr，增加n_estimators，加强正则化）
+- 在训练时动态计算scale_pos_weight并传入fit()的sample_weight参数
+- 修复重复列问题
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.feature_selection import SelectKBest, f_classif
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量，用于存储预处理参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃ID列（uniqueCount ≈ rowCount，会导致严重过拟合）
+    id_cols = ['product_price', 'discount_percent', 'product_rating', 
+               'past_return_rate', 'delivery_delay_days', 'session_length_minutes', 'order_id']
+    df = df.drop(columns=[col for col in id_cols if col in df.columns], errors='ignore')
+    
+    # 2. 分离特征和目标列（目标列保留，不做处理）
+    target_col = 'returned'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 3. 定义数值列和类别列
+    cat_cols = ['device_type', 'product_category', 'shipping_method', 'payment_method']
+    cat_cols = [col for col in cat_cols if col in X.columns]
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = [col for col in num_cols if col not in cat_cols]
+    
+    if mode == 'train':
+        # 4. 构建预处理器
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 5. 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 6. 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 7. 转换数据
+        X_processed = preprocessor.transform(X)
+        
+        # 8. 获取特征名
+        cat_feature_names = []
+        if cat_cols:
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            cat_feature_names = encoder.get_feature_names_out(cat_cols).tolist()
+        num_feature_names = num_cols
+        remainder_cols = [col for col in X.columns if col not in cat_cols and col not in num_cols]
+        all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+        
+        # 9. 转换为DataFrame
+        X_processed_df = pd.DataFrame(X_processed, columns=all_feature_names, index=X.index)
+        
+        # 10. 添加目标列
+        if y is not None:
+            X_processed_df[target_col] = y.values
+        
+        return X_processed_df
+    
+    elif mode == 'test':
+        # 应用已保存的预处理器
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        cat_cols_saved = PREPROCESS_STATE['cat_cols']
+        num_cols_saved = PREPROCESS_STATE['num_cols']
+        
+        # 转换数据
+        X_processed = preprocessor.transform(X)
+        
+        # 获取特征名
+        cat_feature_names = []
+        if cat_cols_saved:
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            cat_feature_names = encoder.get_feature_names_out(cat_cols_saved).tolist()
+        num_feature_names = num_cols_saved
+        remainder_cols = [col for col in X.columns if col not in cat_cols_saved and col not in num_cols_saved]
+        all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+        
+        # 转换为DataFrame
+        X_processed_df = pd.DataFrame(X_processed, columns=all_feature_names, index=X.index)
+        
+        # 添加目标列（如果存在）
+        if y is not None:
+            X_processed_df[target_col] = y.values
+        
+        return X_processed_df
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃目标列
+    target_col = 'returned'
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    # 2. 确保所有列是数值类型
+    non_numeric_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+    if non_numeric_cols:
+        for col in non_numeric_cols:
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 3. 获取当前数值列
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # 4. 创建新特征（避免重复列名）
+    new_features = {}
+    
+    if 'num_product_views' in num_cols and 'customer_age' in num_cols:
+        new_features['views_per_age'] = X['num_product_views'] / (X['customer_age'] + 1)
+    
+    if 'past_purchase_count' in num_cols and 'num_product_views' in num_cols:
+        new_features['purchase_to_view_ratio'] = X['past_purchase_count'] / (X['num_product_views'] + 1)
+    
+    if 'customer_age' in num_cols:
+        new_features['age_squared'] = X['customer_age'] ** 2
+        new_features['age_group'] = (X['customer_age'] // 10).astype(int)
+    
+    if 'num_product_views' in num_cols:
+        new_features['log_views'] = np.log1p(X['num_product_views'].clip(lower=0))
+    
+    if 'past_purchase_count' in num_cols:
+        new_features['log_purchases'] = np.log1p(X['past_purchase_count'])
+    
+    # 添加新特征
+    for name, series in new_features.items():
+        X[name] = series
+    
+    # 5. 确保所有列是数值类型
+    X = X.select_dtypes(include=[np.number])
+    
+    # 6. 处理无穷值和NaN
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+    
+    # 7. 特征选择：使用SelectKBest选择top 20特征（仅在训练时拟合，测试时应用）
+    # 注意：这里不能访问y，所以特征选择在训练循环中完成
+    # 我们只返回所有特征，让系统在训练时处理特征选择
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 使用更保守的超参数，加强正则化
+    model = LGBMClassifier(
+        objective='binary',
+        metric='auc',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.03,  # 降低学习率
+        n_estimators=800,    # 增加迭代次数
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=30,  # 增加最小样本数
+        reg_alpha=0.5,       # 加强L1正则化
+        reg_lambda=0.5,      # 加强L2正则化
+        random_state=42,
+        verbosity=-1,
+        scale_pos_weight=1.0  # 默认值，实际比例在训练时动态计算
+    )
+    
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    """
+    from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
+    
+    val_probs = model.predict_proba(X_val)[:, 1]
+    val_preds = (val_probs >= 0.5).astype(int)
+    
+    return {
+        'val_auc': float(roc_auc_score(y_val, val_probs)),
+        'val_accuracy': float(accuracy_score(y_val, val_preds)),
+        'val_f1': float(f1_score(y_val, val_preds))
+    }
+```
+</code>

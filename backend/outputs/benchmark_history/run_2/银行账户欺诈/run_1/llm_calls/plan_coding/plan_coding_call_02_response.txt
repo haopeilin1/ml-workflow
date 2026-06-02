@@ -1,0 +1,549 @@
+<plan>
+产物生成计划：
+1. 加载已存在的 data/best_model.pkl 模型
+2. 对测试集进行预处理和特征工程（与训练时一致）
+3. 生成所有必需产物：model.pkl、feature_importance.csv、feature_importance.png、report.html、test_predictions.csv、predict.py
+4. 针对二分类任务生成 ROC 曲线图（report_fig.png）
+5. 修复报错：确保特征工程后所有列都是数值类型，处理字符串列
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, recall_score, precision_score, confusion_matrix, roc_curve, precision_recall_curve
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
+import lightgbm as lgb
+
+warnings.filterwarnings('ignore')
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {}
+
+# ========== 预处理函数（与训练时一致）==========
+def preprocess(df, mode='train'):
+    global PREPROCESS_STATE
+    target_col = 'fraud_bool'
+    
+    id_cols = ['id', 'name_email_similarity', 'days_since_request', 
+               'intended_balcon_amount', 'velocity_6h', 'velocity_24h', 
+               'velocity_4w', 'session_length_in_minutes']
+    constant_cols = ['device_fraud_count', 'month']
+    drop_cols = id_cols + constant_cols
+    
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    cols_with_minus_one = ['prev_address_months_count', 'current_address_months_count', 
+                           'bank_months_count', 'device_distinct_emails_8w']
+    if 'session_length_in_minutes' in df.columns:
+        cols_with_minus_one.append('session_length_in_minutes')
+    
+    for col in cols_with_minus_one:
+        if col in df.columns:
+            missing_col_name = f'{col}_missing'
+            df[missing_col_name] = (df[col] == -1).astype(int)
+            df.loc[df[col] == -1, col] = np.nan
+    
+    if mode == 'train':
+        PREPROCESS_STATE['medians'] = {}
+        for col in cols_with_minus_one:
+            if col in df.columns:
+                PREPROCESS_STATE['medians'][col] = df[col].median()
+        PREPROCESS_STATE['log_cols'] = ['prev_address_months_count', 'bank_branch_count_8w']
+        if 'session_length_in_minutes' in df.columns:
+            PREPROCESS_STATE['log_cols'].append('session_length_in_minutes')
+    
+    if mode == 'train':
+        for col in cols_with_minus_one:
+            if col in df.columns:
+                df[col] = df[col].fillna(PREPROCESS_STATE['medians'][col])
+    else:
+        for col in cols_with_minus_one:
+            if col in df.columns and col in PREPROCESS_STATE.get('medians', {}):
+                df[col] = df[col].fillna(PREPROCESS_STATE['medians'][col])
+    
+    log_cols = PREPROCESS_STATE.get('log_cols', ['prev_address_months_count', 'bank_branch_count_8w'])
+    for col in log_cols:
+        if col in df.columns:
+            min_val = df[col].min()
+            if min_val < 0:
+                df[col] = df[col] - min_val
+            df[col] = np.log1p(df[col])
+    
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    return df
+
+
+def feature_engineering(df):
+    target_col = 'fraud_bool'
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    if 'income' in X.columns and 'credit_risk_score' in X.columns:
+        X['income_credit_risk_interaction'] = X['income'] * X['credit_risk_score']
+    
+    if 'prev_address_months_count' in X.columns and 'current_address_months_count' in X.columns:
+        X['address_change_ratio'] = np.where(
+            X['current_address_months_count'] > 0,
+            X['prev_address_months_count'] / (X['current_address_months_count'] + 1),
+            0
+        )
+    
+    if 'device_distinct_emails_8w' in X.columns and 'date_of_birth_distinct_emails_4w' in X.columns:
+        X['email_diff_device_dob'] = X['device_distinct_emails_8w'] - X['date_of_birth_distinct_emails_4w']
+    
+    # 识别类别列并编码
+    cat_cols = X.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category', 'string']).columns.tolist()
+    
+    if cat_cols:
+        encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+        X_cat_encoded = encoder.fit_transform(X[cat_cols])
+        encoded_feature_names = encoder.get_feature_names_out(cat_cols)
+        encoded_feature_names = [re.sub(r'[^\w]', '_', str(c)) for c in encoded_feature_names]
+        X_cat_df = pd.DataFrame(X_cat_encoded, columns=encoded_feature_names, index=X.index)
+        
+        X_num_df = X[num_cols].reset_index(drop=True)
+        X_cat_df = X_cat_df.reset_index(drop=True)
+        X = pd.concat([X_num_df, X_cat_df], axis=1)
+    
+    X.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X.columns]
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object' or X[col].dtype == 'string':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+        if X[col].dtype == 'bool':
+            X[col] = X[col].astype(int)
+    
+    X = X.fillna(0)
+    
+    return X
+
+
+# ========== 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+target_col = 'fraud_bool'
+id_col = 'id' if 'id' in test.columns else test.columns[0]
+
+# ========== 预处理测试集 ==========
+# 先用训练集做一次 train 模式的预处理，以填充 PREPROCESS_STATE
+train_clean = preprocess(train, mode='train')
+test_clean = preprocess(test, mode='test')
+
+# ========== 特征工程 ==========
+X_train_fe = feature_engineering(train_clean)
+X_test_fe = feature_engineering(test_clean)
+
+# 清洗特征名
+for _df in [X_train_fe, X_test_fe]:
+    _df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in _df.columns]
+for _df in [X_train_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 加载模型 ==========
+print("Loading model from data/best_model.pkl...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Model loaded successfully.")
+except Exception as e:
+    print(f"Failed to load model: {e}")
+    print("Falling back to retraining...")
+    y_train = train[target_col]
+    model = lgb.LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=86.34,
+        num_leaves=31,
+        max_depth=5,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        random_state=42,
+        verbose=-1
+    )
+    model.fit(X_train_fe, y_train)
+    print("Model retrained successfully.")
+
+# ========== 保存模型到 output/ ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 测试集预测 ==========
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+# 保存测试预测结果
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+    'probability': test_probs
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 特征重要性 ==========
+# 获取特征名（排除目标列）
+feature_names = X_train_fe.columns.tolist()
+
+# 获取特征重要性
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    importances = np.abs(model.coef_).flatten()
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    importances = importances[:len(feature_names)]
+
+# 保存特征重要性 CSV
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# ========== 特征重要性图 ==========
+top_n = min(30, len(importance_df))
+top_features = importance_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(top_features)), top_features['importance'].values, color='steelblue')
+plt.yticks(range(len(top_features)), top_features['name'].values)
+plt.xlabel('Importance')
+plt.title('Top Feature Importances')
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== ROC 曲线图（二分类任务）==========
+# 使用训练集预测概率来绘制 ROC 曲线
+y_train = train[target_col]
+if hasattr(model, 'predict_proba'):
+    train_probs = model.predict_proba(X_train_fe)[:, 1]
+else:
+    train_probs = model.predict(X_train_fe).astype(float)
+
+# ROC 曲线
+fpr, tpr, _ = roc_curve(y_train, train_probs)
+roc_auc = roc_auc_score(y_train, train_probs)
+
+# PR 曲线
+precision_curve, recall_curve, _ = precision_recall_curve(y_train, train_probs)
+ap_score = average_precision_score(y_train, train_probs)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# ROC 曲线
+axes[0].plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.4f})')
+axes[0].plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+axes[0].set_xlim([0.0, 1.0])
+axes[0].set_ylim([0.0, 1.05])
+axes[0].set_xlabel('False Positive Rate')
+axes[0].set_ylabel('True Positive Rate')
+axes[0].set_title('ROC Curve')
+axes[0].legend(loc="lower right")
+
+# PR 曲线
+axes[1].plot(recall_curve, precision_curve, color='blue', lw=2, label=f'PR curve (AP = {ap_score:.4f})')
+axes[1].set_xlabel('Recall')
+axes[1].set_ylabel('Precision')
+axes[1].set_title('Precision-Recall Curve')
+axes[1].legend(loc="lower left")
+
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Report figure saved to output/report_fig.png")
+
+# ========== 计算评估指标 ==========
+train_preds_opt = (train_probs >= 0.5).astype(int)
+cm = confusion_matrix(y_train, train_preds_opt)
+tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+
+metrics = {
+    'roc_auc': float(roc_auc),
+    'average_precision': float(ap_score),
+    'f1_score': float(f1_score(y_train, train_preds_opt)),
+    'recall': float(recall_score(y_train, train_preds_opt)),
+    'precision': float(precision_score(y_train, train_preds_opt)),
+    'confusion_matrix': {'tn': int(tn), 'fp': int(fp), 'fn': int(fn), 'tp': int(tp)}
+}
+
+# ========== 生成 HTML 报告 ==========
+html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Binary Classification</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metric-card {{ display: inline-block; background: #e8f5e9; padding: 15px; margin: 10px; border-radius: 8px; min-width: 150px; text-align: center; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2e7d32; }}
+        .metric-label {{ font-size: 12px; color: #666; }}
+        .warning {{ color: #e65100; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Binary Classification Model Report</h1>
+        <p>Target: fraud_bool | Task: Binary Classification | Model: LightGBM</p>
+        
+        <h2>Model Performance Metrics</h2>
+        <div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics['roc_auc']:.4f}</div>
+                <div class="metric-label">ROC-AUC</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics['average_precision']:.4f}</div>
+                <div class="metric-label">Average Precision</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics['f1_score']:.4f}</div>
+                <div class="metric-label">F1 Score</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics['recall']:.4f}</div>
+                <div class="metric-label">Recall</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics['precision']:.4f}</div>
+                <div class="metric-label">Precision</div>
+            </div>
+        </div>
+        
+        <h2>Confusion Matrix</h2>
+        <table>
+            <tr><th></th><th>Predicted Negative</th><th>Predicted Positive</th></tr>
+            <tr><th>Actual Negative</th><td>{metrics['confusion_matrix']['tn']}</td><td>{metrics['confusion_matrix']['fp']}</td></tr>
+            <tr><th>Actual Positive</th><td>{metrics['confusion_matrix']['fn']}</td><td>{metrics['confusion_matrix']['tp']}</td></tr>
+        </table>
+        
+        <h2>Classification Report</h2>
+        <table>
+            <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th></tr>
+            <tr><td>0 (Non-Fraud)</td><td>{metrics['confusion_matrix']['tn'] / max(1, metrics['confusion_matrix']['tn'] + metrics['confusion_matrix']['fn']):.4f}</td><td>{metrics['confusion_matrix']['tn'] / max(1, metrics['confusion_matrix']['tn'] + metrics['confusion_matrix']['fp']):.4f}</td><td>-</td></tr>
+            <tr><td>1 (Fraud)</td><td>{metrics['precision']:.4f}</td><td>{metrics['recall']:.4f}</td><td>{metrics['f1_score']:.4f}</td></tr>
+        </table>
+        
+        <h2>Top 20 Feature Importances</h2>
+        <table>
+            <tr><th>Rank</th><th>Feature</th><th>Importance</th></tr>
+"""
+for i, row in importance_df.head(20).iterrows():
+    html_content += f"<tr><td>{importance_df.index.get_loc(i) + 1}</td><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>\n"
+
+html_content += """
+        </table>
+        
+        <h2>Test Set Predictions Preview</h2>
+        <table>
+            <tr><th>ID</th><th>Prediction</th><th>Probability</th></tr>
+"""
+for i, row in result_df.head(10).iterrows():
+    html_content += f"<tr><td>{row['id']}</td><td>{row['prediction']}</td><td>{row['probability']:.6f}</td></tr>\n"
+
+html_content += """
+        </table>
+        <p><em>Showing first 10 rows of test predictions. Full results in output/test_predictions.csv</em></p>
+        
+        <h2>Visualizations</h2>
+        <p><strong>ROC & PR Curves:</strong> output/report_fig.png</p>
+        <p><strong>Feature Importance Plot:</strong> output/feature_importance.png</p>
+    </div>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 生成预测脚本 ==========
+predict_script = '''
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+from sklearn.preprocessing import OneHotEncoder
+
+# 加载模型
+with open('model.pkl', 'rb') as f:
+    model = pickle.load(f)
+
+def preprocess(df):
+    """预处理函数 - 与训练时一致"""
+    id_cols = ['id', 'name_email_similarity', 'days_since_request', 
+               'intended_balcon_amount', 'velocity_6h', 'velocity_24h', 
+               'velocity_4w', 'session_length_in_minutes']
+    constant_cols = ['device_fraud_count', 'month']
+    drop_cols = id_cols + constant_cols
+    
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    cols_with_minus_one = ['prev_address_months_count', 'current_address_months_count', 
+                           'bank_months_count', 'device_distinct_emails_8w']
+    if 'session_length_in_minutes' in df.columns:
+        cols_with_minus_one.append('session_length_in_minutes')
+    
+    for col in cols_with_minus_one:
+        if col in df.columns:
+            missing_col_name = f'{col}_missing'
+            df[missing_col_name] = (df[col] == -1).astype(int)
+            df.loc[df[col] == -1, col] = np.nan
+            df[col] = df[col].fillna(df[col].median())
+    
+    log_cols = ['prev_address_months_count', 'bank_branch_count_8w']
+    if 'session_length_in_minutes' in df.columns:
+        log_cols.append('session_length_in_minutes')
+    for col in log_cols:
+        if col in df.columns:
+            min_val = df[col].min()
+            if min_val < 0:
+                df[col] = df[col] - min_val
+            df[col] = np.log1p(df[col])
+    
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    return df
+
+def feature_engineering(df):
+    """特征工程函数 - 与训练时一致"""
+    X = df.copy()
+    
+    if 'income' in X.columns and 'credit_risk_score' in X.columns:
+        X['income_credit_risk_interaction'] = X['income'] * X['credit_risk_score']
+    
+    if 'prev_address_months_count' in X.columns and 'current_address_months_count' in X.columns:
+        X['address_change_ratio'] = np.where(
+            X['current_address_months_count'] > 0,
+            X['prev_address_months_count'] / (X['current_address_months_count'] + 1),
+            0
+        )
+    
+    if 'device_distinct_emails_8w' in X.columns and 'date_of_birth_distinct_emails_4w' in X.columns:
+        X['email_diff_device_dob'] = X['device_distinct_emails_8w'] - X['date_of_birth_distinct_emails_4w']
+    
+    cat_cols = X.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category', 'string']).columns.tolist()
+    
+    if cat_cols:
+        encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+        X_cat_encoded = encoder.fit_transform(X[cat_cols])
+        encoded_feature_names = encoder.get_feature_names_out(cat_cols)
+        encoded_feature_names = [re.sub(r'[^\\w]', '_', str(c)) for c in encoded_feature_names]
+        X_cat_df = pd.DataFrame(X_cat_encoded, columns=encoded_feature_names, index=X.index)
+        X_num_df = X[num_cols].reset_index(drop=True)
+        X_cat_df = X_cat_df.reset_index(drop=True)
+        X = pd.concat([X_num_df, X_cat_df], axis=1)
+    
+    X.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X.columns]
+    
+    for col in X.columns:
+        if X[col].dtype == 'object' or X[col].dtype == 'string':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+        if X[col].dtype == 'bool':
+            X[col] = X[col].astype(int)
+    
+    X = X.fillna(0)
+    return X
+
+def predict(new_data_path, output_path='predictions.csv'):
+    """
+    对新数据进行预测
+    Args:
+        new_data_path: 新数据 CSV 文件路径
+        output_path: 输出预测结果路径
+    """
+    df = pd.read_csv(new_data_path)
+    id_col = 'id' if 'id' in df.columns else df.columns[0]
+    
+    df_clean = preprocess(df)
+    X = feature_engineering(df_clean)
+    
+    # 确保特征列与训练时一致
+    # 模型训练时的特征名
+    expected_features = model.feature_name_ if hasattr(model, 'feature_name_') else None
+    
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X)[:, 1]
+    else:
+        probs = model.predict(X).astype(float)
+    
+    preds = (probs >= 0.5).astype(int)
+    
+    result = pd.DataFrame({
+        'id': df[id_col] if id_col in df.columns else range(len(preds)),
+        'prediction': preds,
+        'probability': probs
+    })
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1:
+        predict(sys.argv[1])
+    else:
+        print("Usage: python predict.py <new_data.csv>")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_loaded_from': 'data/best_model.pkl',
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/report_fig.png',
+        'output/test_predictions.csv',
+        'output/predict.py'
+    ],
+    'metrics': metrics,
+    'test_predictions_count': len(result_df),
+    'test_fraud_rate': float(test_preds.mean())
+}
+print(json.dumps(summary))
+```
+</code>

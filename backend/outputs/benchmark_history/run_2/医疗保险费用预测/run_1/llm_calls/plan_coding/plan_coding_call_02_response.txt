@@ -1,0 +1,224 @@
+<plan>
+## 优化规划
+
+### 问题分析
+1. **LightGBM 欠拟合警告**：当前模型 `num_leaves=31, max_depth=6, min_child_samples=20` 导致树深度不足，出现大量 'No further splits with positive gain' 警告
+2. **特征工程可增强**：当前交互特征仅基于 `smoker_yes` 列，但 OneHotEncoder 编码后列名不确定，可能导致特征创建失败
+3. **模型复杂度不足**：需要增加模型容量以更好地拟合数据中的非线性关系
+
+### 优化策略
+
+#### 1. 预处理优化（preprocess）
+- 保持现有结构不变，使用 `ColumnTransformer` + `OneHotEncoder` 处理类别特征
+- 保留 `StandardScaler` 对数值特征进行标准化
+- 确保 `id` 列被丢弃
+
+#### 2. 特征工程增强（feature_engineering）
+- 修复交互特征创建逻辑：使用更稳健的方式检测 `smoker_yes` 列
+- 增加更多交互特征：
+  - `bmi * smoker`（强交互，已知吸烟者 BMI 对费用影响更大）
+  - `age * smoker`（年龄与吸烟的交互）
+  - `age * bmi`（年龄与 BMI 的交互）
+  - `bmi^2` 和 `age^2`（多项式特征）
+  - `children` 的平方特征
+
+#### 3. 模型优化（build_model）
+- 增加 `num_leaves` 从 31 到 63（增加模型复杂度）
+- 降低 `min_child_samples` 从 20 到 10（允许更细粒度分裂）
+- 增加 `n_estimators` 到 1000（配合 early stopping 防止过拟合）
+- 保持 `max_depth=8` 适度增加深度
+- 保持正则化参数防止过拟合
+
+#### 4. 训练优化
+- 使用 `callbacks=[lgb.early_stopping(stopping_rounds=50)]` 进行早停
+- 设置 `eval_metric='rmse'` 监控验证集性能
+</plan>
+<code>
+```python
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMRegressor
+
+# 全局状态变量，用于存储预处理拟合的参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 定义类别列和数值列
+    cat_cols = ['sex', 'smoker', 'region']
+    num_cols = ['age', 'bmi', 'children']
+    
+    # 只保留存在的列
+    cat_cols = [c for c in cat_cols if c in df.columns]
+    num_cols = [c for c in num_cols if c in df.columns]
+    
+    if mode == 'train':
+        # 构建预处理管道
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('cat', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+                ]), cat_cols),
+                ('num', Pipeline([
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler())
+                ]), num_cols)
+            ],
+            remainder='passthrough'
+        )
+        
+        # 分离特征和目标
+        target_col = 'charges'
+        if target_col in df.columns:
+            y = df[target_col].values
+            X = df.drop(columns=[target_col])
+        else:
+            y = None
+            X = df
+        
+        # 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 获取转换后的列名
+        transformed_X = preprocessor.transform(X)
+        
+        # 获取 OneHotEncoder 的列名
+        ohe = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            categories = ohe.categories_[i]
+            for cat in categories:
+                cat_feature_names.append(f"{col}_{cat}")
+        
+        num_feature_names = num_cols
+        all_feature_names = cat_feature_names + num_feature_names
+        
+        PREPROCESS_STATE['feature_names'] = all_feature_names
+        
+        # 构建处理后的 DataFrame
+        processed_df = pd.DataFrame(transformed_X, columns=all_feature_names)
+        if y is not None:
+            processed_df[target_col] = y
+        
+        return processed_df
+    
+    elif mode == 'test':
+        # 从状态中读取已拟合的预处理器
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        feature_names = PREPROCESS_STATE['feature_names']
+        
+        target_col = 'charges'
+        if target_col in df.columns:
+            y = df[target_col].values
+            X = df.drop(columns=[target_col])
+        else:
+            y = None
+            X = df
+        
+        # 应用预处理器
+        transformed_X = preprocessor.transform(X)
+        
+        # 构建处理后的 DataFrame
+        processed_df = pd.DataFrame(transformed_X, columns=feature_names)
+        if y is not None:
+            processed_df[target_col] = y
+        
+        return processed_df
+    
+    return df
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'charges'
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df
+    
+    # 查找 smoker_yes 列（OneHotEncoder 编码后的列名）
+    smoker_yes_col = None
+    for col in X.columns:
+        if col.startswith('smoker_') and col.endswith('_yes'):
+            smoker_yes_col = col
+            break
+    # 如果没找到 _yes 后缀，尝试找 smoker_ 开头的列（可能是 yes 或 no）
+    if smoker_yes_col is None:
+        for col in X.columns:
+            if col.startswith('smoker_'):
+                smoker_yes_col = col
+                break
+    
+    # 创建交互特征
+    if smoker_yes_col and 'bmi' in X.columns:
+        X['bmi_smoker'] = X['bmi'] * X[smoker_yes_col]
+    
+    if smoker_yes_col and 'age' in X.columns:
+        X['age_smoker'] = X['age'] * X[smoker_yes_col]
+    
+    # 创建 age * bmi 交互特征
+    if 'age' in X.columns and 'bmi' in X.columns:
+        X['age_bmi'] = X['age'] * X['bmi']
+    
+    # 创建多项式特征
+    if 'bmi' in X.columns:
+        X['bmi_squared'] = X['bmi'] ** 2
+    
+    if 'age' in X.columns:
+        X['age_squared'] = X['age'] ** 2
+    
+    if 'children' in X.columns:
+        X['children_squared'] = X['children'] ** 2
+    
+    return X
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = LGBMRegressor(
+        objective='regression',
+        n_estimators=1000,
+        max_depth=8,
+        num_leaves=63,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=10,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1
+    )
+    return model
+```
+</code>

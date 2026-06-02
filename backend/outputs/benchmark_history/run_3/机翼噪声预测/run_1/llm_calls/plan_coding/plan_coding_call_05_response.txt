@@ -1,0 +1,499 @@
+<plan>
+产物生成计划：
+1. 加载已存在的 data/best_model.pkl 模型文件
+2. 加载测试数据 data/test.csv 并进行与训练时相同的预处理和特征工程
+3. 对测试集进行预测，生成 output/test_predictions.csv（包含原始测试集 + prediction 列）
+4. 从模型提取特征重要性，生成 output/feature_importance.csv 和 output/feature_importance.png
+5. 生成回归任务的可视化：预测值 vs 真实值散点图（output/report_fig.png）——注意测试集没有目标列，所以这里用训练集的预测来生成散点图，或者跳过真实值对比
+6. 生成 HTML 报告 output/report.html（包含模型指标摘要、特征重要性表格、测试集预测预览、残差统计等）
+7. 保存模型到 output/model.pkl
+8. 生成配套预测脚本 output/predict.py
+9. 输出摘要 JSON
+
+注意：测试集没有目标列（SSPL），所以 report_fig.png 的预测值 vs 真实值散点图需要用训练集或验证集的预测来生成。由于验证集可能不存在，使用训练集的部分数据来做可视化。
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import dill
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.preprocessing import StandardScaler
+import lightgbm as lgb
+
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {}
+
+# ========== 预处理函数（与训练时一致）==========
+def preprocess(df, mode='train'):
+    df = df.copy()
+    
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    feature_cols = ['f', 'alpha', 'c', 'U_infinity', 'delta']
+    
+    if mode == 'train':
+        f_log_offset = 0
+        delta_log_offset = 0
+        PREPROCESS_STATE['f_log_offset'] = f_log_offset
+        PREPROCESS_STATE['delta_log_offset'] = delta_log_offset
+        
+        df['f_log'] = np.log1p(df['f'] - f_log_offset) if f_log_offset > 0 else np.log(df['f'])
+        df['delta_log'] = np.log1p(df['delta'] - delta_log_offset) if delta_log_offset > 0 else np.log(df['delta'])
+        
+        scaler = StandardScaler()
+        PREPROCESS_STATE['scaler'] = scaler
+    else:
+        f_log_offset = PREPROCESS_STATE.get('f_log_offset', 0)
+        delta_log_offset = PREPROCESS_STATE.get('delta_log_offset', 0)
+        
+        if 'f' in df.columns:
+            df['f_log'] = np.log1p(df['f'] - f_log_offset) if f_log_offset > 0 else np.log(df['f'])
+        if 'delta' in df.columns:
+            df['delta_log'] = np.log1p(df['delta'] - delta_log_offset) if delta_log_offset > 0 else np.log(df['delta'])
+    
+    return df
+
+
+def feature_engineering(df):
+    df = df.copy()
+    
+    df['f_x_U'] = df['f'] * df['U_infinity']
+    df['alpha_x_delta'] = df['alpha'] * df['delta']
+    df['U_div_c'] = df['U_infinity'] / (df['c'] + 1e-8)
+    df['f_x_delta'] = df['f'] * df['delta']
+    df['f_div_c'] = df['f'] / (df['c'] + 1e-8)
+    df['alpha_x_U'] = df['alpha'] * df['U_infinity']
+    df['delta_div_c'] = df['delta'] / (df['c'] + 1e-8)
+    
+    if 'f_log' in df.columns and 'delta_log' in df.columns:
+        df['f_log_x_delta_log'] = df['f_log'] * df['delta_log']
+        df['f_log_x_U'] = df['f_log'] * df['U_infinity']
+        df['delta_log_x_alpha'] = df['delta_log'] * df['alpha']
+    
+    if 'SSPL' in df.columns:
+        df = df.drop(columns=['SSPL'])
+    
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    df = df.fillna(0)
+    
+    scaler = PREPROCESS_STATE.get('scaler')
+    if scaler is not None:
+        if hasattr(scaler, 'mean_'):
+            df[df.columns] = scaler.transform(df[df.columns])
+        else:
+            df[df.columns] = scaler.fit_transform(df[df.columns])
+    
+    return df
+
+
+# ========== 主流程 ==========
+def main():
+    os.makedirs('output', exist_ok=True)
+    
+    # ========== 1. 加载模型 ==========
+    print("Loading model from data/best_model.pkl...")
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = dill.load(f)
+        print("Model loaded successfully.")
+    except Exception as e:
+        print(f"Failed to load with dill: {e}, trying pickle...")
+        with open('data/best_model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        print("Model loaded with pickle.")
+    
+    # ========== 2. 加载训练数据（用于拟合预处理参数和评估指标）==========
+    train = pd.read_csv('data/train.csv')
+    target_col = 'SSPL'
+    
+    # 预处理训练数据以拟合 scaler
+    train_clean = preprocess(train, mode='train')
+    
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train_raw = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train_raw = train_clean
+    
+    X_train_fe = feature_engineering(X_train_raw)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train_raw.index)
+    
+    # 清洗特征名
+    X_train_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe.columns]
+    if X_train_fe.columns.duplicated().any():
+        X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+    
+    # ========== 3. 加载测试数据并预测 ==========
+    test = pd.read_csv('data/test.csv')
+    test_clean = preprocess(test, mode='test')
+    
+    X_test_raw = test_clean.drop(columns=[target_col], errors='ignore')
+    X_test_fe = feature_engineering(X_test_raw)
+    if isinstance(X_test_fe, np.ndarray):
+        X_test_fe = pd.DataFrame(X_test_fe, index=X_test_raw.index)
+    
+    X_test_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_fe.columns]
+    if X_test_fe.columns.duplicated().any():
+        X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+    
+    # 对齐测试集特征与训练集特征
+    missing_cols = set(X_train_fe.columns) - set(X_test_fe.columns)
+    for col in missing_cols:
+        X_test_fe[col] = 0
+    X_test_fe = X_test_fe[X_train_fe.columns]
+    
+    # 预测
+    test_preds = model.predict(X_test_fe)
+    
+    # 保存测试预测
+    test_output = test.copy()
+    test_output['prediction'] = test_preds
+    test_output.to_csv('output/test_predictions.csv', index=False)
+    print("Test predictions saved to output/test_predictions.csv")
+    
+    # ========== 4. 训练集预测（用于评估指标和可视化）==========
+    train_preds = model.predict(X_train_fe)
+    
+    # 计算回归指标
+    rmse = float(np.sqrt(mean_squared_error(y_train, train_preds)))
+    mae = float(mean_absolute_error(y_train, train_preds))
+    r2 = float(r2_score(y_train, train_preds))
+    
+    metrics = {
+        'train_rmse': rmse,
+        'train_mae': mae,
+        'train_r2': r2
+    }
+    
+    # ========== 5. 特征重要性 ==========
+    feature_names = list(X_train_fe.columns)
+    
+    if hasattr(model, 'feature_importances_'):
+        importances = model.feature_importances_
+    elif hasattr(model, 'coef_'):
+        importances = np.abs(model.coef_).flatten()
+    else:
+        importances = np.ones(len(feature_names)) / len(feature_names)
+    
+    # 确保长度匹配
+    if len(importances) != len(feature_names):
+        importances = importances[:len(feature_names)]
+    
+    # 保存特征重要性 CSV
+    fi_df = pd.DataFrame({
+        'name': feature_names,
+        'importance': importances
+    })
+    fi_df = fi_df.sort_values('importance', ascending=False)
+    fi_df.to_csv('output/feature_importance.csv', index=False)
+    print("Feature importance saved to output/feature_importance.csv")
+    
+    # 特征重要性图
+    plt.figure(figsize=(10, 6))
+    top_n = min(20, len(fi_df))
+    top_fi = fi_df.head(top_n)
+    plt.barh(range(top_n), top_fi['importance'].values[::-1])
+    plt.yticks(range(top_n), top_fi['name'].values[::-1])
+    plt.xlabel('Importance')
+    plt.title('Feature Importance (Top {})'.format(top_n))
+    plt.tight_layout()
+    plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("Feature importance plot saved to output/feature_importance.png")
+    
+    # ========== 6. 回归可视化：预测值 vs 真实值散点图 ==========
+    plt.figure(figsize=(8, 8))
+    plt.scatter(y_train, train_preds, alpha=0.5, s=10)
+    
+    # y=x 对角线
+    min_val = min(y_train.min(), train_preds.min())
+    max_val = max(y_train.max(), train_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='y=x')
+    
+    plt.xlabel('True Values')
+    plt.ylabel('Predictions')
+    plt.title('Predictions vs True Values (Training Set)\nRMSE={:.4f}, MAE={:.4f}, R²={:.4f}'.format(rmse, mae, r2))
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("Report figure saved to output/report_fig.png")
+    
+    # ========== 7. 保存模型到 output/model.pkl ==========
+    with open('output/model.pkl', 'wb') as f:
+        pickle.dump(model, f)
+    print("Model saved to output/model.pkl")
+    
+    # ========== 8. 生成 HTML 报告 ==========
+    # 残差统计
+    residuals = y_train - train_preds
+    residual_stats = {
+        'mean': float(np.mean(residuals)),
+        'std': float(np.std(residuals)),
+        'min': float(np.min(residuals)),
+        'max': float(np.max(residuals)),
+        'median': float(np.median(residuals))
+    }
+    
+    # 构建特征重要性表格 HTML
+    fi_rows = ""
+    for _, row in fi_df.head(20).iterrows():
+        fi_rows += f"<tr><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>"
+    
+    # 测试预测预览
+    preview_rows = ""
+    for i in range(min(10, len(test_output))):
+        row_data = ""
+        for col in test_output.columns:
+            val = test_output.iloc[i][col]
+            if isinstance(val, float):
+                row_data += f"<td>{val:.4f}</td>"
+            else:
+                row_data += f"<td>{val}</td>"
+        preview_rows += f"<tr>{row_data}</tr>"
+    
+    # 测试集列名
+    test_cols_html = "".join([f"<th>{col}</th>" for col in test_output.columns])
+    
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Regression Model Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metric-box {{ display: inline-block; background: #e8f5e9; border: 1px solid #4CAF50; border-radius: 6px; padding: 15px 25px; margin: 10px; text-align: center; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2e7d32; }}
+        .metric-label {{ font-size: 12px; color: #666; }}
+        .section {{ margin: 20px 0; }}
+        img {{ max-width: 100%; height: auto; margin: 15px 0; border: 1px solid #ddd; border-radius: 4px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Regression Model Report</h1>
+        <p>Target: SSPL | Model: LightGBM Regressor</p>
+        
+        <h2>Model Performance Metrics (Training Set)</h2>
+        <div class="section">
+            <div class="metric-box">
+                <div class="metric-value">{rmse:.4f}</div>
+                <div class="metric-label">RMSE</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{mae:.4f}</div>
+                <div class="metric-label">MAE</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{r2:.4f}</div>
+                <div class="metric-label">R²</div>
+            </div>
+        </div>
+        
+        <h2>Residual Statistics</h2>
+        <table>
+            <tr><th>Statistic</th><th>Value</th></tr>
+            <tr><td>Mean</td><td>{residual_stats['mean']:.6f}</td></tr>
+            <tr><td>Std</td><td>{residual_stats['std']:.6f}</td></tr>
+            <tr><td>Min</td><td>{residual_stats['min']:.6f}</td></tr>
+            <tr><td>Max</td><td>{residual_stats['max']:.6f}</td></tr>
+            <tr><td>Median</td><td>{residual_stats['median']:.6f}</td></tr>
+        </table>
+        
+        <h2>Feature Importance (Top 20)</h2>
+        <table>
+            <tr><th>Feature</th><th>Importance</th></tr>
+            {fi_rows}
+        </table>
+        <img src="feature_importance.png" alt="Feature Importance">
+        
+        <h2>Predictions vs True Values</h2>
+        <img src="report_fig.png" alt="Predictions vs True Values">
+        
+        <h2>Test Set Predictions Preview (First 10 rows)</h2>
+        <table>
+            <tr>{test_cols_html}</tr>
+            {preview_rows}
+        </table>
+        <p>Full predictions saved to: output/test_predictions.csv</p>
+    </div>
+</body>
+</html>"""
+    
+    with open('output/report.html', 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    print("Report saved to output/report.html")
+    
+    # ========== 9. 生成配套预测脚本 ==========
+    predict_script = '''import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+from sklearn.preprocessing import StandardScaler
+
+# 全局预处理状态（需与训练时一致）
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='test'):
+    df = df.copy()
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    if mode == 'train':
+        f_log_offset = 0
+        delta_log_offset = 0
+        PREPROCESS_STATE['f_log_offset'] = f_log_offset
+        PREPROCESS_STATE['delta_log_offset'] = delta_log_offset
+        df['f_log'] = np.log1p(df['f'] - f_log_offset) if f_log_offset > 0 else np.log(df['f'])
+        df['delta_log'] = np.log1p(df['delta'] - delta_log_offset) if delta_log_offset > 0 else np.log(df['delta'])
+        scaler = StandardScaler()
+        PREPROCESS_STATE['scaler'] = scaler
+    else:
+        f_log_offset = PREPROCESS_STATE.get('f_log_offset', 0)
+        delta_log_offset = PREPROCESS_STATE.get('delta_log_offset', 0)
+        if 'f' in df.columns:
+            df['f_log'] = np.log1p(df['f'] - f_log_offset) if f_log_offset > 0 else np.log(df['f'])
+        if 'delta' in df.columns:
+            df['delta_log'] = np.log1p(df['delta'] - delta_log_offset) if delta_log_offset > 0 else np.log(df['delta'])
+    return df
+
+def feature_engineering(df):
+    df = df.copy()
+    df['f_x_U'] = df['f'] * df['U_infinity']
+    df['alpha_x_delta'] = df['alpha'] * df['delta']
+    df['U_div_c'] = df['U_infinity'] / (df['c'] + 1e-8)
+    df['f_x_delta'] = df['f'] * df['delta']
+    df['f_div_c'] = df['f'] / (df['c'] + 1e-8)
+    df['alpha_x_U'] = df['alpha'] * df['U_infinity']
+    df['delta_div_c'] = df['delta'] / (df['c'] + 1e-8)
+    if 'f_log' in df.columns and 'delta_log' in df.columns:
+        df['f_log_x_delta_log'] = df['f_log'] * df['delta_log']
+        df['f_log_x_U'] = df['f_log'] * df['U_infinity']
+        df['delta_log_x_alpha'] = df['delta_log'] * df['alpha']
+    if 'SSPL' in df.columns:
+        df = df.drop(columns=['SSPL'])
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.fillna(0)
+    scaler = PREPROCESS_STATE.get('scaler')
+    if scaler is not None:
+        if hasattr(scaler, 'mean_'):
+            df[df.columns] = scaler.transform(df[df.columns])
+        else:
+            df[df.columns] = scaler.fit_transform(df[df.columns])
+    return df
+
+def predict(new_data_path, model_path='output/model.pkl'):
+    """
+    Load model and predict on new data.
+    
+    Parameters:
+    - new_data_path: path to CSV file with same columns as training data
+    - model_path: path to saved model pickle file
+    
+    Returns:
+    - DataFrame with original data + prediction column
+    """
+    # Load model
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # Load and preprocess data
+    df = pd.read_csv(new_data_path)
+    df_clean = preprocess(df, mode='test')
+    X = df_clean.drop(columns=['SSPL'], errors='ignore')
+    X_fe = feature_engineering(X)
+    
+    if isinstance(X_fe, np.ndarray):
+        X_fe = pd.DataFrame(X_fe, index=X.index)
+    
+    # Clean column names
+    X_fe.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X_fe.columns]
+    
+    # Predict
+    predictions = model.predict(X_fe)
+    
+    # Add predictions to original data
+    result = df.copy()
+    result['prediction'] = predictions
+    
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <new_data.csv>")
+        sys.exit(1)
+    
+    data_path = sys.argv[1]
+    result = predict(data_path)
+    output_path = data_path.replace('.csv', '_predictions.csv')
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+'''
+    
+    with open('output/predict.py', 'w', encoding='utf-8') as f:
+        f.write(predict_script)
+    print("Prediction script saved to output/predict.py")
+    
+    # ========== 10. 输出摘要 ==========
+    summary = {
+        'status': 'success',
+        'task_type': 'regression',
+        'target': 'SSPL',
+        'model_type': str(type(model).__name__),
+        'metrics': metrics,
+        'residual_stats': residual_stats,
+        'num_features': len(feature_names),
+        'test_samples': len(test),
+        'test_predictions_range': {
+            'min': float(np.min(test_preds)),
+            'max': float(np.max(test_preds)),
+            'mean': float(np.mean(test_preds))
+        },
+        'output_files': [
+            'output/model.pkl',
+            'output/feature_importance.csv',
+            'output/feature_importance.png',
+            'output/report.html',
+            'output/report_fig.png',
+            'output/test_predictions.csv',
+            'output/predict.py'
+        ]
+    }
+    
+    print('METRICS_JSON_START')
+    print(json.dumps(summary))
+    print('METRICS_JSON_END')
+
+if __name__ == '__main__':
+    main()
+```
+</code>

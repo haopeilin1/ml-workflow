@@ -1,0 +1,64 @@
+============================================================
+  任务运行摘要: 机翼噪声预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: regression
+  目标列: SSPL
+  评估指标: auto
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 84.00
+  总耗时: 0.0s
+  验证集 RMSE: 2.0064
+  测试集 RMSE: 1.6726
+
+【各阶段耗时】
+  意图识别: 0.8s
+  代码生成: 15.9s
+  沙箱执行: 17.3s
+  评估优化: 16.1s
+  产物生成: 76.6s
+  测试预测: 0.0s
+  总计: 188.1s
+
+【Token 消耗】
+  Plan/Coding 调用: 5 次, 55904 tokens
+  Evaluation 调用: 4 次, 9112 tokens
+  总计: 9 次, 65016 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 3508tokens | 0.8s
+    - qwen3.5-flash@openai: 1 calls, 3508 tokens, 0.8s
+  plan_coding : deepseek-v4-flash@openai | 5calls | 55904tokens | 141.2s
+    - deepseek-v4-flash@openai: 4 calls, 45442 tokens, 70.4s
+    - deepseek-v4-pro@openai: 1 calls, 10462 tokens, 70.7s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9112tokens | 16.1s
+    - deepseek-v4-flash@openai: 4 calls, 9112 tokens, 16.1s
+  judge       : qwen3.5-flash@openai | 1calls | 1536tokens | 1.8s
+    - qwen3.5-flash@openai: 1 calls, 1536 tokens, 1.8s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：RMSE】为核心标准。模型在测试集上的 RMSE 为 1.6726，优于验证集的 2.0064，相对差距为负值（即测试表现更好），表明模型具有极佳的泛化能力且未出现过拟合现象。同时，测试集 R²高达 0.9442，说明模型对目标变量 SSPL 的解释力极强，回归效果优秀。虽然任务类型为回归，但测试集表现甚至优于验证集，属于高质量交付。...
+
+【维度评分】
+  unknown: 82.0 (weight=0.3)
+  unknown: 90.0 (weight=0.25)
+  unknown: 85.0 (weight=0.2)
+  unknown: 80.0 (weight=0.15)
+  unknown: 85.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 17:11:22 UTC
+============================================================

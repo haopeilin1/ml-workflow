@@ -1,0 +1,15 @@
+{
+  "completeness": null,
+  "generated_files": [],
+  "prediction_file": false,
+  "model_file": false,
+  "feature_importance_csv": false,
+  "feature_importance_png": false,
+  "report_html": false,
+  "report_fig_png": false,
+  "predict_script": false,
+  "pipeline_py": false,
+  "residual_png": false,
+  "cluster_png": false,
+  "ts_forecast_png": false
+}

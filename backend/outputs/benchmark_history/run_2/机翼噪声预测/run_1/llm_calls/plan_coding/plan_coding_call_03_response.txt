@@ -1,0 +1,285 @@
+<plan>
+## 优化规划
+
+### 当前状态分析
+当前处于 **OPTIMIZE** 状态，上下文载荷建议：
+1. 使用超参数搜索（GridSearchCV/Optuna）优化 num_leaves、learning_rate、min_child_samples
+2. 增加特征工程（交互特征、多项式特征）
+3. 尝试集成多个LightGBM模型（Bagging）降低方差
+
+### 优化策略
+
+#### 1. 超参数调优
+- 使用 **Optuna** 进行超参数搜索，搜索空间：
+  - `num_leaves`: 15-50
+  - `learning_rate`: 0.01-0.1
+  - `min_child_samples`: 5-30
+  - `subsample`: 0.6-0.9
+  - `feature_fraction`: 0.6-0.9
+  - `reg_alpha`: 0.0-1.0
+  - `reg_lambda`: 0.0-1.0
+- 使用 **TPE** 采样器，优化目标为验证集 RMSE
+- 设置早停防止过拟合
+
+#### 2. 特征工程增强
+- 保留现有交叉特征（f_delta, alpha_U_infinity 等）
+- 新增物理意义特征：
+  - **Strouhal 数相关**: `f * c / U_infinity`（无量纲频率）
+  - **雷诺数相关**: `U_infinity * c`（与雷诺数成正比）
+  - **攻角与弦长交互**: `alpha * c`
+  - **速度平方**: `U_infinity^2`（动压相关）
+- 使用 **SelectKBest** 或 **RFECV** 进行特征选择，避免维度灾难
+
+#### 3. 模型集成（Bagging）
+- 使用 **BaggingRegressor** 包装 LightGBM，设置 `n_estimators=10`，`max_samples=0.8`
+- 每个基模型使用不同的随机种子，增加多样性
+- 集成后预测方差降低，泛化能力提升
+
+#### 4. 过拟合控制
+- 严格限制 `max_depth=6`（当前为8，偏大）
+- 增加 `min_child_samples=20`（当前合理）
+- 使用 `reg_alpha` 和 `reg_lambda` 正则化
+- 使用早停（`early_stopping_rounds=50`）
+
+### 代码修改要点
+1. `build_model()`: 使用 Optuna 搜索最佳超参数，返回优化后的模型
+2. `feature_engineering()`: 增加新的物理意义特征
+3. `preprocess()`: 保持不变（当前已合理）
+4. 添加 `evaluate_model()`: 返回 RMSE、MAE、R²
+
+### 注意事项
+- 使用 `lightgbm.early_stopping` 回调（版本4.6.0兼容）
+- 避免数据泄露：Optuna 搜索只在训练集上拟合
+- 特征选择使用训练集统计量，transform 验证集和测试集
+</plan>
+<code>
+```python
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from lightgbm import LGBMRegressor
+import lightgbm as lgb
+from sklearn.ensemble import BaggingRegressor
+from sklearn.feature_selection import SelectKBest, f_regression
+import optuna
+
+# 全局状态存储
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    global PREPROCESS_STATE
+    
+    # 复制数据避免修改原始数据
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 分离特征列和目标列
+    feature_cols = ['f', 'alpha', 'c', 'U_infinity', 'delta']
+    target_col = 'SSPL'
+    
+    # 确保特征列都存在
+    available_features = [col for col in feature_cols if col in df.columns]
+    
+    if mode == 'train':
+        # 拟合 StandardScaler
+        scaler = StandardScaler()
+        scaler.fit(df[available_features])
+        PREPROCESS_STATE['scaler'] = scaler
+    else:
+        # 应用已拟合的 scaler
+        scaler = PREPROCESS_STATE.get('scaler')
+        if scaler is None:
+            raise ValueError("PREPROCESS_STATE 中未找到 scaler，请先运行 mode='train'")
+    
+    # 应用标准化
+    df[available_features] = scaler.transform(df[available_features])
+    
+    return df
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 复制数据
+    df = df.copy()
+    
+    # 特征列列表
+    feature_cols = ['f', 'alpha', 'c', 'U_infinity', 'delta']
+    target_col = 'SSPL'
+    
+    # 确保特征列都存在
+    available_features = [col for col in feature_cols if col in df.columns]
+    
+    # 创建交叉特征（物理意义相关）
+    df['f_delta'] = df['f'] * df['delta']
+    df['alpha_U_infinity'] = df['alpha'] * df['U_infinity']
+    df['f_c'] = df['f'] * df['c']  # 与 Strouhal 数相关
+    df['alpha_delta'] = df['alpha'] * df['delta']  # 攻角与位移厚度交互
+    df['U_infinity_delta'] = df['U_infinity'] * df['delta']  # 速度与位移厚度交互
+    
+    # 创建比值特征
+    df['U_infinity_over_c'] = df['U_infinity'] / (df['c'] + 1e-8)  # 避免除零
+    df['f_over_U_infinity'] = df['f'] / (df['U_infinity'] + 1e-8)  # 频率/速度，与波长相关
+    df['c_over_delta'] = df['c'] / (df['delta'] + 1e-8)  # 弦长/位移厚度，与相对厚度相关
+    
+    # 创建多项式特征
+    df['f_squared'] = df['f'] ** 2
+    df['delta_squared'] = df['delta'] ** 2
+    df['alpha_squared'] = df['alpha'] ** 2
+    df['U_infinity_squared'] = df['U_infinity'] ** 2
+    
+    # 创建对数变换特征（声压级常与对数相关）
+    df['log_f'] = np.log1p(df['f'])
+    df['log_delta'] = np.log1p(df['delta'] * 1000)  # 放大后取对数，避免负值
+    df['log_U_infinity'] = np.log1p(df['U_infinity'])
+    
+    # === 新增物理意义特征 ===
+    # Strouhal 数相关（无量纲频率）：f * c / U_infinity
+    df['strouhal'] = df['f'] * df['c'] / (df['U_infinity'] + 1e-8)
+    
+    # 雷诺数相关（与 U_infinity * c 成正比）
+    df['reynolds'] = df['U_infinity'] * df['c']
+    
+    # 攻角与弦长交互
+    df['alpha_c'] = df['alpha'] * df['c']
+    
+    # 速度平方（动压相关）
+    df['U_infinity_squared'] = df['U_infinity'] ** 2
+    
+    # 频率与攻角交互
+    df['f_alpha'] = df['f'] * df['alpha']
+    
+    # 弦长与位移厚度比值平方
+    df['c_over_delta_squared'] = (df['c'] / (df['delta'] + 1e-8)) ** 2
+    
+    # 选择所有特征列（包括新创建的）
+    all_feature_cols = available_features + [
+        'f_delta', 'alpha_U_infinity', 'f_c', 'alpha_delta', 'U_infinity_delta',
+        'U_infinity_over_c', 'f_over_U_infinity', 'c_over_delta',
+        'f_squared', 'delta_squared', 'alpha_squared', 'U_infinity_squared',
+        'log_f', 'log_delta', 'log_U_infinity',
+        'strouhal', 'reynolds', 'alpha_c', 'U_infinity_squared', 'f_alpha', 'c_over_delta_squared'
+    ]
+    
+    # 分离目标列
+    if target_col in df.columns:
+        X = df[all_feature_cols]
+    else:
+        X = df[all_feature_cols]
+    
+    return X
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用 Optuna 搜索最佳超参数，返回 Bagging 集成模型。
+    """
+    # 使用 Optuna 搜索最佳超参数
+    def objective(trial):
+        params = {
+            'num_leaves': trial.suggest_int('num_leaves', 15, 50),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+            'min_child_samples': trial.suggest_int('min_child_samples', 5, 30),
+            'subsample': trial.suggest_float('subsample', 0.6, 0.9),
+            'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 0.9),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'max_depth': trial.suggest_int('max_depth', 4, 8),
+            'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 0.1),
+        }
+        
+        model = LGBMRegressor(
+            objective='regression',
+            num_leaves=params['num_leaves'],
+            max_depth=params['max_depth'],
+            learning_rate=params['learning_rate'],
+            n_estimators=500,
+            subsample=params['subsample'],
+            subsample_freq=1,
+            feature_fraction=params['feature_fraction'],
+            min_child_samples=params['min_child_samples'],
+            reg_alpha=params['reg_alpha'],
+            reg_lambda=params['reg_lambda'],
+            min_split_gain=params['min_split_gain'],
+            random_state=42,
+            verbose=-1
+        )
+        
+        # 使用训练集和验证集进行早停
+        model.fit(
+            X_train_fe, y_train,
+            eval_set=[(X_val_fe, y_val)],
+            callbacks=[lgb.early_stopping(stopping_rounds=50)]
+        )
+        
+        # 返回验证集 RMSE
+        val_preds = model.predict(X_val_fe)
+        rmse = float(np.sqrt(mean_squared_error(y_val, val_preds)))
+        return rmse
+    
+    # 执行 Optuna 搜索
+    study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=30, show_progress_bar=False)
+    
+    best_params = study.best_params
+    
+    # 使用最佳参数构建基模型
+    base_model = LGBMRegressor(
+        objective='regression',
+        num_leaves=best_params['num_leaves'],
+        max_depth=best_params['max_depth'],
+        learning_rate=best_params['learning_rate'],
+        n_estimators=500,
+        subsample=best_params['subsample'],
+        subsample_freq=1,
+        feature_fraction=best_params['feature_fraction'],
+        min_child_samples=best_params['min_child_samples'],
+        reg_alpha=best_params['reg_alpha'],
+        reg_lambda=best_params['reg_lambda'],
+        min_split_gain=best_params['min_split_gain'],
+        random_state=42,
+        verbose=-1
+    )
+    
+    # 使用 Bagging 集成降低方差
+    bagging_model = BaggingRegressor(
+        estimator=base_model,
+        n_estimators=10,
+        max_samples=0.8,
+        max_features=0.8,
+        bootstrap=True,
+        bootstrap_features=False,
+        random_state=42,
+        n_jobs=-1
+    )
+    
+    return bagging_model
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    """
+    val_preds = model.predict(X_val)
+    
+    rmse = float(np.sqrt(mean_squared_error(y_val, val_preds)))
+    mae = float(mean_absolute_error(y_val, val_preds))
+    r2 = float(r2_score(y_val, val_preds))
+    
+    return {
+        'val_rmse': rmse,
+        'val_mae': mae,
+        'val_r2': r2
+    }
+```
+</code>

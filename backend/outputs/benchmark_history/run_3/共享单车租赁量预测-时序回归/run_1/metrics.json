@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": null,
+    "val_accuracy": null,
+    "val_f1_macro": null,
+    "val_rmse": 0.31398984704946625,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": null,
+    "accuracy": null,
+    "f1": null,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": 328.0825383742038,
+    "mae": 243.96376116758307,
+    "r2": -1.2141592595699247
+  },
+  "best_score": 88.5,
+  "task_type": "regression",
+  "target_column": "cnt",
+  "eval_metric": "RMSE",
+  "complexity": "complex",
+  "complexity_reason": "时序任务强制complex",
+  "is_time_series": true,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

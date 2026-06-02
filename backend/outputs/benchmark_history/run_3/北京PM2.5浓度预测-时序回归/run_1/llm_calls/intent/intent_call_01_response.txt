@@ -1,0 +1,7 @@
+{
+  "target_column": "pm2.5",
+  "task_type": "regression",
+  "eval_metric": "RMSE",
+  "complexity": "simple",
+  "is_time_series": false
+}

@@ -1,0 +1,277 @@
+<plan>
+根据当前运行状态（OPTIMIZE）和上下文载荷，分析如下：
+
+1. **当前问题**：AUC已达0.917（优秀），但准确率偏低。建议优化分类阈值而非调整模型参数。
+
+2. **优化策略**：
+   - 在验证集上搜索最优分类阈值（最大化F1或G-mean），而非使用默认的0.5阈值
+   - 使用`precision_recall_curve`或自定义阈值搜索函数
+   - 保持现有模型参数不变（AUC已经很好）
+
+3. **代码修改**：
+   - 在`build_model()`中保持现有LightGBM参数不变
+   - 添加一个自定义的`evaluate_model()`函数，实现阈值搜索逻辑：
+     - 在验证集上计算不同阈值下的F1分数
+     - 选择最优阈值
+     - 返回包含最优阈值和对应指标的字典
+   - 系统框架会自动使用`evaluate_model()`的返回值
+
+4. **数据预处理检查清单**：
+   - 已正确处理类别特征（OneHotEncoder）
+   - 已丢弃id列
+   - 已处理StreamingTV/StreamingMovies
+   - 目标列保留正确
+
+5. **关键点**：阈值搜索只在验证集上进行，不会导致数据泄露。最优阈值会用于测试集预测。
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+from sklearn.metrics import f1_score, precision_recall_curve, roc_auc_score, accuracy_score
+
+# 全局状态变量，用于存储训练时拟合的预处理器
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃id列（防止过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 将StreamingTV和StreamingMovies从字符串转换为数值
+    for col in ['StreamingTV', 'StreamingMovies']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 3. 处理目标列（仅在训练/验证时存在）
+    if 'Churn' in df.columns:
+        df['Churn'] = df['Churn'].map({'Yes': 1, 'No': 0}).astype(int)
+    
+    # 4. 识别类别列和数值列
+    cat_cols = ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines',
+                'InternetService', 'OnlineSecurity', 'OnlineBackup', 'DeviceProtection',
+                'TechSupport', 'Contract', 'PaperlessBilling', 'PaymentMethod']
+    # 只保留数据中实际存在的列
+    cat_cols = [c for c in cat_cols if c in df.columns]
+    
+    # 数值列：所有非类别、非目标、非id的列
+    exclude_cols = set(cat_cols + ['Churn', 'id'])
+    num_cols = [c for c in df.columns if c not in exclude_cols and df[c].dtype in ['int64', 'float64']]
+    
+    if mode == 'train':
+        # 构建预处理器
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 分离特征和目标
+        if 'Churn' in df.columns:
+            X = df.drop(columns=['Churn'])
+            y = df['Churn']
+        else:
+            X = df
+            y = None
+        
+        # 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        PREPROCESS_STATE['feature_names'] = preprocessor.get_feature_names_out()
+        
+        # 转换数据
+        X_transformed = preprocessor.transform(X)
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(X_transformed, columns=PREPROCESS_STATE['feature_names'])
+        if y is not None:
+            processed_df['Churn'] = y.values
+        
+        return processed_df
+    
+    elif mode == 'test':
+        # 加载已拟合的预处理器
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        
+        # 分离特征和目标
+        if 'Churn' in df.columns:
+            X = df.drop(columns=['Churn'])
+            y = df['Churn']
+        else:
+            X = df
+            y = None
+        
+        # 转换数据
+        X_transformed = preprocessor.transform(X)
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(X_transformed, columns=PREPROCESS_STATE['feature_names'])
+        if y is not None:
+            processed_df['Churn'] = y.values
+        
+        return processed_df
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 分离目标列（如果存在）
+    if 'Churn' in df.columns:
+        y = df['Churn']
+        X = df.drop(columns=['Churn'])
+    else:
+        X = df
+    
+    # 创建交叉特征
+    # 注意：特征名称可能包含特殊字符（如OneHotEncoder生成的列名），需要安全访问
+    # 查找tenure相关的列
+    tenure_cols = [c for c in X.columns if 'tenure' in c.lower()]
+    monthly_charges_cols = [c for c in X.columns if 'MonthlyCharges' in c.lower()]
+    total_charges_cols = [c for c in X.columns if 'TotalCharges' in c.lower()]
+    
+    # 创建tenure与MonthlyCharges的交互特征
+    if tenure_cols and monthly_charges_cols:
+        tenure_col = tenure_cols[0]
+        monthly_col = monthly_charges_cols[0]
+        # 平均每月费用（避免除零）
+        X['tenure_monthly_ratio'] = np.where(
+            X[tenure_col] > 0,
+            X[monthly_col] / X[tenure_col],
+            0
+        )
+    
+    # 创建TotalCharges与tenure的比值
+    if total_charges_cols and tenure_cols:
+        total_col = total_charges_cols[0]
+        tenure_col = tenure_cols[0]
+        X['avg_monthly_total'] = np.where(
+            X[tenure_col] > 0,
+            X[total_col] / X[tenure_col],
+            0
+        )
+    
+    # 创建tenure的分组特征（短期/中期/长期客户）
+    if tenure_cols:
+        tenure_col = tenure_cols[0]
+        X['tenure_group'] = pd.cut(
+            X[tenure_col],
+            bins=[-np.inf, 12, 24, 48, np.inf],
+            labels=[0, 1, 2, 3]
+        ).astype(float)
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 填充可能的NaN值
+    X = X.fillna(0)
+    
+    # 如果存在目标列，将其加回（供后续训练使用）
+    if 'Churn' in locals() or 'y' in locals():
+        X['Churn'] = y.values
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（Churn比例约22.5%）
+    # 使用scale_pos_weight处理不平衡
+    scale_pos_weight = (475355 - 107054) / 107054  # 非流失/流失 ≈ 3.44
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        min_child_weight=1e-3,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1
+    )
+    
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    在验证集上搜索最优分类阈值（最大化F1），并返回包含最优阈值和对应指标的字典。
+    """
+    # 获取验证集预测概率
+    val_probs = model.predict_proba(X_val)[:, 1]
+    
+    # 计算默认阈值0.5下的指标
+    default_preds = (val_probs >= 0.5).astype(int)
+    default_f1 = f1_score(y_val, default_preds)
+    default_auc = roc_auc_score(y_val, val_probs)
+    default_accuracy = accuracy_score(y_val, default_preds)
+    
+    # 搜索最优阈值（最大化F1）
+    precisions, recalls, thresholds = precision_recall_curve(y_val, val_probs)
+    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
+    
+    # 找到最优阈值（排除最后一个元素，因为precision_recall_curve的thresholds比precisions少一个）
+    best_idx = np.argmax(f1_scores[:-1])  # 排除最后一个（对应recall=1, precision=0）
+    best_threshold = thresholds[best_idx] if len(thresholds) > 0 else 0.5
+    best_f1 = f1_scores[best_idx]
+    
+    # 使用最优阈值计算指标
+    best_preds = (val_probs >= best_threshold).astype(int)
+    best_accuracy = accuracy_score(y_val, best_preds)
+    
+    # 保存最优阈值到全局状态，供后续测试集预测使用
+    PREPROCESS_STATE['best_threshold'] = float(best_threshold)
+    
+    return {
+        'val_auc': float(default_auc),
+        'val_accuracy_default': float(default_accuracy),
+        'val_f1_default': float(default_f1),
+        'val_best_threshold': float(best_threshold),
+        'val_f1_optimized': float(best_f1),
+        'val_accuracy_optimized': float(best_accuracy)
+    }
+```
+</code>

@@ -1,0 +1,812 @@
+【当前运行状态 Run State】: DEBUG
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.BINARY_CLASSIFICATION
+- 目标列: Churn
+- 评估指标: AUC-ROC
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于客户人口统计、服务订阅、账户及付费行为等20维特征，构建二分类模型预测电信客户流失概率（Churn：Yes/No）。评估指标仅采用AUC-ROC，要求模型具备良好排序能力以优先识别高风险客户。提交结果需为CSV格式，包含表头及每条样本的流失概率（0~1）。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- 类别特征列 ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines', 'InternetService', 'OnlineSecurity', 'OnlineBackup', 'DeviceProtection', 'TechSupport', 'StreamingTV', 'StreamingMovies', 'Contract', 'PaperlessBilling', 'PaymentMethod'] 必须纳入 Pipeline 的 ColumnTransformer 中，使用 OneHotEncoder(handle_unknown='ignore') 或 OrdinalEncoder 编码，严禁直接传入模型。
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 列 ['StreamingTV', 'StreamingMovies'] 名称看起来像数值但类型被识别为 categorical/object，必须在 preprocess() 中用 `pd.to_numeric(df[col], errors='coerce')` 强制转换，然后再填充缺失值。严禁对 string 列调用 .median()。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 Churn。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['Churn'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "train_set.csv",
+  "rowCount": 475355,
+  "columnCount": 21,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 475355,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        6165.0,
+        565551.0,
+        85537.0,
+        137025.0,
+        436494.0
+      ],
+      "min": 0.0,
+      "max": 594192.0,
+      "mean": 297260.93915705103,
+      "std": 171520.4677765968,
+      "median": 297231.0,
+      "skewness": -0.0002511706201592213,
+      "isMonotonic": false
+    },
+    {
+      "name": "gender",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Male",
+        "Female",
+        "Female",
+        "Female",
+        "Female"
+      ],
+      "mostCommon": "Female",
+      "mostCommonFreq": 238927,
+      "cardinality": "low"
+    },
+    {
+      "name": "SeniorCitizen",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.11396324851952751,
+      "std": 0.31776695694857887,
+      "median": 0.0,
+      "skewness": 2.4296948896029944
+    },
+    {
+      "name": "Partner",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "No",
+        "No",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 247799,
+      "cardinality": "low"
+    },
+    {
+      "name": "Dependents",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No",
+        "No",
+        "Yes",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 331445,
+      "cardinality": "low"
+    },
+    {
+      "name": "tenure",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 72,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        60.0,
+        47.0,
+        11.0,
+        35.0,
+        56.0
+      ],
+      "min": 1.0,
+      "max": 72.0,
+      "mean": 36.57484616760106,
+      "std": 25.05206365485892,
+      "median": 35.0,
+      "skewness": 0.06304178342003915
+    },
+    {
+      "name": "PhoneService",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "Yes",
+        "Yes",
+        "Yes"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 446290,
+      "cardinality": "low"
+    },
+    {
+      "name": "MultipleLines",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "No",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 226832,
+      "cardinality": "low"
+    },
+    {
+      "name": "InternetService",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Fiber optic",
+        "DSL",
+        "DSL",
+        "DSL",
+        "Fiber optic"
+      ],
+      "mostCommon": "Fiber optic",
+      "mostCommonFreq": 218053,
+      "cardinality": "low"
+    },
+    {
+      "name": "OnlineSecurity",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No",
+        "No",
+        "No",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 231550,
+      "cardinality": "low"
+    },
+    {
+      "name": "OnlineBackup",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "No",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 200138,
+      "cardinality": "low"
+    },
+    {
+      "name": "DeviceProtection",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "No",
+        "No",
+        "No",
+        "Yes"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 197863,
+      "cardinality": "low"
+    },
+    {
+      "name": "TechSupport",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No",
+        "No",
+        "Yes",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 230738,
+      "cardinality": "low"
+    },
+    {
+      "name": "StreamingTV",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "No",
+        "No",
+        "Yes"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 192476,
+      "cardinality": "low"
+    },
+    {
+      "name": "StreamingMovies",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "Yes",
+        "No",
+        "Yes"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 193397,
+      "cardinality": "low"
+    },
+    {
+      "name": "Contract",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Month-to-month",
+        "One year",
+        "Month-to-month",
+        "One year",
+        "Month-to-month"
+      ],
+      "mostCommon": "Month-to-month",
+      "mostCommonFreq": 239065,
+      "cardinality": "low"
+    },
+    {
+      "name": "PaperlessBilling",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "No",
+        "No",
+        "No",
+        "Yes"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 292581,
+      "cardinality": "low"
+    },
+    {
+      "name": "PaymentMethod",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Electronic check",
+        "Electronic check",
+        "Bank transfer (automatic)",
+        "Bank transfer (automatic)",
+        "Electronic check"
+      ],
+      "mostCommon": "Electronic check",
+      "mostCommonFreq": 172165,
+      "cardinality": "low"
+    },
+    {
+      "name": "MonthlyCharges",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1911,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        104.9,
+        74.4,
+        59.45,
+        62.25,
+        94.5
+      ],
+      "min": 18.25,
+      "max": 118.75,
+      "mean": 65.8920245542805,
+      "std": 31.078943907590787,
+      "median": 74.15,
+      "skewness": -0.28965894802999803
+    },
+    {
+      "name": "TotalCharges",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 29941,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        6273.4,
+        3847.75,
+        669.45,
+        2460.55,
+        5149.45
+      ],
+      "min": 18.8,
+      "max": 8684.8,
+      "mean": 2495.6277961607643,
+      "std": 2355.0145390247762,
+      "median": 1434.65,
+      "skewness": 0.9092887243432712
+    },
+    {
+      "name": "Churn",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No",
+        "No",
+        "No",
+        "No",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 368301,
+      "cardinality": "low"
+    }
+  ],
+  "classBalance": {
+    "targetColumn": "OnlineSecurity",
+    "nClasses": 3,
+    "maxClassRatio": 0.4871,
+    "minClassRatio": 0.2366,
+    "imbalanceRatio": 2.06,
+    "isSeverelyImbalanced": false
+  }
+}
+
+【上下文载荷 Context Payload】:
+第 1 次执行错误:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_2h4166sn\script.py", line 261, in <module>
+    X_train_fe = feature_engineering(X_train)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_2h4166sn\script.py", line 130, in feature_engineering
+    if col in ohe.categories_:
+       ^^^^^^^^^^^^^^^^^^^^^^
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+
+
+【历史代码 Previous Code】:
+```python
+import pandas as pd
+import numpy as np
+import dill
+import json
+import re
+import warnings
+from sklearn.metrics import accuracy_score, roc_auc_score, root_mean_squared_error, mean_absolute_error, r2_score, f1_score
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态（用于保存预处理参数）==========
+PREPROCESS_STATE = {}
+
+# ========== LLM 填充区（开始）==========
+import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 处理目标列 Churn（如果存在）
+    if 'Churn' in df.columns:
+        if mode == 'train':
+            le = LabelEncoder()
+            df['Churn'] = le.fit_transform(df['Churn'])
+            PREPROCESS_STATE['churn_encoder'] = le
+        else:
+            le = PREPROCESS_STATE.get('churn_encoder')
+            if le:
+                df['Churn'] = le.transform(df['Churn'])
+    
+    # 3. 处理 StreamingTV 和 StreamingMovies（尝试数值转换，失败则保留为类别）
+    for col in ['StreamingTV', 'StreamingMovies']:
+        if col in df.columns:
+            # 尝试转换为数值
+            numeric_col = pd.to_numeric(df[col], errors='coerce')
+            # 如果大部分是 NaN，说明是类别特征，保留原样
+            if numeric_col.isna().sum() > 0.5 * len(df):
+                # 保留为类别特征，不做转换
+                pass
+            else:
+                df[col] = numeric_col
+    
+    # 4. 定义类别特征和数值特征
+    cat_cols = ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines',
+                'InternetService', 'OnlineSecurity', 'OnlineBackup', 'DeviceProtection',
+                'TechSupport', 'StreamingTV', 'StreamingMovies', 'Contract',
+                'PaperlessBilling', 'PaymentMethod']
+    
+    # 只保留实际存在的列
+    cat_cols = [c for c in cat_cols if c in df.columns]
+    
+    # 数值特征（排除目标列和类别列）
+    exclude_cols = set(cat_cols + ['Churn'])
+    num_cols = [c for c in df.columns if c not in exclude_cols and df[c].dtype in ['int64', 'float64']]
+    
+    # 5. 构建预处理器
+    if mode == 'train':
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 拟合预处理器
+        # 注意：这里只拟合特征部分，不包含目标列
+        X = df.drop(columns=['Churn'], errors='ignore')
+        preprocessor.fit(X)
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+    else:
+        preprocessor = PREPROCESS_STATE.get('preprocessor')
+        if preprocessor is None:
+            raise ValueError("PREPROCESS_STATE 中没有预处理器，请先运行 mode='train'")
+    
+    return df
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 分离特征和目标
+    y = None
+    if 'Churn' in df.columns:
+        y = df['Churn']
+        df = df.drop(columns=['Churn'])
+    
+    # 应用预处理器
+    preprocessor = PREPROCESS_STATE.get('preprocessor')
+    if preprocessor is None:
+        raise ValueError("PREPROCESS_STATE 中没有预处理器")
+    
+    X_processed = preprocessor.transform(df)
+    
+    # 获取特征名称
+    cat_cols = PREPROCESS_STATE.get('cat_cols', [])
+    num_cols = PREPROCESS_STATE.get('num_cols', [])
+    
+    # 获取 OneHotEncoder 的特征名称
+    ohe = preprocessor.named_transformers_['cat'].named_steps['encoder']
+    cat_feature_names = []
+    for i, col in enumerate(cat_cols):
+        if col in ohe.categories_:
+            categories = ohe.categories_[i]
+            cat_feature_names.extend([f"{col}_{cat}" for cat in categories])
+    
+    # 构建完整的特征名称列表
+    feature_names = cat_feature_names + num_cols
+    
+    # 转换为 DataFrame
+    X = pd.DataFrame(X_processed, columns=feature_names)
+    
+    # 创建新特征
+    # 1. tenure 的分箱（如果 tenure 存在）
+    if 'tenure' in num_cols:
+        tenure_idx = num_cols.index('tenure')
+        tenure_col = X.iloc[:, len(cat_feature_names) + tenure_idx]
+        X['tenure_group'] = pd.cut(tenure_col, bins=[0, 12, 48, 72], labels=[0, 1, 2]).astype(int)
+    
+    # 2. 服务数量（如果相关列存在）
+    service_cols = ['OnlineSecurity_Yes', 'OnlineBackup_Yes', 'DeviceProtection_Yes',
+                    'TechSupport_Yes', 'StreamingTV_Yes', 'StreamingMovies_Yes']
+    existing_service_cols = [c for c in service_cols if c in X.columns]
+    if existing_service_cols:
+        X['num_services'] = X[existing_service_cols].sum(axis=1)
+    
+    # 3. 是否有互联网服务
+    if 'InternetService_Fiber optic' in X.columns or 'InternetService_DSL' in X.columns:
+        X['has_internet'] = ((X.get('InternetService_Fiber optic', 0) == 1) | 
+                             (X.get('InternetService_DSL', 0) == 1)).astype(int)
+    
+    # 4. tenure 与 MonthlyCharges 的交互
+    if 'tenure' in num_cols and 'MonthlyCharges' in num_cols:
+        tenure_idx = num_cols.index('tenure')
+        monthly_idx = num_cols.index('MonthlyCharges')
+        X['tenure_x_monthly'] = (X.iloc[:, len(cat_feature_names) + tenure_idx] * 
+                                 X.iloc[:, len(cat_feature_names) + monthly_idx])
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype not in ['int64', 'float64']:
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 如果之前分离了目标列，重新合并（用于后续训练）
+    if y is not None:
+        X['Churn'] = y.values
+    
+    return X
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（从数据中获取）
+    # 注意：这里只是默认值，实际会在训练时根据数据调整
+    model = LGBMClassifier(
+        objective='binary',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        min_child_samples=20,
+        random_state=42,
+        verbose=-1  # 减少输出
+    )
+    
+    return model
+# ========== LLM 填充区（结束）==========
+
+# ========== 数据加载（系统负责）==========
+train = pd.read_csv('data/train.csv')
+val = pd.read_csv('data/validation.csv')
+test = pd.read_csv('data/test.csv')
+
+# 获取目标列和 id 列
+target_col = 'Churn'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 检查目标列是否存在
+if target_col not in train.columns:
+    raise ValueError(f"目标列 '{target_col}' 不在训练数据中，可用列: {list(train.columns)}")
+
+# ========== 预处理（系统调用 LLM 填充的函数）==========
+train_clean = preprocess(train, mode='train')
+val_clean = preprocess(val, mode='test')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标（兼容 preprocess 是否保留目标列的情况）
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+# 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
+# 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    from sklearn.preprocessing import LabelEncoder
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程（系统调用 LLM 填充的函数）==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# ========== 清洗特征名（LGBM/XGBoost 不支持特殊 JSON 字符）==========
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+# 去重列名
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 模型训练（系统负责）==========
+model = build_model()
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+try:
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+except Exception:
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 验证评估（LLM 可覆盖，系统兜底）==========
+# 如果 LLM 定义了 evaluate_model()，使用 LLM 的评估逻辑；否则使用系统默认指标
+try:
+    if 'evaluate_model' in globals():
+        metrics = evaluate_model(model, X_val_fe, y_val)
+    else:
+        if hasattr(model, 'predict_proba'):
+            val_probs = model.predict_proba(X_val_fe)[:, 1]
+        else:
+            val_probs = model.predict(X_val_fe).astype(float)
+        val_preds = (val_probs >= 0.5).astype(int)
+        metrics = {
+            'val_auc': float(roc_auc_score(y_val, val_probs)),
+            'val_accuracy': float(accuracy_score(y_val, val_preds))
+        }
+except Exception as e:
+    print(f"[EVAL_ERROR] {e}")
+    metrics = {}
+    # 尝试最基本的预测来兜底
+    try:
+        _pred = model.predict(X_val_fe)
+        if task_type == "binary_classification" and hasattr(model, 'predict_proba'):
+            _prob = model.predict_proba(X_val_fe)[:, 1]
+            metrics = {'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}
+        elif task_type == "multiclass_classification":
+            metrics = {'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}
+        elif task_type in ("regression", "time_series_forecasting"):
+            metrics = {'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}
+    except Exception as e2:
+        print(f"[EVAL_FALLBACK_ERROR] {e2}")
+        metrics = {}
+
+# ========== 测试预测（系统保证格式）==========
+# 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
+# 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df['probability'] = test_probs
+result_df.to_csv('data/test_predictions.csv', index=False)
+
+# ========== 模型保存（系统保证可序列化）==========
+with open('data/best_model.pkl', 'wb') as f:
+    dill.dump(model, f)
+
+# ========== 输出指标（系统抓取）==========
+print('METRICS_JSON_START')
+print(json.dumps(metrics))
+print('METRICS_JSON_END')
+
+```
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

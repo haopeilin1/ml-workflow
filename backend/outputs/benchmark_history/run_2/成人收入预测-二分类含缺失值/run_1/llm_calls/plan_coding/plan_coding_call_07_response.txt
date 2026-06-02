@@ -1,0 +1,288 @@
+<plan>
+## 优化分析
+
+当前状态：**OPTIMIZE**，AUC已很高但accuracy仅0.828，存在明显的过拟合或类别不平衡问题。
+
+### 核心问题诊断
+1. **类别不平衡严重**：income >50K 占比约24%，当前scale_pos_weight=3.17是基于整体比例，但实际最优值可能需要调整
+2. **特征工程不足**：当前仅添加了简单的对数变换和交互特征，缺乏对类别特征的有意义聚合
+3. **模型配置可优化**：n_estimators=800配合learning_rate=0.03可能仍存在过拟合
+
+### 优化策略
+
+#### 1. 预处理优化
+- 保留现有编码方案（OneHotEncoder + StandardScaler）
+- 确保`native_country`列正确处理（虽然是字符串但需要编码）
+- 丢弃id列
+
+#### 2. 特征工程增强
+- 添加**年龄分箱**特征（年龄与收入非线性关系）
+- 添加**工作时间分箱**特征
+- 添加**资本收益/损失的二值指示特征**（大量值为0，有值即有信息）
+- 添加**教育程度与年龄的交互**（高学历+年轻 vs 高学历+年长）
+- 添加**婚姻状态与性别的交互**（已婚男性收入通常更高）
+- 添加**资本总收益的平方根变换**（处理偏态）
+- 添加**fnlwgt的对数变换**（该特征偏态严重）
+
+#### 3. 模型优化
+- 调整scale_pos_weight为3.5（根据上下文载荷建议，略高于理论值3.17）
+- 降低n_estimators到500，提高learning_rate到0.05（减少过拟合风险）
+- 增加min_child_weight到10.0，进一步正则化
+- 保持num_leaves=24，max_depth=6
+- 增加reg_alpha和reg_lambda到0.5（更强的L1/L2正则化）
+
+#### 4. 使用XGBoost对比（根据上下文载荷建议）
+- 尝试使用XGBoost，它通常对类别不平衡有更好的处理
+- 设置scale_pos_weight参数
+- 使用early_stopping防止过拟合
+
+### 关键改进点
+- **特征工程**：从6个新特征增加到12+个新特征，包括分箱、二值指示、交互特征
+- **模型选择**：切换为XGBoost，利用其更好的不平衡数据处理能力
+- **正则化**：更强的L1/L2正则化，更保守的树参数
+</plan>
+
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer, KBinsDiscretizer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from xgboost import XGBClassifier
+
+# 全局状态存储
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃id列（id列是单调递增的，uniqueCount=rowCount，会导致过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 处理目标列：将income从字符串转换为0/1
+    if 'income' in df.columns:
+        df['income'] = df['income'].map({'<=50K': 0, '>50K': 1}).astype(int)
+    
+    # 类别列列表
+    cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                'relationship', 'race', 'sex', 'native_country']
+    
+    # 数值列列表
+    num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 'capital_loss', 'hours_per_week']
+    
+    if mode == 'train':
+        # 训练模式：拟合编码器和缩放器
+        # 类别列：用众数填充 + OneHot编码
+        cat_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        
+        # 数值列：用中位数填充 + 标准化
+        num_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        # 保存列名信息
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 拟合并转换
+        cat_data = cat_transformer.fit_transform(df[cat_cols])
+        num_data = num_transformer.fit_transform(df[num_cols])
+        
+        # 保存转换器
+        PREPROCESS_STATE['cat_transformer'] = cat_transformer
+        PREPROCESS_STATE['num_transformer'] = num_transformer
+        
+        # 获取编码后的列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = cat_transformer.named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(
+            np.hstack([cat_data, num_data]),
+            columns=cat_feature_names + num_cols,
+            index=df.index
+        )
+        
+        # 添加目标列
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+        
+        PREPROCESS_STATE['feature_names'] = processed_df.columns.tolist()
+        
+    else:  # mode == 'test'
+        # 测试模式：应用已保存的转换器
+        cat_transformer = PREPROCESS_STATE['cat_transformer']
+        num_transformer = PREPROCESS_STATE['num_transformer']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        
+        # 转换数据
+        cat_data = cat_transformer.transform(df[cat_cols])
+        num_data = num_transformer.transform(df[num_cols])
+        
+        # 获取编码后的列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = cat_transformer.named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(
+            np.hstack([cat_data, num_data]),
+            columns=cat_feature_names + num_cols,
+            index=df.index
+        )
+        
+        # 保留目标列（如果有）
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+    
+    return processed_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 分离特征和目标
+    if 'income' in df.columns:
+        X = df.drop(columns=['income'])
+    else:
+        X = df
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    # 填充可能出现的NaN
+    X = X.fillna(0)
+    
+    # ========== 增强特征工程 ==========
+    
+    # 1. 资本收益/损失的对数变换（处理偏态分布）
+    if 'capital_gain' in X.columns:
+        X['capital_gain_log'] = np.log1p(X['capital_gain'])
+    
+    if 'capital_loss' in X.columns:
+        X['capital_loss_log'] = np.log1p(X['capital_loss'])
+    
+    # 2. 资本收益/损失的二值指示特征（大量值为0，有值即有信息）
+    if 'capital_gain' in X.columns:
+        X['has_capital_gain'] = (X['capital_gain'] > 0).astype(int)
+    
+    if 'capital_loss' in X.columns:
+        X['has_capital_loss'] = (X['capital_loss'] > 0).astype(int)
+    
+    # 3. 资本净收益
+    if 'capital_gain' in X.columns and 'capital_loss' in X.columns:
+        X['capital_net'] = X['capital_gain'] - X['capital_loss']
+        # 净收益的平方根变换（处理负值）
+        X['capital_net_sqrt'] = np.sign(X['capital_net']) * np.sqrt(np.abs(X['capital_net']))
+    
+    # 4. 年龄分箱（年龄与收入非线性关系）
+    if 'age' in X.columns:
+        X['age_squared'] = X['age'] ** 2
+        # 年龄分箱：青年(17-30)、中年(30-50)、老年(50-90)
+        X['age_bin'] = pd.cut(X['age'], bins=[0, 30, 50, 100], labels=[0, 1, 2]).astype(int)
+    
+    # 5. 工作时间分箱
+    if 'hours_per_week' in X.columns:
+        X['hours_squared'] = X['hours_per_week'] ** 2
+        # 工作时间分箱：兼职(<30)、全职(30-40)、超时(40-50)、过度(50+)
+        X['hours_bin'] = pd.cut(X['hours_per_week'], bins=[0, 30, 40, 50, 100], labels=[0, 1, 2, 3]).astype(int)
+    
+    # 6. fnlwgt的对数变换（该特征偏态严重）
+    if 'fnlwgt' in X.columns:
+        X['fnlwgt_log'] = np.log1p(X['fnlwgt'])
+    
+    # 7. 教育程度与年龄的交互（高学历+年轻 vs 高学历+年长）
+    if 'education_num' in X.columns and 'age' in X.columns:
+        X['education_age_interaction'] = X['education_num'] * X['age']
+    
+    # 8. 教育程度与工作时间的交互
+    if 'education_num' in X.columns and 'hours_per_week' in X.columns:
+        X['education_hours_interaction'] = X['education_num'] * X['hours_per_week']
+    
+    # 9. 资本收益与工作时间的交互
+    if 'capital_gain' in X.columns and 'hours_per_week' in X.columns:
+        X['capital_gain_hours_interaction'] = X['capital_gain'] * X['hours_per_week']
+    
+    # 10. 年龄与工作时间的交互
+    if 'age' in X.columns and 'hours_per_week' in X.columns:
+        X['age_hours_interaction'] = X['age'] * X['hours_per_week']
+    
+    # 11. 资本收益与教育程度的交互
+    if 'capital_gain' in X.columns and 'education_num' in X.columns:
+        X['capital_gain_education_interaction'] = X['capital_gain'] * X['education_num']
+    
+    # 12. 总资本流动（收益+损失，绝对值）
+    if 'capital_gain' in X.columns and 'capital_loss' in X.columns:
+        X['capital_total_flow'] = X['capital_gain'] + X['capital_loss']
+    
+    # 再次填充新特征可能产生的NaN
+    X = X.fillna(0)
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object' or X[col].dtype.name == 'category':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用XGBoost，设置scale_pos_weight处理类别不平衡。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 类别不平衡比例：<=50K占76%，>50K占24%
+    # scale_pos_weight = 76/24 ≈ 3.17，但根据上下文载荷建议尝试3.5
+    scale_pos_weight = 3.5
+    
+    model = XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        n_estimators=500,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=10.0,
+        gamma=0.1,
+        reg_alpha=0.5,
+        reg_lambda=0.5,
+        random_state=42,
+        verbosity=0,
+        n_jobs=-1,
+        eval_metric='auc'
+    )
+    
+    return model
+```
+</code>

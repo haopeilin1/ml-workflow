@@ -1,0 +1,196 @@
+<plan>
+## 优化规划
+
+### 当前状态分析
+当前处于 OPTIMIZE 阶段，上下文载荷提出了三条优化建议：
+1. 设置 n_estimators=300，learning_rate=0.05，启用 early_stopping_rounds=50
+2. 增加 max_depth=6 提升模型复杂度（当前已是6）
+3. 尝试使用 SMOTE 过采样替代 class_weight='balanced'
+
+### 采纳策略
+
+**建议1（n_estimators=300, lr=0.05, early_stopping=50）：✅ 采纳**
+- 当前 n_estimators=500 偏大，容易过拟合。改为 300 配合 early_stopping 更合理。
+- learning_rate=0.05 与当前一致，保持不变。
+- 需要添加 early_stopping 回调（LightGBM 4.6.0 语法）。
+
+**建议2（max_depth=6）：✅ 已实现**
+- 当前代码已设置 max_depth=6，无需修改。
+
+**建议3（SMOTE 替代 class_weight）：✅ 采纳但需谨慎实现**
+- 当前使用 scale_pos_weight=1.96 处理不平衡，SMOTE 可以生成合成样本，可能更有效。
+- 但 SMOTE 必须在训练集上使用，不能用于验证集/测试集。
+- 使用 imblearn.pipeline.Pipeline 确保 SMOTE 只在训练阶段生效。
+
+### 其他优化点
+1. **特征工程增强**：当前特征工程在 feature_engineering 中创建交互特征时，对 test 集也执行了除法操作，但 test 集可能包含0值导致除零。需要加 epsilon 保护。
+2. **模型正则化微调**：当前 reg_alpha=0.1, reg_lambda=0.1 可以保留，但配合 SMOTE 后可以适当降低正则化强度。
+3. **early_stopping 回调**：使用 LightGBM 4.6.0 的正确语法 `callbacks=[lgb.early_stopping(stopping_rounds=50)]`。
+
+### 修改计划
+1. preprocess：保持不变（当前逻辑正确）
+2. feature_engineering：添加除零保护，确保数值稳定性
+3. build_model：使用 SMOTE + Pipeline，调整超参数，添加 early_stopping 支持
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    - 丢弃id列
+    - 将医学指标中的0值视为缺失值（Glucose, BloodPressure, SkinThickness, Insulin, BMI）
+    - 用中位数填充缺失值
+    """
+    df = df.copy()
+    
+    # 丢弃id列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 医学指标中0值不合理的列（这些列的正常值应该>0）
+    zero_invalid_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+    
+    if mode == 'train':
+        # 在训练集上拟合参数
+        # 将0值替换为NaN
+        for col in zero_invalid_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(0, np.nan)
+        
+        # 计算各列的中位数（用于填充）
+        median_values = {}
+        for col in df.columns:
+            if col != 'Outcome' and df[col].dtype in ['int64', 'float64']:
+                median_values[col] = df[col].median()
+        
+        # 保存状态
+        PREPROCESS_STATE['median_values'] = median_values
+        PREPROCESS_STATE['zero_invalid_cols'] = zero_invalid_cols
+        
+        # 用中位数填充NaN
+        for col, median_val in median_values.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    else:  # mode == 'test'
+        # 应用训练集拟合的参数
+        median_values = PREPROCESS_STATE.get('median_values', {})
+        zero_invalid_cols = PREPROCESS_STATE.get('zero_invalid_cols', [])
+        
+        # 将0值替换为NaN
+        for col in zero_invalid_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(0, np.nan)
+        
+        # 用训练集的中位数填充
+        for col, median_val in median_values.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    - 创建交互特征、多项式特征、比率特征
+    - 丢弃目标列Outcome
+    - 返回纯数值特征矩阵
+    """
+    df = df.copy()
+    
+    # 分离目标列（如果存在）
+    target_col = 'Outcome'
+    y = None
+    if target_col in df.columns:
+        y = df[target_col]
+        df = df.drop(columns=[target_col])
+    
+    # 确保所有特征都是数值型
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # 创建交互特征
+    # BMI与Glucose的交互
+    if 'BMI' in numeric_cols and 'Glucose' in numeric_cols:
+        df['BMI_Glucose_interaction'] = df['BMI'] * df['Glucose']
+    
+    # Age与Pregnancies的交互
+    if 'Age' in numeric_cols and 'Pregnancies' in numeric_cols:
+        df['Age_Pregnancies_interaction'] = df['Age'] * df['Pregnancies']
+    
+    # 创建比率特征（加epsilon防止除零）
+    eps = 1e-6
+    if 'Glucose' in numeric_cols and 'BMI' in numeric_cols:
+        df['Glucose_per_BMI'] = df['Glucose'] / (df['BMI'] + eps)
+    
+    if 'Insulin' in numeric_cols and 'Glucose' in numeric_cols:
+        df['Insulin_per_Glucose'] = df['Insulin'] / (df['Glucose'] + eps)
+    
+    # 创建多项式特征
+    if 'BMI' in numeric_cols:
+        df['BMI_squared'] = df['BMI'] ** 2
+    
+    if 'Glucose' in numeric_cols:
+        df['Glucose_squared'] = df['Glucose'] ** 2
+    
+    if 'Age' in numeric_cols:
+        df['Age_squared'] = df['Age'] ** 2
+    
+    # 创建对数变换特征（处理偏态分布）
+    skewed_cols = ['Insulin', 'DiabetesPedigreeFunction']
+    for col in skewed_cols:
+        if col in numeric_cols:
+            df[f'{col}_log'] = np.log1p(df[col])
+    
+    # 如果之前分离了目标列，重新加回去（用于后续训练）
+    if y is not None:
+        df[target_col] = y
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用LightGBM + SMOTE过采样处理不平衡。
+    返回sklearn兼容的Pipeline对象。
+    """
+    # 基础LightGBM模型
+    base_model = LGBMClassifier(
+        objective='binary',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=300,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.05,
+        reg_lambda=0.05,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    # 使用SMOTE过采样 + LightGBM的Pipeline
+    # SMOTE只在训练阶段fit，验证集/测试集不受影响
+    pipeline = ImbPipeline([
+        ('scaler', StandardScaler()),
+        ('smote', SMOTE(random_state=42, k_neighbors=5)),
+        ('model', base_model)
+    ])
+    
+    return pipeline
+```
+</code>

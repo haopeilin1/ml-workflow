@@ -1,0 +1,536 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于体检生物信号数据构建二分类模型，预测个体吸烟状态。训练集涵盖年龄、身高、体重、腰围、视力、听力、血压、血糖、血脂四项、血红蛋白、尿蛋白、血清肌酐、肝功三项及龋齿等23维特征，无缺失值。模型输出预测概率，以ROC-AUC为唯一评估指标，核心在于挖掘与吸烟相关的生物标志物模式。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 12000,
+  "col_count": 24,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 12000,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        310.0,
+        11213.0,
+        2262.0,
+        14902.0,
+        13823.0
+      ],
+      "min": 0.0,
+      "max": 14999.0,
+      "mean": 7489.8206666666665,
+      "std": 4334.181837000985,
+      "median": 7488.5,
+      "skewness": 0.001910359708417929,
+      "isMonotonic": false
+    },
+    {
+      "name": "age",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 14,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        40.0,
+        50.0,
+        60.0,
+        30.0,
+        40.0
+      ],
+      "min": 20.0,
+      "max": 85.0,
+      "mean": 42.6875,
+      "std": 10.564838462291375,
+      "median": 40.0,
+      "skewness": 0.30102989369849614
+    },
+    {
+      "name": "height(cm)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 11,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        165.0,
+        165.0,
+        160.0,
+        175.0,
+        155.0
+      ],
+      "min": 140.0,
+      "max": 190.0,
+      "mean": 164.76291666666665,
+      "std": 8.506482127152829,
+      "median": 165.0,
+      "skewness": -0.12484509802741096
+    },
+    {
+      "name": "weight(kg)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 17,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        60.0,
+        60.0,
+        60.0,
+        65.0,
+        45.0
+      ],
+      "min": 35.0,
+      "max": 115.0,
+      "mean": 64.4875,
+      "std": 11.020887687195822,
+      "median": 65.0,
+      "skewness": 0.4291396178011396
+    },
+    {
+      "name": "waist(cm)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 340,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        74.0,
+        78.0,
+        80.0,
+        84.0,
+        67.0
+      ],
+      "min": 57.0,
+      "max": 114.0,
+      "mean": 80.49611666666667,
+      "std": 7.932090293511809,
+      "median": 80.8,
+      "skewness": 0.12445824709253325
+    },
+    {
+      "name": "eyesight(left)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 14,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.6,
+        1.0,
+        0.8,
+        1.2,
+        1.5
+      ],
+      "min": 0.1,
+      "max": 9.9,
+      "mean": 1.036908333333333,
+      "std": 0.293008696296255,
+      "median": 1.0,
+      "skewness": 2.227715844532571
+    },
+    {
+      "name": "eyesight(right)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 13,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.2,
+        0.9,
+        0.8,
+        1.2,
+        1.5
+      ],
+      "min": 0.1,
+      "max": 2.0,
+      "mean": 1.0328249999999999,
+      "std": 0.2813093444720135,
+      "median": 1.0,
+      "skewness": -0.09347134468873394
+    },
+    {
+      "name": "hearing(left)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 2.0,
+      "mean": 1.0051666666666668,
+      "std": 0.07169658701038682,
+      "median": 1.0,
+      "skewness": 13.805840415570065
+    },
+    {
+      "name": "hearing(right)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 2.0,
+      "mean": 1.0054166666666666,
+      "std": 0.0734014670845872,
+      "median": 1.0,
+      "skewness": 13.478362143894387
+    },
+    {
+      "name": "systolic",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        117.0,
+        130.0,
+        133.0,
+        134.0,
+        110.0
+      ],
+      "min": 13.0,
+      "max": 182.0,
+      "mean": 119.10258333333333,
+      "std": 11.217666706149267,
+      "median": 119.0,
+      "skewness": 0.011778477780522845
+    },
+    {
+      "name": "relaxation",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 59,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        82.0,
+        88.0,
+        71.0,
+        84.0,
+        65.0
+      ],
+      "min": 50.0,
+      "max": 114.0,
+      "mean": 74.801,
+      "std": 7.8649043473755045,
+      "median": 75.0,
+      "skewness": 0.07511842172115235
+    },
+    {
+      "name": "fasting blood sugar",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 114,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        97.0,
+        92.0,
+        95.0,
+        96.0,
+        84.0
+      ],
+      "min": 1.0,
+      "max": 249.0,
+      "mean": 95.17416666666666,
+      "std": 10.421614565079034,
+      "median": 94.0,
+      "skewness": 2.3384800521081384
+    },
+    {
+      "name": "Cholesterol",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 155,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        194.0,
+        204.0,
+        211.0,
+        182.0,
+        173.0
+      ],
+      "min": 106.0,
+      "max": 316.0,
+      "mean": 191.18633333333332,
+      "std": 20.58204107768386,
+      "median": 191.0,
+      "skewness": 0.27144085471735085
+    },
+    {
+      "name": "triglyceride",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 310,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        51.0,
+        94.0,
+        79.0,
+        58.0,
+        63.0
+      ],
+      "min": 16.0,
+      "max": 548.0,
+      "mean": 102.55975,
+      "std": 47.863672803097934,
+      "median": 90.0,
+      "skewness": 1.8527990743531408
+    },
+    {
+      "name": "HDL",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 75,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        68.0,
+        50.0,
+        53.0,
+        59.0,
+        60.0
+      ],
+      "min": 28.0,
+      "max": 106.0,
+      "mean": 57.24508333333333,
+      "std": 11.35818067218825,
+      "median": 56.0,
+      "skewness": 0.44846315574396606
+    },
+    {
+      "name": "LDL",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 133,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        116.0,
+        135.0,
+        141.0,
+        111.0,
+        100.0
+      ],
+      "min": 49.0,
+      "max": 211.0,
+      "mean": 113.37258333333334,
+      "std": 18.466722773154792,
+      "median": 112.0,
+      "skewness": 0.22306552038866267
+    },
+    {
+      "name": "hemoglobin",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 102,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        13.9,
+        15.0,
+        12.1,
+        16.2,
+        12.8
+      ],
+      "min": 7.3,
+      "max": 18.8,
+      "mean": 14.550458333333333,
+      "std": 1.3743606497314245,
+      "median": 14.7,
+      "skewness": -0.4610396992522588
+    },
+    {
+      "name": "Urine protein",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 5,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 5.0,
+      "mean": 1.0156666666666667,
+      "std": 0.1620393273792621,
+      "median": 1.0,
+      "skewness": 12.560969798698661
+    },
+    {
+      "name": "serum creatinine",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 13,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.8,
+        1.1,
+        0.7,
+        0.8,
+        0.7
+      ],
+      "min": 0.4,
+      "max": 1.6,
+      "mean": 0.8713583333333335,
+      "std": 0.16796678044730565,
+      "median": 0.9,
+      "skewness": 0.07019653832248049
+    },
+    {
+      "name": "AST",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 54,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        20.0,
+        21.0,
+        20.0,
+        11.0,
+        19.0
+      ],
+      "min": 9.0,
+      "max": 83.0,
+      "mean": 22.257416666666668,
+      "std": 5.661344736757154,
+      "median": 21.0,
+      "skewness": 1.6928198648218715
+    },
+    {
+      "name": "ALT",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 89,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        17.0,
+        15.0,
+        12.0,
+        11.0,
+        13.0
+      ],
+      "min": 6.0,
+      "max": 139.0,
+      "mean": 20.95975,
+      "std": 10.278988345371529,
+      "median": 18.0,
+      "skewness": 2.386297609971964
+    },
+    {
+      "name": "Gtp",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 158,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        13.0,
+        23.0,
+        14.0,
+        16.0,
+        12.0
+      ],
+      "min": 6.0,
+      "max": 371.0,
+      "mean": 26.425666666666668,
+      "std": 18.82456741203924,
+      "median": 21.0,
+      "skewness": 4.09143812458173
+    },
+    {
+      "name": "dental caries",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.14375,
+      "std": 0.3508506740998127,
+      "median": 0.0,
+      "skewness": 2.031117003332975
+    },
+    {
+      "name": "smoking",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.3655,
+      "std": 0.4815901550313489,
+      "median": 0.0,
+      "skewness": 0.5586593454953163
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

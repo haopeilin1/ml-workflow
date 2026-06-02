@@ -1,0 +1,323 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于红酒的物理化学指标（酸度、糖分、氯化物、二氧化硫、密度、pH等），预测红酒品质评分。数据合并了红葡萄酒和白葡萄酒样本，目标quality为0-10的有序多分类。评估指标采用F1-macro。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 5197,
+  "col_count": 14,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 5197,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "min": 0.0,
+      "max": 5196.0,
+      "mean": 2598.0,
+      "std": 1500.389005113896,
+      "median": 2598.0,
+      "skewness": 0.0,
+      "isMonotonic": true
+    },
+    {
+      "name": "fixed acidity",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 105,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        7.0,
+        7.7,
+        6.8,
+        6.3,
+        7.4
+      ],
+      "min": 3.9,
+      "max": 15.9,
+      "mean": 7.222974793149895,
+      "std": 1.3102997566254972,
+      "median": 7.0,
+      "skewness": 1.746353454988444
+    },
+    {
+      "name": "volatile acidity",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 180,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.17,
+        0.64,
+        0.39,
+        0.28,
+        0.35
+      ],
+      "min": 0.08,
+      "max": 1.58,
+      "mean": 0.3409630556090052,
+      "std": 0.16431041598021534,
+      "median": 0.29,
+      "skewness": 1.4508816639845354
+    },
+    {
+      "name": "citric acid",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 87,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.74,
+        0.21,
+        0.34,
+        0.47,
+        0.2
+      ],
+      "min": 0.0,
+      "max": 1.66,
+      "mean": 0.31830479122570715,
+      "std": 0.14441579186932077,
+      "median": 0.31,
+      "skewness": 0.46951688902128275
+    },
+    {
+      "name": "residual sugar",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 299,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        12.8,
+        2.2,
+        7.4,
+        11.2,
+        13.9
+      ],
+      "min": 0.6,
+      "max": 31.6,
+      "mean": 5.454473734847028,
+      "std": 4.714132918117758,
+      "median": 3.0,
+      "skewness": 1.1707986627450648
+    },
+    {
+      "name": "chlorides",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 202,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.045,
+        0.077,
+        0.02,
+        0.04,
+        0.054
+      ],
+      "min": 0.012,
+      "max": 0.611,
+      "mean": 0.05657379257263806,
+      "std": 0.03674325479081654,
+      "median": 0.047,
+      "skewness": 5.542486839857569
+    },
+    {
+      "name": "free sulfur dioxide",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 130,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        24.0,
+        32.0,
+        38.0,
+        61.0,
+        63.0
+      ],
+      "min": 1.0,
+      "max": 289.0,
+      "mean": 30.420242447565904,
+      "std": 17.88995954495467,
+      "median": 29.0,
+      "skewness": 1.3099870029024696
+    },
+    {
+      "name": "total sulfur dioxide",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 271,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        126.0,
+        133.0,
+        133.0,
+        183.0,
+        229.0
+      ],
+      "min": 6.0,
+      "max": 440.0,
+      "mean": 115.43938810852414,
+      "std": 57.029484370948666,
+      "median": 118.0,
+      "skewness": 0.025918096949632815
+    },
+    {
+      "name": "density",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 941,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.9942,
+        0.9956,
+        0.99212,
+        0.99592,
+        0.99888
+      ],
+      "min": 0.98711,
+      "max": 1.0103,
+      "mean": 0.9947259043679045,
+      "std": 0.002962493247783395,
+      "median": 0.9949,
+      "skewness": 0.02231112247974794
+    },
+    {
+      "name": "pH",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 106,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        3.26,
+        3.27,
+        3.18,
+        3.12,
+        3.11
+      ],
+      "min": 2.72,
+      "max": 4.01,
+      "mean": 3.2184394843178765,
+      "std": 0.1615932058230521,
+      "median": 3.2,
+      "skewness": 0.40323732941791696
+    },
+    {
+      "name": "sulphates",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 109,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.38,
+        0.45,
+        0.44,
+        0.51,
+        0.5
+      ],
+      "min": 0.23,
+      "max": 2.0,
+      "mean": 0.5333827208004618,
+      "std": 0.151361877529549,
+      "median": 0.51,
+      "skewness": 1.8953612442535674
+    },
+    {
+      "name": "alcohol",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 102,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        12.2,
+        9.9,
+        12.0,
+        9.5,
+        8.9
+      ],
+      "min": 8.0,
+      "max": 14.9,
+      "mean": 10.486600602911937,
+      "std": 1.1922301317368542,
+      "median": 10.3,
+      "skewness": 0.5544052422832907
+    },
+    {
+      "name": "quality",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 7,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        8.0,
+        5.0,
+        7.0,
+        6.0,
+        6.0
+      ],
+      "min": 3.0,
+      "max": 9.0,
+      "mean": 5.821820280931306,
+      "std": 0.8735491193531751,
+      "median": 6.0,
+      "skewness": 0.19722454568043693
+    },
+    {
+      "name": "wine_type",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "white",
+        "red",
+        "white",
+        "white",
+        "white"
+      ],
+      "mostCommon": "white",
+      "mostCommonFreq": 3881,
+      "cardinality": "low"
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

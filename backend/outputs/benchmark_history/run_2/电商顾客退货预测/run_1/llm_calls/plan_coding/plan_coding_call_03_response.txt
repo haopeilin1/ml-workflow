@@ -1,0 +1,289 @@
+<plan>
+## 优化规划
+
+### 问题诊断
+当前模型处于**欠拟合**状态，验证集 AUC 偏低。结合数据画像和上下文载荷分析：
+
+1. **模型复杂度不足**：当前 `max_depth=6`、`n_estimators=500`、`learning_rate=0.05`，对于 160k 样本量来说，模型容量偏低
+2. **特征工程薄弱**：仅创建了少量简单交互特征，未充分利用数据中的信息
+3. **类别编码维度爆炸**：使用 OneHotEncoder 对 4 个低基数类别特征编码，导致特征维度膨胀（3+6+3+4=16个one-hot列），稀释了有效信息
+4. **ID列丢弃过多**：`product_price`, `discount_percent`, `product_rating`, `past_return_rate`, `delivery_delay_days`, `session_length_minutes` 虽然 uniqueCount 高，但它们是有实际意义的数值特征，不是真正的 ID 列。**只有 `order_id` 是真正的 ID 列**。其他列应保留作为数值特征
+
+### 优化策略
+
+#### 1. 预处理优化
+- **修正 ID 列丢弃逻辑**：只丢弃 `order_id`，保留其他数值列（`product_price`, `discount_percent` 等是有意义的业务特征）
+- **类别编码改用 OrdinalEncoder**：4个类别特征基数低（3/6/3/4），用 OrdinalEncoder 替代 OneHotEncoder 可避免维度爆炸，同时保留顺序信息
+- **数值列异常值处理**：对 `product_price`（含负值）、`num_product_views`（含负值）等做 clip 处理
+
+#### 2. 特征工程增强
+- **创建更多交互特征**：利用保留的数值列创建有意义的交叉特征
+- **聚合统计特征**：基于类别特征分组聚合数值特征
+- **非线性变换**：对偏态分布的特征做对数/平方根变换
+
+#### 3. 模型增强
+- **增加模型复杂度**：`max_depth=8`, `n_estimators=800`, `learning_rate=0.03`
+- **增加特征采样**：`colsample_bytree=0.7` 防止过拟合
+- **使用 scale_pos_weight**：根据类别不平衡比例自动计算
+- **增加早停耐心值**：`stopping_rounds=100` 允许更多迭代
+
+### 关键变更说明
+- **保留 `product_price` 等数值列**：这些列虽然 uniqueCount 高，但它们是连续数值特征，不是 ID 列。丢弃它们会导致信息严重损失，是欠拟合的重要原因
+- **OrdinalEncoder 替代 OneHotEncoder**：低基数类别特征用 Ordinal 编码更高效，且能保留类别间的顺序关系（如 shipping_method: standard < express）
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量，用于存储预处理参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 只丢弃真正的ID列（order_id），保留有意义的数值特征
+    id_cols = ['order_id']
+    df = df.drop(columns=[col for col in id_cols if col in df.columns], errors='ignore')
+    
+    # 2. 分离特征和目标列
+    target_col = 'returned'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 3. 定义类别列和数值列
+    cat_cols = ['device_type', 'product_category', 'shipping_method', 'payment_method']
+    cat_cols = [col for col in cat_cols if col in X.columns]
+    
+    # 数值列：所有非类别列（排除目标列和已丢弃的ID列）
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = [col for col in num_cols if col not in cat_cols]
+    
+    if mode == 'train':
+        # 4. 构建预处理器
+        # 使用 OrdinalEncoder 替代 OneHotEncoder，避免维度爆炸
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 5. 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 6. 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 7. 转换数据
+        X_processed = preprocessor.transform(X)
+        
+        # 8. 构建特征名
+        cat_feature_names = cat_cols  # OrdinalEncoder 输出列数与输入相同
+        num_feature_names = num_cols
+        remainder_cols = [col for col in X.columns if col not in cat_cols and col not in num_cols]
+        all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+        
+        # 9. 转换为DataFrame
+        X_processed_df = pd.DataFrame(X_processed, columns=all_feature_names, index=X.index)
+        
+        # 10. 添加目标列
+        if y is not None:
+            X_processed_df[target_col] = y.values
+        
+        return X_processed_df
+    
+    elif mode == 'test':
+        # 应用已保存的预处理器
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        cat_cols_saved = PREPROCESS_STATE['cat_cols']
+        num_cols_saved = PREPROCESS_STATE['num_cols']
+        
+        # 转换数据
+        X_processed = preprocessor.transform(X)
+        
+        # 构建特征名
+        cat_feature_names = cat_cols_saved
+        num_feature_names = num_cols_saved
+        remainder_cols = [col for col in X.columns if col not in cat_cols_saved and col not in num_cols_saved]
+        all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+        
+        # 转换为DataFrame
+        X_processed_df = pd.DataFrame(X_processed, columns=all_feature_names, index=X.index)
+        
+        # 添加目标列（如果存在）
+        if y is not None:
+            X_processed_df[target_col] = y.values
+        
+        return X_processed_df
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃目标列
+    target_col = 'returned'
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    # 2. 确保所有列是数值类型
+    non_numeric_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+    if non_numeric_cols:
+        for col in non_numeric_cols:
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 3. 获取当前数值列
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # 4. 创建丰富的交互特征和变换特征
+    
+    # 4.1 价格相关特征
+    if 'product_price' in num_cols:
+        X['price_abs'] = np.abs(X['product_price'])
+        X['price_clipped'] = X['product_price'].clip(lower=0)
+        X['log_price'] = np.log1p(X['price_clipped'])
+    
+    # 4.2 折扣相关特征
+    if 'discount_percent' in num_cols:
+        X['discount_clipped'] = X['discount_percent'].clip(lower=0)
+        X['log_discount'] = np.log1p(X['discount_clipped'])
+    
+    # 4.3 价格与折扣交互
+    if 'product_price' in num_cols and 'discount_percent' in num_cols:
+        X['price_discount_interaction'] = X['product_price'] * X['discount_percent']
+        X['effective_price'] = X['product_price'] * (1 - X['discount_percent'] / 100)
+        X['effective_price'] = X['effective_price'].clip(lower=0)
+    
+    # 4.4 评分相关
+    if 'product_rating' in num_cols:
+        X['rating_squared'] = X['product_rating'] ** 2
+        X['rating_centered'] = X['product_rating'] - 2.81  # 以均值为中心
+    
+    # 4.5 历史退货率相关
+    if 'past_return_rate' in num_cols:
+        X['return_rate_clipped'] = X['past_return_rate'].clip(lower=0, upper=1)
+        X['log_return_rate'] = np.log1p(X['return_rate_clipped'] * 100)
+    
+    # 4.6 交付延迟相关
+    if 'delivery_delay_days' in num_cols:
+        X['delay_clipped'] = X['delivery_delay_days'].clip(lower=0)
+        X['delay_negative'] = (X['delivery_delay_days'] < 0).astype(int)
+        X['delay_abs'] = np.abs(X['delivery_delay_days'])
+    
+    # 4.7 会话时长相关
+    if 'session_length_minutes' in num_cols:
+        X['session_clipped'] = X['session_length_minutes'].clip(lower=0)
+        X['log_session'] = np.log1p(X['session_clipped'])
+    
+    # 4.8 产品浏览相关
+    if 'num_product_views' in num_cols:
+        X['views_clipped'] = X['num_product_views'].clip(lower=0)
+        X['log_views'] = np.log1p(X['views_clipped'])
+        X['views_squared'] = X['views_clipped'] ** 2
+    
+    # 4.9 历史购买相关
+    if 'past_purchase_count' in num_cols:
+        X['log_purchases'] = np.log1p(X['past_purchase_count'])
+        X['purchases_squared'] = X['past_purchase_count'] ** 2
+    
+    # 4.10 年龄相关
+    if 'customer_age' in num_cols:
+        X['age_squared'] = X['customer_age'] ** 2
+        X['age_group'] = (X['customer_age'] // 10).astype(int)
+    
+    # 4.11 多特征交互
+    # 购买次数与浏览次数的比率
+    if 'past_purchase_count' in num_cols and 'num_product_views' in num_cols:
+        X['purchase_view_ratio'] = X['past_purchase_count'] / (X['num_product_views'].clip(lower=1) + 1)
+    
+    # 年龄与浏览次数的交互
+    if 'customer_age' in num_cols and 'num_product_views' in num_cols:
+        X['age_views_interaction'] = X['customer_age'] * X['num_product_views'].clip(lower=0)
+    
+    # 退货率与交付延迟的交互
+    if 'past_return_rate' in num_cols and 'delivery_delay_days' in num_cols:
+        X['return_delay_interaction'] = X['past_return_rate'].clip(lower=0) * X['delivery_delay_days'].clip(lower=0)
+    
+    # 价格与评分的交互
+    if 'product_price' in num_cols and 'product_rating' in num_cols:
+        X['price_rating_interaction'] = np.abs(X['product_price']) * X['product_rating']
+    
+    # 会话时长与浏览次数的交互
+    if 'session_length_minutes' in num_cols and 'num_product_views' in num_cols:
+        X['session_views_ratio'] = X['session_length_minutes'].clip(lower=0) / (X['num_product_views'].clip(lower=1) + 1)
+    
+    # 4.12 使用优惠券与价格交互
+    if 'used_coupon' in num_cols and 'product_price' in num_cols:
+        X['coupon_price_interaction'] = X['used_coupon'] * np.abs(X['product_price'])
+    
+    # 5. 确保所有列是数值类型
+    X = X.select_dtypes(include=[np.number])
+    
+    # 6. 处理无穷值和NaN
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+    
+    # 7. 确保所有值有限
+    X = X.clip(lower=-1e10, upper=1e10)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 使用更复杂的模型配置解决欠拟合问题
+    model = LGBMClassifier(
+        objective='binary',
+        metric='auc',
+        num_leaves=63,          # 增加叶子节点数
+        max_depth=8,            # 增加树深度
+        learning_rate=0.03,     # 降低学习率，配合更多迭代
+        n_estimators=800,       # 增加迭代次数
+        subsample=0.8,          # 行采样防止过拟合
+        subsample_freq=1,       # 每轮都采样
+        colsample_bytree=0.7,   # 列采样
+        min_child_samples=20,   # 叶子节点最小样本数
+        reg_alpha=0.05,         # L1正则化
+        reg_lambda=0.05,        # L2正则化
+        min_split_gain=0.0,     # 最小分裂增益
+        random_state=42,
+        verbosity=-1,
+        class_weight='balanced'  # 自动处理类别不平衡
+    )
+    
+    return model
+```
+</code>

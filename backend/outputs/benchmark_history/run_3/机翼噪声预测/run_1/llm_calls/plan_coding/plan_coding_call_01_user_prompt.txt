@@ -1,0 +1,205 @@
+【当前运行状态 Run State】: INIT
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.REGRESSION
+- 目标列: SSPL
+- 评估指标: unknown
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于NASA翼型自噪声实验数据，构建回归模型预测不同工况下NACA 0012翼型的缩放声压级（SSPL）。输入特征包括频率、攻角、弦长、来流速度及吸力面位移厚度，输出为连续型声压级值。模型需学习气动参数与噪声水平的映射关系，实现精准预测。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 SSPL。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['SSPL'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "AirfoilSelfNoise_train.csv",
+  "rowCount": 1202,
+  "columnCount": 7,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 1202,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        799.0,
+        1349.0,
+        1428.0,
+        1150.0,
+        1100.0
+      ],
+      "min": 0.0,
+      "max": 1502.0,
+      "mean": 750.9292845257903,
+      "std": 436.5211566741454,
+      "median": 749.5,
+      "skewness": 0.00506053895200756,
+      "isMonotonic": false
+    },
+    {
+      "name": "f",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 21,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1000.0,
+        2000.0,
+        400.0,
+        400.0,
+        400.0
+      ],
+      "min": 200.0,
+      "max": 20000.0,
+      "mean": 2872.0382695507487,
+      "std": 3193.4617721407853,
+      "median": 1600.0,
+      "skewness": 2.2077759981155234
+    },
+    {
+      "name": "alpha",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 27,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        8.4,
+        6.7,
+        12.3,
+        17.4,
+        9.5
+      ],
+      "min": 0.0,
+      "max": 22.2,
+      "mean": 6.766222961730449,
+      "std": 5.836720065750422,
+      "median": 5.4,
+      "skewness": 0.6928550324099035
+    },
+    {
+      "name": "c",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 6,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0508,
+        0.1016,
+        0.1016,
+        0.0254,
+        0.0254
+      ],
+      "min": 0.0254,
+      "max": 0.3048,
+      "mean": 0.13756572379367718,
+      "std": 0.0934535815967257,
+      "median": 0.1016,
+      "skewness": 0.46372454459735873
+    },
+    {
+      "name": "U_infinity",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        71.3,
+        71.3,
+        55.5,
+        71.3,
+        31.7
+      ],
+      "min": 31.7,
+      "max": 71.3,
+      "mean": 51.30998336106489,
+      "std": 15.583769503549929,
+      "median": 55.5,
+      "skewness": 0.19386588174891098
+    },
+    {
+      "name": "delta",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 105,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.00529514,
+        0.00478288,
+        0.0368233,
+        0.016104,
+        0.00461377
+      ],
+      "min": 0.000400682,
+      "max": 0.0584113,
+      "mean": 0.011079245730449251,
+      "std": 0.013024109350877238,
+      "median": 0.00495741,
+      "skewness": 1.7163799982259322
+    },
+    {
+      "name": "SSPL",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1166,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        129.946,
+        134.568,
+        136.414,
+        117.396,
+        124.756
+      ],
+      "min": 103.38,
+      "max": 140.987,
+      "mean": 124.87696006655574,
+      "std": 6.852350759967073,
+      "median": 125.81649999999999,
+      "skewness": -0.4065456268748266
+    }
+  ],
+  "classBalance": {
+    "targetColumn": "U_infinity",
+    "nClasses": 4,
+    "maxClassRatio": 0.3203,
+    "minClassRatio": 0.1764,
+    "imbalanceRatio": 1.82,
+    "isSeverelyImbalanced": false
+  }
+}
+
+【上下文载荷 Context Payload】:
+无
+
+【历史代码 Previous Code】:
+无（当前为首次生成）
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

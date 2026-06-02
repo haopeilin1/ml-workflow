@@ -1,0 +1,64 @@
+============================================================
+  任务运行摘要: 加利福尼亚房价预测-回归 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: regression
+  目标列: median_house_value
+  评估指标: RMSE
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 77.80
+  总耗时: 0.0s
+  验证集 RMSE: 45376.4422
+  测试集 RMSE: 47182.0611
+
+【各阶段耗时】
+  意图识别: 0.9s
+  代码生成: 19.4s
+  沙箱执行: 13.3s
+  评估优化: 17.0s
+  产物生成: 84.8s
+  测试预测: 0.0s
+  总计: 194.1s
+
+【Token 消耗】
+  Plan/Coding 调用: 5 次, 61528 tokens
+  Evaluation 调用: 4 次, 9433 tokens
+  总计: 9 次, 70961 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 4281tokens | 0.8s
+    - qwen3.5-flash@openai: 1 calls, 4281 tokens, 0.8s
+  plan_coding : deepseek-v4-flash@openai | 5calls | 61528tokens | 153.0s
+    - deepseek-v4-flash@openai: 4 calls, 49986 tokens, 72.7s
+    - deepseek-v4-pro@openai: 1 calls, 11542 tokens, 80.3s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9433tokens | 16.9s
+    - deepseek-v4-flash@openai: 4 calls, 9433 tokens, 16.9s
+  judge       : qwen3.5-flash@openai | 1calls | 1628tokens | 2.6s
+    - qwen3.5-flash@openai: 1 calls, 1628 tokens, 2.6s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：RMSE】为核心标准。模型在测试集上的 RMSE 为 47182.06，验证集 RMSE 为 45376.44。计算相对差距：(47182.06 - 45376.44) / 45376.44 ≈ 3.98%，远小于 10% 的良好阈值，表明模型具有极佳的泛化一致性，未出现过拟合现象。同时，测试集 R²达到 0.8346，对于房价预测任务而言属于高质量表现，MAE 数值也在合理范围内。预测策略未知且无证据显示使用了通用回退模板，结合优异的绝对指标和高度一致的验证-测试表现，判定模型质量优秀。...
+
+【维度评分】
+  unknown: 75.0 (weight=0.3)
+  unknown: 85.0 (weight=0.25)
+  unknown: 80.0 (weight=0.2)
+  unknown: 70.0 (weight=0.15)
+  unknown: 75.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 17:05:04 UTC
+============================================================

@@ -1,0 +1,242 @@
+<plan>
+当前运行状态为 OPTIMIZE，模型已接近良好水平。根据上下文载荷的建议和当前代码分析，我制定以下优化计划：
+
+**问题分析：**
+1. 当前代码已实现基础预处理、特征工程和LightGBM模型，但仍有优化空间
+2. 特征工程中创建了BMI、血压差、血脂比等特征，但缺少SMOTE过采样处理类别不平衡
+3. 模型参数已设置scale_pos_weight，但可以尝试SMOTE进一步提升少数类召回
+4. 特征工程中偏态特征的对数变换逻辑有bug（`shift`变量未正确使用）
+
+**优化策略：**
+
+1. **数据预处理（preprocess）**：
+   - 保持现有逻辑不变（丢弃id、清洗列名、标准化）
+   - 确保列名清洗后与特征工程中的列名引用一致
+
+2. **特征工程（feature_engineering）**：
+   - 修复偏态特征对数变换的bug（当前`shift`逻辑错误）
+   - 添加更多有意义的交叉特征：
+     - 腰围身高比（waist_to_height_ratio）- 比BMI更能反映中心性肥胖
+     - 血红蛋白与血清肌酐的比值（hemoglobin_creatinine_ratio）- 反映肾功能
+     - 总胆固醇与HDL比值（cholesterol_hdl_ratio）- 经典心血管风险指标
+     - 收缩压与舒张压的比值（systolic_relaxation_ratio）
+   - 对偏态特征使用更稳健的`np.log1p`（已确保非负）
+
+3. **模型构建（build_model）**：
+   - 保持LightGBM配置，但增加early stopping回调
+   - 使用SMOTE过采样处理类别不平衡（在训练时通过Pipeline集成）
+   - 调整参数：增加`min_sum_hessian_in_leaf`防止过拟合
+
+4. **SMOTE集成**：
+   - 使用`imblearn.pipeline.Pipeline`将SMOTE与模型结合
+   - 注意：SMOTE只在训练集上fit，验证集和测试集不受影响
+
+5. **评估指标**：
+   - 添加自定义`evaluate_model`函数，输出ROC-AUC作为主要指标
+
+**关键修复：**
+- 修复`feature_engineering`中对数变换的bug：当前代码中`shift`变量计算后未正确使用，应直接使用`np.log1p(df[col])`（因为数据已标准化，但标准化前原始值可能为0，所以用`np.log1p`即可）
+- 实际上，标准化后的数据可能包含负值，对数变换应在标准化前进行。但当前preprocess先做了标准化，所以对数变换应在preprocess之前或使用原始值。考虑到数据画像中无缺失值且均为正数，可以直接对原始特征做对数变换。
+
+**调整方案：**
+由于preprocess中先做了标准化，导致feature_engineering中的对数变换作用于标准化后的数据（可能含负值），这有问题。我将在preprocess中先对偏态特征做对数变换，再进行标准化。
+</plan>
+<code>
+```python
+import re
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+FEATURE_ENG_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 清洗列名：特殊字符替换为下划线
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 4. 对偏态特征做对数变换（在标准化之前）
+    skewed_cols = ['triglyceride', 'Gtp', 'ALT', 'fasting_blood_sugar']
+    for col in skewed_cols:
+        if col in X.columns:
+            # 确保所有值 >= 0（原始数据均为正数）
+            X[col] = np.log1p(X[col])
+    
+    # 5. 数值特征标准化
+    num_cols = X.columns.tolist()
+    
+    if mode == 'train':
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+        PREPROCESS_STATE['num_cols'] = num_cols
+    else:
+        scaler = PREPROCESS_STATE.get('scaler')
+        if scaler is None:
+            raise ValueError("PREPROCESS_STATE 中未找到 scaler，请先运行 train 模式")
+        X_scaled = scaler.transform(X)
+    
+    # 6. 重新构建 DataFrame
+    X_scaled_df = pd.DataFrame(X_scaled, columns=num_cols, index=df.index)
+    
+    if y is not None:
+        X_scaled_df[target_col] = y.values
+    
+    return X_scaled_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    # 创建新特征
+    # BMI
+    if 'weight_kg_' in df.columns and 'height_cm_' in df.columns:
+        df['bmi'] = df['weight_kg_'] / ((df['height_cm_'] / 100) ** 2)
+    
+    # 腰围身高比（比BMI更能反映中心性肥胖）
+    if 'waist_cm_' in df.columns and 'height_cm_' in df.columns:
+        df['waist_to_height_ratio'] = df['waist_cm_'] / df['height_cm_']
+    
+    # 血压差
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['blood_pressure_diff'] = df['systolic'] - df['relaxation']
+    
+    # 收缩压与舒张压比值
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['systolic_relaxation_ratio'] = df['systolic'] / (df['relaxation'] + 1e-6)
+    
+    # 血脂比
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['triglyceride_hdl_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+    
+    # 总胆固醇与HDL比值（经典心血管风险指标）
+    if 'Cholesterol' in df.columns and 'HDL' in df.columns:
+        df['cholesterol_hdl_ratio'] = df['Cholesterol'] / (df['HDL'] + 1e-6)
+    
+    # 肝功比
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['ast_alt_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+    
+    # 平均视力
+    if 'eyesight_left_' in df.columns and 'eyesight_right_' in df.columns:
+        df['avg_eyesight'] = (df['eyesight_left_'] + df['eyesight_right_']) / 2
+    
+    # 血红蛋白与血清肌酐比值（反映肾功能）
+    if 'hemoglobin' in df.columns and 'serum_creatinine' in df.columns:
+        df['hemoglobin_creatinine_ratio'] = df['hemoglobin'] / (df['serum_creatinine'] + 1e-6)
+    
+    # 年龄与BMI交互
+    if 'age' in df.columns and 'bmi' in df.columns:
+        df['age_bmi_interaction'] = df['age'] * df['bmi']
+    
+    # 年龄与血压交互
+    if 'age' in df.columns and 'systolic' in df.columns:
+        df['age_systolic_interaction'] = df['age'] * df['systolic']
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能出现的NaN（由除零等引起）
+    df = df.fillna(0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 使用SMOTE过采样处理类别不平衡
+    # 正样本比例约36.6%，SMOTE会生成少数类样本使比例接近1:1
+    smote = SMOTE(random_state=42, sampling_strategy='auto')
+    
+    # LightGBM模型参数
+    lgb_model = LGBMClassifier(
+        objective='binary',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        min_sum_hessian_in_leaf=1e-3,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    # 使用imblearn Pipeline集成SMOTE和模型
+    # 这样SMOTE只在训练时对训练集进行过采样，验证集和测试集不受影响
+    pipeline = ImbPipeline([
+        ('smote', smote),
+        ('model', lgb_model)
+    ])
+    
+    return pipeline
+
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    """
+    from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, precision_score, recall_score
+    
+    # 获取预测概率
+    if hasattr(model, 'predict_proba'):
+        val_probs = model.predict_proba(X_val)[:, 1]
+    else:
+        val_probs = model.predict(X_val).astype(float)
+    
+    val_preds = (val_probs >= 0.5).astype(int)
+    
+    return {
+        'val_auc': float(roc_auc_score(y_val, val_probs)),
+        'val_accuracy': float(accuracy_score(y_val, val_preds)),
+        'val_f1': float(f1_score(y_val, val_preds)),
+        'val_precision': float(precision_score(y_val, val_preds)),
+        'val_recall': float(recall_score(y_val, val_preds))
+    }
+```
+</code>

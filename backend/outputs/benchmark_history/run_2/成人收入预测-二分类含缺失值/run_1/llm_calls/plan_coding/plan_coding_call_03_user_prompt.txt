@@ -1,0 +1,740 @@
+【当前运行状态 Run State】: OPTIMIZE
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.BINARY_CLASSIFICATION
+- 目标列: income
+- 评估指标: AUC
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于1994年美国人口普查数据，预测个人年收入是否超过5万美元。数据包含年龄、工作类别、教育程度、婚姻状况、职业、种族、性别、资本收益等特征。存在缺失值和大量类别特征，为二分类任务，评估指标采用AUC。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- 类别特征列 ['workclass', 'education', 'marital_status', 'occupation', 'relationship', 'race', 'sex', 'native_country'] 必须纳入 Pipeline 的 ColumnTransformer 中，使用 OneHotEncoder(handle_unknown='ignore') 或 OrdinalEncoder 编码，严禁直接传入模型。
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 列 ['native_country'] 名称看起来像数值但类型被识别为 categorical/object，必须在 preprocess() 中用 `pd.to_numeric(df[col], errors='coerce')` 强制转换，然后再填充缺失值。严禁对 string 列调用 .median()。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 income。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['income'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "train.csv",
+  "rowCount": 26048,
+  "columnCount": 16,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 26048,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "min": 0.0,
+      "max": 26047.0,
+      "mean": 13023.5,
+      "std": 7519.554242107706,
+      "median": 13023.5,
+      "skewness": 0.0,
+      "isMonotonic": true
+    },
+    {
+      "name": "age",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 72,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        27.0,
+        45.0,
+        29.0,
+        30.0,
+        29.0
+      ],
+      "min": 17.0,
+      "max": 90.0,
+      "mean": 38.59098587223587,
+      "std": 13.659950492438126,
+      "median": 37.0,
+      "skewness": 0.5577819536419097
+    },
+    {
+      "name": "workclass",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 8,
+      "missingCount": 1459,
+      "missingRate": 5.6,
+      "sampleValues": [
+        "Private",
+        "State-gov",
+        "Private",
+        "Private",
+        "Self-emp-not-inc"
+      ],
+      "mostCommon": "Private",
+      "mostCommonFreq": 18203,
+      "cardinality": "low"
+    },
+    {
+      "name": "fnlwgt",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 18417,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        160178.0,
+        50567.0,
+        185908.0,
+        190040.0,
+        189346.0
+      ],
+      "min": 12285.0,
+      "max": 1484705.0,
+      "mean": 189429.28366861178,
+      "std": 105239.7688450475,
+      "median": 178114.5,
+      "skewness": 1.449449337929679
+    },
+    {
+      "name": "education",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 16,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Some-college",
+        "HS-grad",
+        "Bachelors",
+        "Bachelors",
+        "Some-college"
+      ],
+      "mostCommon": "HS-grad",
+      "mostCommonFreq": 8410,
+      "cardinality": "medium"
+    },
+    {
+      "name": "education_num",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 16,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        10.0,
+        9.0,
+        13.0,
+        13.0,
+        10.0
+      ],
+      "min": 1.0,
+      "max": 16.0,
+      "mean": 10.06833538083538,
+      "std": 2.574377253782477,
+      "median": 10.0,
+      "skewness": -0.31945137815435726
+    },
+    {
+      "name": "marital_status",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 7,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Divorced",
+        "Married-civ-spouse",
+        "Married-civ-spouse",
+        "Never-married",
+        "Divorced"
+      ],
+      "mostCommon": "Married-civ-spouse",
+      "mostCommonFreq": 12000,
+      "cardinality": "low"
+    },
+    {
+      "name": "occupation",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 14,
+      "missingCount": 1463,
+      "missingRate": 5.62,
+      "sampleValues": [
+        "Adm-clerical",
+        "Exec-managerial",
+        "Exec-managerial",
+        "Machine-op-inspct",
+        "Craft-repair"
+      ],
+      "mostCommon": "Prof-specialty",
+      "mostCommonFreq": 3317,
+      "cardinality": "medium"
+    },
+    {
+      "name": "relationship",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 6,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Not-in-family",
+        "Wife",
+        "Husband",
+        "Not-in-family",
+        "Not-in-family"
+      ],
+      "mostCommon": "Husband",
+      "mostCommonFreq": 10566,
+      "cardinality": "low"
+    },
+    {
+      "name": "race",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 5,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "White",
+        "White",
+        "Black",
+        "White",
+        "White"
+      ],
+      "mostCommon": "White",
+      "mostCommonFreq": 22297,
+      "cardinality": "low"
+    },
+    {
+      "name": "sex",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Female",
+        "Female",
+        "Male",
+        "Female",
+        "Male"
+      ],
+      "mostCommon": "Male",
+      "mostCommonFreq": 17473,
+      "cardinality": "low"
+    },
+    {
+      "name": "capital_gain",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 117,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2202.0
+      ],
+      "min": 0.0,
+      "max": 99999.0,
+      "mean": 1059.3704315110565,
+      "std": 7292.059672711447,
+      "median": 0.0,
+      "skewness": 12.11049177445951
+    },
+    {
+      "name": "capital_loss",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 88,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4356.0,
+      "mean": 85.699785012285,
+      "std": 399.77674089222074,
+      "median": 0.0,
+      "skewness": 4.6513410042665395
+    },
+    {
+      "name": "hours_per_week",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 93,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        38.0,
+        40.0,
+        55.0,
+        40.0,
+        50.0
+      ],
+      "min": 1.0,
+      "max": 99.0,
+      "mean": 40.40291001228501,
+      "std": 12.3440375237615,
+      "median": 40.0,
+      "skewness": 0.23570950832075083
+    },
+    {
+      "name": "native_country",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 41,
+      "missingCount": 462,
+      "missingRate": 1.77,
+      "sampleValues": [
+        "United-States",
+        "United-States",
+        "United-States",
+        "United-States",
+        "United-States"
+      ],
+      "mostCommon": "United-States",
+      "mostCommonFreq": 23363,
+      "cardinality": "medium"
+    },
+    {
+      "name": "income",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "<=50K",
+        "<=50K",
+        ">50K",
+        "<=50K",
+        "<=50K"
+      ],
+      "mostCommon": "<=50K",
+      "mostCommonFreq": 19775,
+      "cardinality": "low"
+    }
+  ],
+  "timeSeriesSignal": {
+    "coherent": true,
+    "column": "id",
+    "intervalStd": 0.0,
+    "intervalMean": 1.0,
+    "reason": "列 'id' 单调递增，相邻间隔稳定（mean=1.00, std=0.00）"
+  },
+  "classBalance": {
+    "targetColumn": "workclass",
+    "nClasses": 8,
+    "maxClassRatio": 0.6988,
+    "minClassRatio": 0.0002,
+    "imbalanceRatio": 4550.75,
+    "isSeverelyImbalanced": true
+  }
+}
+
+【上下文载荷 Context Payload】:
+当前模型AUC已很高，但val_accuracy仅0.828，可能存在类别不平衡导致的过拟合倾向。建议：1) 尝试调整LightGBM的num_leaves（如31→15）和learning_rate（如0.1→0.05）以提升泛化；2) 增加早停轮数（如early_stopping_rounds=50）并监控验证集AUC；3) 考虑添加特征交互或特征选择。
+
+【历史代码 Previous Code】:
+```python
+import pandas as pd
+import numpy as np
+import dill
+import json
+import re
+import warnings
+from sklearn.metrics import accuracy_score, roc_auc_score, root_mean_squared_error, mean_absolute_error, r2_score, f1_score
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态（用于保存预处理参数）==========
+PREPROCESS_STATE = {}
+
+# ========== LLM 填充区（开始）==========
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态存储
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃id列（id列是单调递增的，uniqueCount=rowCount，会导致过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 处理目标列：将income从字符串转换为0/1
+    if 'income' in df.columns:
+        df['income'] = df['income'].map({'<=50K': 0, '>50K': 1}).astype(int)
+    
+    # 类别列列表
+    cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                'relationship', 'race', 'sex', 'native_country']
+    
+    # 数值列列表
+    num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 'capital_loss', 'hours_per_week']
+    
+    if mode == 'train':
+        # 训练模式：拟合编码器和缩放器
+        # 类别列：用众数填充 + OneHot编码
+        cat_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        
+        # 数值列：用中位数填充 + 标准化
+        num_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        # 保存列名信息
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 拟合并转换
+        cat_data = cat_transformer.fit_transform(df[cat_cols])
+        num_data = num_transformer.fit_transform(df[num_cols])
+        
+        # 保存转换器
+        PREPROCESS_STATE['cat_transformer'] = cat_transformer
+        PREPROCESS_STATE['num_transformer'] = num_transformer
+        
+        # 获取编码后的列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = cat_transformer.named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(
+            np.hstack([cat_data, num_data]),
+            columns=cat_feature_names + num_cols,
+            index=df.index
+        )
+        
+        # 添加目标列
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+        
+        PREPROCESS_STATE['feature_names'] = processed_df.columns.tolist()
+        
+    else:  # mode == 'test'
+        # 测试模式：应用已保存的转换器
+        cat_transformer = PREPROCESS_STATE['cat_transformer']
+        num_transformer = PREPROCESS_STATE['num_transformer']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        
+        # 转换数据
+        cat_data = cat_transformer.transform(df[cat_cols])
+        num_data = num_transformer.transform(df[num_cols])
+        
+        # 获取编码后的列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = cat_transformer.named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(
+            np.hstack([cat_data, num_data]),
+            columns=cat_feature_names + num_cols,
+            index=df.index
+        )
+        
+        # 保留目标列（如果有）
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+    
+    return processed_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 分离特征和目标
+    if 'income' in df.columns:
+        X = df.drop(columns=['income'])
+    else:
+        X = df
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    # 填充可能出现的NaN
+    X = X.fillna(0)
+    
+    # 添加新特征（增强特征工程）
+    # 1. 资本收益对数变换（处理偏态分布，capital_gain有很多0值，加1避免log(0)）
+    if 'capital_gain' in X.columns:
+        X['capital_gain_log'] = np.log1p(X['capital_gain'])
+    
+    # 2. 资本损失对数变换
+    if 'capital_loss' in X.columns:
+        X['capital_loss_log'] = np.log1p(X['capital_loss'])
+    
+    # 3. 年龄平方项（年龄与收入可能非线性关系）
+    if 'age' in X.columns:
+        X['age_squared'] = X['age'] ** 2
+    
+    # 4. 资本收益与工作时间的交互（高资本收益+长时间工作可能收入更高）
+    if 'capital_gain' in X.columns and 'hours_per_week' in X.columns:
+        X['capital_gain_hours_interaction'] = X['capital_gain'] * X['hours_per_week']
+    
+    # 5. 教育程度与工作时间的交互（高教育+长时间工作可能收入更高）
+    if 'education_num' in X.columns and 'hours_per_week' in X.columns:
+        X['education_hours_interaction'] = X['education_num'] * X['hours_per_week']
+    
+    # 6. 资本总收益（资本收益+资本损失，但损失是负向的，这里用差值表示净收益）
+    if 'capital_gain' in X.columns and 'capital_loss' in X.columns:
+        X['capital_net'] = X['capital_gain'] - X['capital_loss']
+    
+    # 再次填充新特征可能产生的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重：income >50K 占比约24%，所以scale_pos_weight ≈ 76/24 ≈ 3.17
+    scale_pos_weight = 3.17
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=24,              # 从31降低到24，减少过拟合
+        max_depth=6,                # 保持6层
+        learning_rate=0.03,         # 从0.05降低到0.03，更慢学习提升泛化
+        n_estimators=800,           # 从500增加到800，配合低学习率
+        subsample=0.8,              # 保持行采样
+        subsample_freq=1,           # 每轮都进行行采样
+        colsample_bytree=0.8,       # 列采样，增加随机性
+        min_child_samples=30,       # 从20增加到30，防止过拟合
+        min_child_weight=5.0,       # 最小叶子节点权重和
+        min_split_gain=0.01,        # 最小分裂增益
+        reg_alpha=0.1,              # L1正则化
+        reg_lambda=0.1,             # L2正则化
+        random_state=42,
+        verbosity=-1,
+        importance_type='gain'      # 使用gain计算特征重要性
+    )
+    
+    return model
+# ========== LLM 填充区（结束）==========
+
+# ========== 数据加载（系统负责）==========
+train = pd.read_csv('data/train.csv')
+val = pd.read_csv('data/validation.csv')
+test = pd.read_csv('data/test.csv')
+
+# 获取目标列和 id 列
+target_col = 'income'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 检查目标列是否存在
+if target_col not in train.columns:
+    raise ValueError(f"目标列 '{target_col}' 不在训练数据中，可用列: {list(train.columns)}")
+
+# ========== 预处理（系统调用 LLM 填充的函数）==========
+train_clean = preprocess(train, mode='train')
+val_clean = preprocess(val, mode='test')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标（兼容 preprocess 是否保留目标列的情况）
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+# 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
+# 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    from sklearn.preprocessing import LabelEncoder
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程（系统调用 LLM 填充的函数）==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# ========== 清洗特征名（LGBM/XGBoost 不支持特殊 JSON 字符）==========
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+# 去重列名
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 模型训练（系统负责）==========
+model = build_model()
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+try:
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+except Exception:
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 验证评估（LLM 可覆盖，系统兜底）==========
+# 如果 LLM 定义了 evaluate_model()，使用 LLM 的评估逻辑；否则使用系统默认指标
+try:
+    if 'evaluate_model' in globals():
+        metrics = evaluate_model(model, X_val_fe, y_val)
+    else:
+        if hasattr(model, 'predict_proba'):
+            val_probs = model.predict_proba(X_val_fe)[:, 1]
+        else:
+            val_probs = model.predict(X_val_fe).astype(float)
+        val_preds = (val_probs >= 0.5).astype(int)
+        metrics = {
+            'val_auc': float(roc_auc_score(y_val, val_probs)),
+            'val_accuracy': float(accuracy_score(y_val, val_preds))
+        }
+except Exception as e:
+    print(f"[EVAL_ERROR] {e}")
+    metrics = {}
+    # 尝试最基本的预测来兜底
+    try:
+        _pred = model.predict(X_val_fe)
+        if task_type == "binary_classification" and hasattr(model, 'predict_proba'):
+            _prob = model.predict_proba(X_val_fe)[:, 1]
+            metrics = {'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}
+        elif task_type == "multiclass_classification":
+            metrics = {'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}
+        elif task_type in ("regression", "time_series_forecasting"):
+            metrics = {'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}
+    except Exception as e2:
+        print(f"[EVAL_FALLBACK_ERROR] {e2}")
+        metrics = {}
+
+# ========== 测试预测（系统保证格式）==========
+# 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
+# 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df['probability'] = test_probs
+result_df.to_csv('data/test_predictions.csv', index=False)
+
+# ========== 模型保存（系统保证可序列化）==========
+with open('data/best_model.pkl', 'wb') as f:
+    dill.dump(model, f)
+
+# ========== 输出指标（系统抓取）==========
+print('METRICS_JSON_START')
+print(json.dumps(metrics))
+print('METRICS_JSON_END')
+
+```
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

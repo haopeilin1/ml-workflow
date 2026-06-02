@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": 1.0,
+    "val_accuracy": 1.0,
+    "val_f1_macro": null,
+    "val_rmse": null,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": 1.0,
+    "accuracy": 1.0,
+    "f1": 1.0,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": null,
+    "mae": null,
+    "r2": null
+  },
+  "best_score": 54.0,
+  "task_type": "binary_classification",
+  "target_column": "label",
+  "eval_metric": "Accuracy",
+  "complexity": "complex",
+  "complexity_reason": "极度不平衡(sampleValues推断最大类占比100%)强制complex",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

@@ -1,0 +1,7 @@
+{
+  "target_column": "spam",
+  "task_type": "binary_classification",
+  "eval_metric": "ROC-AUC",
+  "complexity": "simple",
+  "is_time_series": false
+}

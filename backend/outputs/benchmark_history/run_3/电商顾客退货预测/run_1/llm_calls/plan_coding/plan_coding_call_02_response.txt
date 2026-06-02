@@ -1,0 +1,221 @@
+<plan>
+**Bug 分析：**
+错误发生在 `feature_engineering` 函数中，第 175 行：
+```python
+cat_features = encoder.get_feature_names_out([col])
+```
+这里 `encoder.get_feature_names_out([col])` 传入了一个长度为 1 的列表 `[col]`，但 `OneHotEncoder` 实际上有 4 个类别特征（`device_type`, `product_category`, `shipping_method`, `payment_method`），所以期望的 `input_features` 长度应为 4，而不是 1。
+
+**修复计划：**
+1. 在 `feature_engineering` 中，获取类别特征名称时，应该一次性传入所有类别列名，而不是逐个传入。
+2. 简化特征工程逻辑：由于 `preprocess` 已经通过 `ColumnTransformer` 处理了类别编码和数值缩放，`feature_engineering` 应该直接使用 `preprocessor.transform(df)` 获取数值化后的矩阵，然后在此基础上添加新特征。
+3. 修复 `get_feature_names_out` 的调用方式：一次性传入所有类别列名列表。
+4. 简化代码结构，避免复杂的特征名称拼接逻辑，直接使用 `preprocessor.get_feature_names_out()` 获取所有特征名称。
+
+**核心策略：**
+- 保持原有的数据清洗逻辑（丢弃ID列、处理负值）
+- 修复特征工程中的列名获取错误
+- 保持 LightGBM 模型配置不变
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃ID列（uniqueCount ≈ rowCount）
+    id_cols = ['product_price', 'discount_percent', 'product_rating', 
+               'past_return_rate', 'delivery_delay_days', 'session_length_minutes', 'order_id']
+    df = df.drop(columns=[col for col in id_cols if col in df.columns], errors='ignore')
+    
+    # 处理异常值：将负值替换为中位数（仅对数值列）
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    # 排除目标列
+    if 'returned' in numeric_cols:
+        numeric_cols.remove('returned')
+    
+    if mode == 'train':
+        # 拟合异常值处理参数
+        outlier_thresholds = {}
+        for col in numeric_cols:
+            median_val = df[col].median()
+            outlier_thresholds[col] = median_val
+        PREPROCESS_STATE['outlier_thresholds'] = outlier_thresholds
+    else:
+        outlier_thresholds = PREPROCESS_STATE.get('outlier_thresholds', {})
+    
+    # 应用异常值处理
+    for col in numeric_cols:
+        if col in outlier_thresholds:
+            median_val = outlier_thresholds[col]
+            df[col] = np.where(df[col] < 0, median_val, df[col])
+    
+    # 类别列和数值列定义
+    cat_cols = ['device_type', 'product_category', 'shipping_method', 'payment_method']
+    # 只保留数据中存在的类别列
+    cat_cols = [col for col in cat_cols if col in df.columns]
+    num_cols = [col for col in numeric_cols if col in df.columns]
+    
+    # 构建预处理器
+    if mode == 'train':
+        # 类别编码器
+        cat_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        
+        # 数值缩放器
+        num_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        preprocessor = ColumnTransformer([
+            ('cat', cat_transformer, cat_cols),
+            ('num', num_transformer, num_cols)
+        ], remainder='passthrough')
+        
+        # 拟合预处理器（不包含目标列）
+        X = df.drop(columns=['returned'], errors='ignore')
+        preprocessor.fit(X)
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+    else:
+        preprocessor = PREPROCESS_STATE.get('preprocessor')
+        if preprocessor is None:
+            raise ValueError("PREPROCESS_STATE中没有找到预处理器，请先运行mode='train'")
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 分离目标列（如果存在）
+    if 'returned' in df.columns:
+        df = df.drop(columns=['returned'])
+    
+    # 获取预处理器
+    preprocessor = PREPROCESS_STATE.get('preprocessor')
+    if preprocessor is None:
+        # 如果没有预处理器，直接返回数值列
+        X = df.select_dtypes(include=[np.number])
+        X = X.fillna(0)
+        return X
+    
+    # 确保所有需要的列都存在
+    cat_cols = PREPROCESS_STATE.get('cat_cols', [])
+    num_cols = PREPROCESS_STATE.get('num_cols', [])
+    
+    missing_cat = [c for c in cat_cols if c not in df.columns]
+    missing_num = [c for c in num_cols if c not in df.columns]
+    
+    if missing_cat or missing_num:
+        for col in missing_cat:
+            df[col] = 'unknown'
+        for col in missing_num:
+            df[col] = 0
+    
+    # 创建新特征（在原始数值列上创建，避免与类别编码后的列混淆）
+    # 注意：product_price, discount_percent 等ID列已在preprocess中被丢弃
+    # 所以这里只对剩余数值列做特征工程
+    
+    # 1. 年龄分组
+    if 'customer_age' in df.columns:
+        df['age_group'] = (df['customer_age'] // 10).astype(int)
+    
+    # 2. 购买次数与退货率的交互
+    if 'past_purchase_count' in df.columns and 'past_return_rate' in df.columns:
+        df['return_rate_purchase'] = df['past_return_rate'] * df['past_purchase_count']
+    
+    # 3. 延迟与浏览次数的交互
+    if 'delivery_delay_days' in df.columns and 'num_product_views' in df.columns:
+        df['delay_views_interaction'] = df['delivery_delay_days'] * df['num_product_views']
+    
+    # 4. 浏览效率
+    if 'num_product_views' in df.columns and 'session_length_minutes' in df.columns:
+        df['session_efficiency'] = df['num_product_views'] / (df['session_length_minutes'] + 1)
+    
+    # 5. 价格与评分的比率（如果价格列存在）
+    if 'product_price' in df.columns and 'product_rating' in df.columns:
+        df['price_rating_ratio'] = df['product_price'] / (df['product_rating'] + 1)
+    
+    # 6. 价格与折扣的交互（如果价格列存在）
+    if 'product_price' in df.columns and 'discount_percent' in df.columns:
+        df['price_discount_interaction'] = df['product_price'] * df['discount_percent']
+    
+    # 获取新创建的特征列名
+    new_feature_cols = [col for col in df.columns if col not in cat_cols + num_cols + ['returned']]
+    
+    # 使用预处理器转换原始特征（类别列编码 + 数值列缩放）
+    X_transformed = preprocessor.transform(df)
+    
+    # 获取特征名称
+    feature_names = preprocessor.get_feature_names_out()
+    
+    # 创建DataFrame
+    X = pd.DataFrame(X_transformed, columns=feature_names, index=df.index)
+    
+    # 添加新创建的特征
+    for feat in new_feature_cols:
+        if feat in df.columns:
+            X[feat] = df[feat].values
+    
+    # 处理无穷值和NaN
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = X[col].astype('category').cat.codes
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = LGBMClassifier(
+        objective='binary',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1
+    )
+    
+    return model
+```
+</code>

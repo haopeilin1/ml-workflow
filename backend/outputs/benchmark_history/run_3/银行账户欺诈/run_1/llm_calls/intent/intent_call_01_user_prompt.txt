@@ -1,0 +1,717 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+银行欺诈检测训练集含4万条账户申请记录，30维特征，目标为识别欺诈申请（fraud_bool）。数据极度不平衡，正样本率约1.15%。要求构建二分类模型，评估指标仅采用ROC-AUC，衡量模型区分欺诈与非欺诈的整体排序能力。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 40000,
+  "col_count": 33,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 40000,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        49125.0,
+        31528.0,
+        41693.0,
+        7117.0,
+        49711.0
+      ],
+      "min": 0.0,
+      "max": 49999.0,
+      "mean": 25036.98565,
+      "std": 14441.277271899296,
+      "median": 25075.5,
+      "skewness": -0.0036692925062122937,
+      "isMonotonic": false
+    },
+    {
+      "name": "fraud_bool",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.01145,
+      "std": 0.10639163726304804,
+      "median": 0.0,
+      "skewness": 9.184451734932138
+    },
+    {
+      "name": "income",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 9,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.1,
+        0.6000000000000001,
+        0.4,
+        0.8,
+        0.3
+      ],
+      "min": 0.1,
+      "max": 0.9,
+      "mean": 0.546855,
+      "std": 0.28855708378891887,
+      "median": 0.6000000000000001,
+      "skewness": -0.31500341307406016
+    },
+    {
+      "name": "name_email_similarity",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 39995,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.6739340034713641,
+        0.2135648189547007,
+        0.5621552329247281,
+        0.4574780217348338,
+        0.79777421938677
+      ],
+      "min": 8.928353107730269e-05,
+      "max": 0.9999985370177228,
+      "mean": 0.479210570982143,
+      "std": 0.28818762990118263,
+      "median": 0.49965129076023646,
+      "skewness": 0.023021928923390167
+    },
+    {
+      "name": "prev_address_months_count",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 337,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        -1.0,
+        -1.0,
+        -1.0,
+        -1.0,
+        -1.0
+      ],
+      "min": -1.0,
+      "max": 363.0,
+      "mean": 18.179875,
+      "std": 46.337920756728785,
+      "median": -1.0,
+      "skewness": 3.7394817640555984
+    },
+    {
+      "name": "current_address_months_count",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 401,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        55.0,
+        33.0,
+        113.0,
+        29.0,
+        57.0
+      ],
+      "min": -1.0,
+      "max": 416.0,
+      "mean": 84.870025,
+      "std": 89.13646231605914,
+      "median": 48.0,
+      "skewness": 1.3973881381762074
+    },
+    {
+      "name": "customer_age",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 9,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        50.0,
+        50.0,
+        50.0,
+        40.0,
+        40.0
+      ],
+      "min": 10.0,
+      "max": 90.0,
+      "mean": 33.5185,
+      "std": 12.429361205448146,
+      "median": 30.0,
+      "skewness": 0.514684746481189
+    },
+    {
+      "name": "days_since_request",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 39985,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0330819336281014,
+        0.026804267624512,
+        0.0298191735190896,
+        0.0190339776964436,
+        0.0447376457964155
+      ],
+      "min": 4.036859788721786e-09,
+      "max": 75.55432518795193,
+      "mean": 0.7393396890563427,
+      "std": 4.36376813157309,
+      "median": 0.01483763534846975,
+      "skewness": 11.034722289946194
+    },
+    {
+      "name": "intended_balcon_amount",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 39990,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -1.418347594,
+        50.24106198345558,
+        -0.829030347,
+        -1.229375119,
+        5.23434678368834
+      ],
+      "min": -12.11973011,
+      "max": 111.68526817521013,
+      "mean": 10.401842801280178,
+      "std": 21.5895934011639,
+      "median": -0.830850138,
+      "skewness": 2.2552488479188844
+    },
+    {
+      "name": "payment_type",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 5,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "AB",
+        "AA",
+        "AB",
+        "AB",
+        "AA"
+      ],
+      "mostCommon": "AB",
+      "mostCommonFreq": 13522,
+      "cardinality": "low"
+    },
+    {
+      "name": "zip_count_4w",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 5606,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1102.0,
+        469.0,
+        690.0,
+        1356.0,
+        1152.0
+      ],
+      "min": 12.0,
+      "max": 6528.0,
+      "mean": 2169.58155,
+      "std": 1338.6064443591774,
+      "median": 1703.0,
+      "skewness": 0.9101688138512174
+    },
+    {
+      "name": "velocity_6h",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 39997,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        7276.394073584915,
+        6515.298243028105,
+        7308.076061074132,
+        1465.643353368642,
+        11919.266680919563
+      ],
+      "min": 236.1176093017021,
+      "max": 16715.565404174275,
+      "mean": 7448.1111666350635,
+      "std": 3013.669661724291,
+      "median": 7635.644839614433,
+      "skewness": 0.03446289863667196
+    },
+    {
+      "name": "velocity_24h",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 39994,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        7899.758110003981,
+        3793.2139366739257,
+        3356.3950872229248,
+        6676.700204466408,
+        7707.886783385617
+      ],
+      "min": 1517.5558094221874,
+      "max": 9333.536173251352,
+      "mean": 5886.7630795273435,
+      "std": 1217.614413833408,
+      "median": 5959.324219342829,
+      "skewness": -0.40927768074227594
+    },
+    {
+      "name": "velocity_4w",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 39990,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        6360.39243297885,
+        5546.266691804699,
+        5951.915527555553,
+        6699.9444312547375,
+        6797.47341437809
+      ],
+      "min": 2995.2375362339617,
+      "max": 6994.764200834217,
+      "mean": 6192.3477484504865,
+      "std": 641.7387245904504,
+      "median": 6343.158183819122,
+      "skewness": -2.2459863158005287
+    },
+    {
+      "name": "bank_branch_count_8w",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 1892,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1719.0,
+        1.0,
+        693.0,
+        6.0,
+        2.0
+      ],
+      "min": 0.0,
+      "max": 2350.0,
+      "mean": 195.83055,
+      "std": 460.1943197248258,
+      "median": 11.0,
+      "skewness": 2.62922976511399
+    },
+    {
+      "name": "date_of_birth_distinct_emails_4w",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 39,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        6.0,
+        8.0,
+        5.0,
+        2.0,
+        3.0
+      ],
+      "min": 0.0,
+      "max": 39.0,
+      "mean": 11.56025,
+      "std": 5.824166718119341,
+      "median": 12.0,
+      "skewness": 0.3983532227613219
+    },
+    {
+      "name": "employment_status",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 7,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "CA",
+        "CB",
+        "CA",
+        "CA",
+        "CA"
+      ],
+      "mostCommon": "CA",
+      "mostCommonFreq": 26008,
+      "cardinality": "low"
+    },
+    {
+      "name": "credit_risk_score",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 485,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        49.0,
+        237.0,
+        107.0,
+        48.0,
+        136.0
+      ],
+      "min": -140.0,
+      "max": 389.0,
+      "mean": 117.1965,
+      "std": 71.97661984002228,
+      "median": 106.0,
+      "skewness": 0.4885213019476192
+    },
+    {
+      "name": "email_is_free",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.5683,
+      "std": 0.49531933490536006,
+      "median": 1.0,
+      "skewness": -0.27579547317210706
+    },
+    {
+      "name": "housing_status",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 7,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "BD",
+        "BC",
+        "BB",
+        "BC",
+        "BA"
+      ],
+      "mostCommon": "BC",
+      "mostCommonFreq": 16693,
+      "cardinality": "low"
+    },
+    {
+      "name": "phone_home_valid",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.4129,
+      "std": 0.4923613007652635,
+      "median": 0.0,
+      "skewness": 0.35382291452385456
+    },
+    {
+      "name": "phone_mobile_valid",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.8954,
+      "std": 0.3060411435240991,
+      "median": 1.0,
+      "skewness": -2.5840955005934503
+    },
+    {
+      "name": "bank_months_count",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 31,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        27.0,
+        25.0,
+        1.0,
+        25.0,
+        1.0
+      ],
+      "min": -1.0,
+      "max": 31.0,
+      "mean": 12.21685,
+      "std": 11.720691551387276,
+      "median": 10.0,
+      "skewness": 0.29546847943315574
+    },
+    {
+      "name": "has_other_cards",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.171725,
+      "std": 0.3771459669040739,
+      "median": 0.0,
+      "skewness": 1.7409249647589553
+    },
+    {
+      "name": "proposed_credit_limit",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 12,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        200.0,
+        1500.0,
+        200.0,
+        200.0,
+        1500.0
+      ],
+      "min": 190.0,
+      "max": 2100.0,
+      "mean": 590.55725,
+      "std": 552.4223350239772,
+      "median": 200.0,
+      "skewness": 0.9340777078817896
+    },
+    {
+      "name": "foreign_request",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.04115,
+      "std": 0.19863953267564474,
+      "median": 0.0,
+      "skewness": 4.620157301683434
+    },
+    {
+      "name": "source",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "INTERNET",
+        "INTERNET",
+        "INTERNET",
+        "INTERNET",
+        "INTERNET"
+      ],
+      "mostCommon": "INTERNET",
+      "mostCommonFreq": 39780,
+      "cardinality": "low"
+    },
+    {
+      "name": "session_length_in_minutes",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 39925,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        4.5360338359199766,
+        18.2135048298569,
+        5.826094419625844,
+        8.09687788159288,
+        20.18892076047554
+      ],
+      "min": -1.0,
+      "max": 83.213535814056,
+      "mean": 8.27861148331804,
+      "std": 8.763000543329833,
+      "median": 5.445094553929898,
+      "skewness": 3.0522464750355462
+    },
+    {
+      "name": "device_os",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 5,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "linux",
+        "windows",
+        "other",
+        "other",
+        "other"
+      ],
+      "mostCommon": "other",
+      "mostCommonFreq": 15246,
+      "cardinality": "low"
+    },
+    {
+      "name": "keep_alive_session",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.6774,
+      "std": 0.46747695490535585,
+      "median": 1.0,
+      "skewness": -0.7590058443819543
+    },
+    {
+      "name": "device_distinct_emails_8w",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": -1.0,
+      "max": 2.0,
+      "mean": 1.026275,
+      "std": 0.20170682069785817,
+      "median": 1.0,
+      "skewness": 2.607849113991083
+    },
+    {
+      "name": "device_fraud_count",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 1,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 0.0,
+      "mean": 0.0,
+      "std": 0.0,
+      "median": 0.0,
+      "skewness": 0.0
+    },
+    {
+      "name": "month",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 1,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 0.0,
+      "mean": 0.0,
+      "std": 0.0,
+      "median": 0.0,
+      "skewness": 0.0
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

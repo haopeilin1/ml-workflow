@@ -1,0 +1,185 @@
+{
+  "eval_id": "eval_batch1_9tasks",
+  "timestamp": "2026-05-27T20:42:52.443419",
+  "total_tasks": 9,
+  "success_count": 8,
+  "success_rate": 0.8888888888888888,
+  "judge_count": 2,
+  "judge_rate": 0.2222222222222222,
+  "full_artifact_count": 6,
+  "partial_artifact_count": 0,
+  "simplified_artifact_count": 2,
+  "details": [
+    {
+      "task_name": "2026年股票抵押融资违约预测",
+      "success": true,
+      "judge_accepted": false,
+      "best_score": 73.8,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 1.0,
+        "accuracy": null,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "信用卡欺诈-二分类-类别极度不平衡",
+      "success": true,
+      "judge_accepted": false,
+      "best_score": 54.0,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 0.6361005365212938,
+        "accuracy": null,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "共享单车租赁量预测-时序回归",
+      "success": true,
+      "judge_accepted": false,
+      "best_score": 39.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "simplified",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": null,
+        "accuracy": null,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": 328.04368401381794,
+        "mae": 243.91753955286396,
+        "r2": -1.213634850998485
+      }
+    },
+    {
+      "task_name": "加利福尼亚房价预测-回归",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 55.0,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": null,
+        "accuracy": null,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": 46333.90639515981,
+        "mae": 30211.369455467902,
+        "r2": 0.8405014078223304
+      }
+    },
+    {
+      "task_name": "北京PM2.5浓度预测-时序回归",
+      "success": false,
+      "judge_accepted": false,
+      "best_score": null,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": null,
+      "error_message": "代码运行失败，经过 3 次自动修复仍未解决。建议切换至深度模式进行更深入的探索。",
+      "prediction_strategy": null,
+      "test_metrics": null
+    },
+    {
+      "task_name": "电商顾客退货预测",
+      "success": true,
+      "judge_accepted": false,
+      "best_score": 56.0,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "simplified",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 0.582261214079502,
+        "accuracy": 0.562675,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "睡眠障碍预测",
+      "success": true,
+      "judge_accepted": false,
+      "best_score": 54.8,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": null,
+        "accuracy": 0.75,
+        "f1": 0.38690476190476186,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "红酒品质预测-有序多分类",
+      "success": true,
+      "judge_accepted": false,
+      "best_score": 68.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": null,
+        "accuracy": 0.6376923076923077,
+        "f1": null,
+        "f1_macro": 0.3773099694267731,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    },
+    {
+      "task_name": "银行账户欺诈",
+      "success": true,
+      "judge_accepted": true,
+      "best_score": 40.5,
+      "duration_seconds": 0.0,
+      "artifacts_completeness": "full",
+      "error_message": null,
+      "prediction_strategy": "embedded_best",
+      "test_metrics": {
+        "auc": 0.8025598733258559,
+        "accuracy": null,
+        "f1": null,
+        "f1_macro": null,
+        "log_loss": null,
+        "rmse": null,
+        "mae": null,
+        "r2": null
+      }
+    }
+  ]
+}

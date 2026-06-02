@@ -1,0 +1,518 @@
+<plan>
+产物生成计划：
+1. 加载已保存的 best_model.pkl（优先）或重新训练模型
+2. 对测试集进行预处理和特征工程（修复 wine_type 列类型问题）
+3. 生成多分类任务所需的所有产物文件
+4. 输出摘要信息
+
+关键修复点：
+- 在 feature_engineering 中，wine_type 列在预处理后可能变成字符串类型，需要确保其为数值类型再进行乘法运算
+- 测试集没有目标列，需要条件判断
+- 特征重要性排除目标列
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+from sklearn.preprocessing import LabelEncoder, OrdinalEncoder, RobustScaler
+from lightgbm import LGBMClassifier
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {
+    'quality_mapping': None,
+    'num_cols': None,
+    'cat_cols': None,
+    'high_skew_cols': ['chlorides', 'sulphates', 'residual sugar', 'free sulfur dioxide'],
+    'interaction_cols': ['alcohol', 'volatile acidity', 'residual sugar', 'sulphates'],
+    'wine_type_encoder': None,
+    'robust_scaler': None,
+    'label_encoder': None,
+    'fitted': False
+}
+
+# ========== 辅助函数 ==========
+def _clean_feature_names(df):
+    df = df.copy()
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    return df
+
+def _merge_rare_classes(y, min_samples=10):
+    value_counts = y.value_counts().sort_index()
+    rare_classes = value_counts[value_counts < min_samples].index.tolist()
+    if len(rare_classes) == 0:
+        return y, None
+    y_mapped = y.copy()
+    mapping = {}
+    for cls in rare_classes:
+        all_classes = sorted(value_counts.index.tolist())
+        idx = all_classes.index(cls)
+        if idx == 0:
+            target = all_classes[idx + 1]
+        elif idx == len(all_classes) - 1:
+            target = all_classes[idx - 1]
+        else:
+            left_count = value_counts.get(all_classes[idx - 1], 0)
+            right_count = value_counts.get(all_classes[idx + 1], 0)
+            target = all_classes[idx - 1] if left_count >= right_count else all_classes[idx + 1]
+        mapping[cls] = target
+    y_mapped = y_mapped.replace(mapping)
+    return y_mapped, mapping
+
+def preprocess(df, mode='train'):
+    global PREPROCESS_STATE
+    df = df.copy()
+    df = _clean_feature_names(df)
+    df = df.drop(columns=['id'], errors='ignore')
+    
+    # wine_type 有序编码
+    if 'wine_type' in df.columns:
+        if mode == 'train':
+            encoder = OrdinalEncoder(categories=[['red', 'white']], handle_unknown='use_encoded_value', unknown_value=-1)
+            df['wine_type'] = encoder.fit_transform(df[['wine_type']]).astype(int)
+            PREPROCESS_STATE['wine_type_encoder'] = encoder
+        else:
+            encoder = PREPROCESS_STATE.get('wine_type_encoder')
+            if encoder is not None:
+                df['wine_type'] = encoder.transform(df[['wine_type']]).astype(int)
+    
+    # log1p 变换
+    high_skew_cols = PREPROCESS_STATE['high_skew_cols']
+    for col in high_skew_cols:
+        if col in df.columns:
+            min_val = df[col].min()
+            if min_val < 0:
+                df[col] = df[col] - min_val + 1e-6
+            df[col] = np.log1p(df[col])
+    
+    # RobustScaler
+    target_col = 'quality'
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    num_cols = [c for c in num_cols if c not in [target_col, 'wine_type']]
+    
+    if mode == 'train':
+        PREPROCESS_STATE['num_cols'] = num_cols
+        scaler = RobustScaler()
+        df[num_cols] = scaler.fit_transform(df[num_cols])
+        PREPROCESS_STATE['robust_scaler'] = scaler
+        PREPROCESS_STATE['fitted'] = True
+    else:
+        scaler = PREPROCESS_STATE.get('robust_scaler')
+        if scaler is not None and len(num_cols) > 0:
+            df[num_cols] = scaler.transform(df[num_cols])
+    
+    # 合并稀有类别
+    if mode == 'train' and target_col in df.columns:
+        y = df[target_col].copy()
+        y_mapped, mapping = _merge_rare_classes(y, min_samples=10)
+        if mapping is not None:
+            df[target_col] = y_mapped
+            PREPROCESS_STATE['quality_mapping'] = mapping
+    elif mode == 'test' and target_col in df.columns:
+        mapping = PREPROCESS_STATE.get('quality_mapping')
+        if mapping is not None:
+            df[target_col] = df[target_col].replace(mapping)
+    
+    return df
+
+def feature_engineering(df):
+    global PREPROCESS_STATE
+    df = df.copy()
+    target_col = 'quality'
+    
+    y = df[target_col].copy() if target_col in df.columns else None
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    # 确保 wine_type 是数值类型（修复报错）
+    if 'wine_type' in X.columns:
+        X['wine_type'] = pd.to_numeric(X['wine_type'], errors='coerce').fillna(0).astype(int)
+    
+    # 交互特征
+    if 'wine_type' in X.columns:
+        if 'alcohol' in X.columns:
+            X['wine_type_x_alcohol'] = X['wine_type'].astype(float) * X['alcohol'].astype(float)
+        if 'volatile_acidity' in X.columns:
+            X['wine_type_x_volatile_acidity'] = X['wine_type'].astype(float) * X['volatile_acidity'].astype(float)
+    
+    # 比值特征
+    if 'fixed_acidity' in X.columns and 'volatile_acidity' in X.columns:
+        X['fixed_to_volatile_acidity'] = X['fixed_acidity'].astype(float) / (X['volatile_acidity'].astype(float) + 1e-6)
+    if 'free_sulfur_dioxide' in X.columns and 'total_sulfur_dioxide' in X.columns:
+        X['free_to_total_so2'] = X['free_sulfur_dioxide'].astype(float) / (X['total_sulfur_dioxide'].astype(float) + 1e-6)
+    
+    # 酒精与糖分交互
+    if 'alcohol' in X.columns and 'residual_sugar' in X.columns:
+        X['alcohol_x_sugar'] = X['alcohol'].astype(float) * X['residual_sugar'].astype(float)
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    X = X.fillna(0)
+    return X
+
+def build_model():
+    lgbm = LGBMClassifier(
+        objective='multiclass',
+        boosting_type='gbdt',
+        n_estimators=300,
+        learning_rate=0.03,
+        num_leaves=31,
+        max_depth=7,
+        min_child_samples=50,
+        min_split_gain=0.01,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.5,
+        reg_lambda=0.5,
+        is_unbalance=True,
+        random_state=42,
+        verbose=-1,
+        n_jobs=-1
+    )
+    return lgbm
+
+# ========== 主流程 ==========
+os.makedirs('output', exist_ok=True)
+
+# 加载数据
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+target_col = 'quality'
+id_col = 'id'
+
+# 检查是否有已保存的模型
+model = None
+_label_encoder = None
+if os.path.exists('data/best_model.pkl'):
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        print("[INFO] Loaded model from data/best_model.pkl")
+    except Exception as e:
+        print(f"[WARN] Failed to load best_model.pkl: {e}")
+        model = None
+
+# 如果模型加载失败，重新训练
+if model is None:
+    print("[INFO] Retraining model...")
+    train_clean = preprocess(train, mode='train')
+    
+    # 处理目标列编码
+    if target_col in train.columns and train[target_col].dtype == object:
+        _label_encoder = LabelEncoder()
+        y_train = _label_encoder.fit_transform(train[target_col])
+        PREPROCESS_STATE['label_encoder'] = _label_encoder
+    else:
+        y_train = train_clean[target_col] if target_col in train_clean.columns else train[target_col]
+    
+    X_train = train_clean.drop(columns=[target_col], errors='ignore')
+    X_train_fe = feature_engineering(X_train)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+    
+    # 清洗特征名
+    X_train_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe.columns]
+    if X_train_fe.columns.duplicated().any():
+        X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+    
+    model = build_model()
+    model.fit(X_train_fe, y_train)
+    
+    # 保存模型
+    with open('data/best_model.pkl', 'wb') as f:
+        pickle.dump(model, f)
+    print("[INFO] Model retrained and saved to data/best_model.pkl")
+
+# 预处理测试集
+test_clean = preprocess(test, mode='test')
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# 清洗特征名
+X_test_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# 对齐特征（确保测试集特征与训练集一致）
+# 获取模型期望的特征名
+if hasattr(model, 'feature_name_'):
+    expected_features = model.feature_name_
+elif hasattr(model, 'feature_names_in_'):
+    expected_features = list(model.feature_names_in_)
+else:
+    expected_features = X_test_fe.columns.tolist()
+
+# 补全缺失特征
+for feat in expected_features:
+    if feat not in X_test_fe.columns:
+        X_test_fe[feat] = 0
+
+# 按模型期望的顺序排列
+X_test_fe = X_test_fe[expected_features]
+
+# 预测
+test_preds = model.predict(X_test_fe)
+test_probs_all = model.predict_proba(X_test_fe)
+
+# 如果有标签编码器，反编码预测结果
+if _label_encoder is not None:
+    test_preds = _label_encoder.inverse_transform(test_preds)
+
+# ========== 保存产物 ==========
+
+# 1. 保存模型到 output/model.pkl
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("[INFO] Saved output/model.pkl")
+
+# 2. 特征重要性 CSV（排除目标列）
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+    feature_names = expected_features
+    # 确保排除目标列
+    fi_df = pd.DataFrame({
+        'name': feature_names,
+        'importance': importances
+    })
+    fi_df = fi_df.sort_values('importance', ascending=False)
+    fi_df.to_csv('output/feature_importance.csv', index=False)
+    print("[INFO] Saved output/feature_importance.csv")
+else:
+    fi_df = pd.DataFrame({'name': [], 'importance': []})
+    fi_df.to_csv('output/feature_importance.csv', index=False)
+
+# 3. 特征重要性图
+if len(fi_df) > 0:
+    plt.figure(figsize=(10, 8))
+    top_n = min(20, len(fi_df))
+    top_features = fi_df.head(top_n)
+    plt.barh(range(top_n), top_features['importance'].values[::-1])
+    plt.yticks(range(top_n), top_features['name'].values[::-1])
+    plt.xlabel('Importance')
+    plt.title('Feature Importance (Top {})'.format(top_n))
+    plt.tight_layout()
+    plt.savefig('output/feature_importance.png', dpi=100)
+    plt.close()
+    print("[INFO] Saved output/feature_importance.png")
+
+# 4. 测试集预测 CSV
+result_df = pd.DataFrame()
+if id_col in test.columns:
+    result_df['id'] = test[id_col]
+else:
+    result_df['id'] = range(len(test_preds))
+result_df['prediction'] = test_preds
+
+# 添加各类概率
+if test_probs_all is not None:
+    num_classes = test_probs_all.shape[1]
+    for i in range(num_classes):
+        result_df['proba_{}'.format(i)] = test_probs_all[:, i]
+
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("[INFO] Saved output/test_predictions.csv")
+
+# 5. 混淆矩阵热力图（多分类任务）
+# 如果有验证集，计算验证集指标
+val_metrics = {}
+if os.path.exists('data/validation.csv'):
+    val = pd.read_csv('data/validation.csv')
+    val_clean = preprocess(val, mode='test')
+    
+    if target_col in val.columns:
+        if _label_encoder is not None:
+            y_val = _label_encoder.transform(val[target_col])
+        else:
+            y_val = val_clean[target_col] if target_col in val_clean.columns else val[target_col]
+    else:
+        y_val = None
+    
+    X_val = val_clean.drop(columns=[target_col], errors='ignore')
+    X_val_fe = feature_engineering(X_val)
+    if isinstance(X_val_fe, np.ndarray):
+        X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+    X_val_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_val_fe.columns]
+    if X_val_fe.columns.duplicated().any():
+        X_val_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_val_fe.columns)]
+    
+    # 对齐特征
+    for feat in expected_features:
+        if feat not in X_val_fe.columns:
+            X_val_fe[feat] = 0
+    X_val_fe = X_val_fe[expected_features]
+    
+    if y_val is not None:
+        val_preds = model.predict(X_val_fe)
+        val_metrics['accuracy'] = float(accuracy_score(y_val, val_preds))
+        val_metrics['f1_macro'] = float(f1_score(y_val, val_preds, average='macro'))
+        
+        # 混淆矩阵热力图
+        cm = confusion_matrix(y_val, val_preds)
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix (Validation Set)')
+        plt.tight_layout()
+        plt.savefig('output/report_fig.png', dpi=100)
+        plt.close()
+        print("[INFO] Saved output/report_fig.png")
+        
+        # 分类报告
+        if _label_encoder is not None:
+            target_names = [str(c) for c in _label_encoder.classes_]
+        else:
+            target_names = [str(c) for c in sorted(set(y_val))]
+        cls_report = classification_report(y_val, val_preds, target_names=target_names, output_dict=True)
+
+# 6. HTML 报告
+html_content = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Model Report - Wine Quality Classification</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        h1 { color: #333; }
+        h2 { color: #555; margin-top: 30px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #4CAF50; color: white; }
+        tr:nth-child(even) { background-color: #f2f2f2; }
+        .metric-box { background: #f9f9f9; padding: 15px; border-radius: 5px; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>Wine Quality Classification Report</h1>
+    
+    <h2>Model Metrics (Validation Set)</h2>
+    <div class="metric-box">
+"""
+
+if val_metrics:
+    html_content += "<p><strong>Accuracy:</strong> {:.4f}</p>".format(val_metrics.get('accuracy', 0))
+    html_content += "<p><strong>F1 Macro:</strong> {:.4f}</p>".format(val_metrics.get('f1_macro', 0))
+
+html_content += """
+    </div>
+    
+    <h2>Feature Importance</h2>
+    <table>
+        <tr><th>Rank</th><th>Feature</th><th>Importance</th></tr>
+"""
+
+if len(fi_df) > 0:
+    for idx, row in fi_df.head(20).iterrows():
+        html_content += "<tr><td>{}</td><td>{}</td><td>{:.6f}</td></tr>\n".format(
+            list(fi_df.index).index(idx) + 1, row['name'], row['importance']
+        )
+
+html_content += """
+    </table>
+    
+    <h2>Test Set Predictions Preview</h2>
+    <table>
+        <tr><th>ID</th><th>Prediction</th>"""
+
+if test_probs_all is not None:
+    for i in range(test_probs_all.shape[1]):
+        html_content += "<th>proba_{}</th>".format(i)
+
+html_content += "</tr>\n"
+
+for i in range(min(10, len(result_df))):
+    row = result_df.iloc[i]
+    html_content += "<tr><td>{}</td><td>{}</td>".format(row['id'], row['prediction'])
+    if test_probs_all is not None:
+        for j in range(test_probs_all.shape[1]):
+            proba_col = 'proba_{}'.format(j)
+            html_content += "<td>{:.4f}</td>".format(row.get(proba_col, 0))
+    html_content += "</tr>\n"
+
+html_content += """
+    </table>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("[INFO] Saved output/report.html")
+
+# 7. 配套预测脚本
+predict_script = '''
+import pandas as pd
+import pickle
+import re
+import numpy as np
+import os
+
+def predict(new_data_path, output_path='predictions.csv'):
+    """加载模型并对新数据进行预测"""
+    # 加载模型
+    with open('output/model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(new_data_path)
+    
+    # 预处理（简化版，实际使用时需要完整的预处理流程）
+    # 这里假设输入数据已经过预处理
+    # 请根据实际情况调整
+    
+    # 预测
+    preds = model.predict(df)
+    probs = model.predict_proba(df)
+    
+    # 保存结果
+    result = pd.DataFrame({'prediction': preds})
+    for i in range(probs.shape[1]):
+        result[f'proba_{i}'] = probs[:, i]
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1:
+        predict(sys.argv[1])
+    else:
+        print("Usage: python predict.py <input_csv_path>")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("[INFO] Saved output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    "status": "success",
+    "model_type": "LGBMClassifier",
+    "task_type": "multiclass_classification",
+    "target_column": target_col,
+    "test_samples": len(test),
+    "test_predictions_saved": "output/test_predictions.csv",
+    "model_saved": "output/model.pkl",
+    "feature_importance_saved": "output/feature_importance.csv",
+    "report_saved": "output/report.html",
+    "validation_metrics": val_metrics
+}
+print(json.dumps(summary))
+```
+</code>

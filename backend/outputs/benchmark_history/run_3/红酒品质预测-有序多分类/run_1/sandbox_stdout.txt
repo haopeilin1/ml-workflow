@@ -1,0 +1,4 @@
+[INFO] Merged rare quality classes: {9: 8}
+METRICS_JSON_START
+{"val_accuracy": 0.6147186147186147, "val_f1_macro": 0.3817995228804471}
+METRICS_JSON_END

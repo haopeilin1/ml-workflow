@@ -1,0 +1,558 @@
+<plan>
+产物生成计划：
+1. 加载已存在的 data/best_model.pkl 模型
+2. 对测试集 data/test.csv 进行预测（需要先做预处理和特征工程）
+3. 由于数据集超过 10 万行，跳过所有复杂可视化（不生成 feature_importance.png、report_fig.png）
+4. 生成核心产物：output/model.pkl、output/feature_importance.csv、output/report.html、output/test_predictions.csv、output/predict.py
+5. 输出摘要 JSON
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+from sklearn.metrics import roc_auc_score, accuracy_score, confusion_matrix, classification_report
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局预处理状态（与训练时保持一致）==========
+PREPROCESS_STATE = {}
+
+# ========== 预处理函数（与最佳代码完全一致）==========
+def preprocess(df, mode='train'):
+    df = df.copy()
+    
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    for col in ['StreamingTV', 'StreamingMovies']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    if 'Churn' in df.columns:
+        df['Churn'] = df['Churn'].map({'Yes': 1, 'No': 0}).astype(int)
+    
+    cat_cols = ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines',
+                'InternetService', 'OnlineSecurity', 'OnlineBackup', 'DeviceProtection',
+                'TechSupport', 'Contract', 'PaperlessBilling', 'PaymentMethod']
+    cat_cols = [c for c in cat_cols if c in df.columns]
+    
+    exclude_cols = set(cat_cols + ['Churn', 'id'])
+    num_cols = [c for c in df.columns if c not in exclude_cols and df[c].dtype in ['int64', 'float64']]
+    
+    if mode == 'train':
+        from sklearn.compose import ColumnTransformer
+        from sklearn.preprocessing import OneHotEncoder, StandardScaler
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+        
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        if 'Churn' in df.columns:
+            X = df.drop(columns=['Churn'])
+            y = df['Churn']
+        else:
+            X = df
+            y = None
+        
+        preprocessor.fit(X)
+        
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        PREPROCESS_STATE['feature_names'] = preprocessor.get_feature_names_out()
+        
+        X_transformed = preprocessor.transform(X)
+        processed_df = pd.DataFrame(X_transformed, columns=PREPROCESS_STATE['feature_names'])
+        if y is not None:
+            processed_df['Churn'] = y.values
+        
+        return processed_df
+    
+    elif mode == 'test':
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        
+        if 'Churn' in df.columns:
+            X = df.drop(columns=['Churn'])
+            y = df['Churn']
+        else:
+            X = df
+            y = None
+        
+        X_transformed = preprocessor.transform(X)
+        processed_df = pd.DataFrame(X_transformed, columns=PREPROCESS_STATE['feature_names'])
+        if y is not None:
+            processed_df['Churn'] = y.values
+        
+        return processed_df
+    
+    return df
+
+
+def feature_engineering(df):
+    df = df.copy()
+    
+    if 'Churn' in df.columns:
+        y = df['Churn']
+        X = df.drop(columns=['Churn'])
+    else:
+        X = df
+    
+    tenure_cols = [c for c in X.columns if 'tenure' in c.lower()]
+    monthly_charges_cols = [c for c in X.columns if 'MonthlyCharges' in c.lower()]
+    total_charges_cols = [c for c in X.columns if 'TotalCharges' in c.lower()]
+    
+    if tenure_cols and monthly_charges_cols:
+        tenure_col = tenure_cols[0]
+        monthly_col = monthly_charges_cols[0]
+        X['tenure_monthly_ratio'] = np.where(
+            X[tenure_col] > 0,
+            X[monthly_col] / X[tenure_col],
+            0
+        )
+    
+    if total_charges_cols and tenure_cols:
+        total_col = total_charges_cols[0]
+        tenure_col = tenure_cols[0]
+        X['avg_monthly_total'] = np.where(
+            X[tenure_col] > 0,
+            X[total_col] / X[tenure_col],
+            0
+        )
+    
+    if tenure_cols:
+        tenure_col = tenure_cols[0]
+        X['tenure_group'] = pd.cut(
+            X[tenure_col],
+            bins=[-np.inf, 12, 24, 48, np.inf],
+            labels=[0, 1, 2, 3]
+        ).astype(float)
+    
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    X = X.fillna(0)
+    
+    if 'y' in locals():
+        X['Churn'] = y.values
+    
+    return X
+
+
+# ========== 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'Churn'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# ========== 尝试加载已保存的模型 ==========
+model_loaded = False
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    model_loaded = True
+    print("成功从 data/best_model.pkl 加载模型")
+except Exception as e:
+    print(f"加载模型失败: {e}，将重新训练")
+
+# ========== 如果加载失败，重新训练 ==========
+if not model_loaded:
+    # 预处理训练集
+    train_clean = preprocess(train, mode='train')
+    
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train = train_clean
+    
+    # 特征工程
+    X_train_fe = feature_engineering(X_train)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+    
+    # 清洗特征名
+    X_train_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_train_fe.columns]
+    if X_train_fe.columns.duplicated().any():
+        X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+    
+    # 构建并训练模型
+    from lightgbm import LGBMClassifier
+    scale_pos_weight = (475355 - 107054) / 107054
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        min_child_weight=1e-3,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1
+    )
+    model.fit(X_train_fe, y_train)
+    print("模型重新训练完成")
+
+# ========== 预处理测试集（需要先拟合预处理器）==========
+# 如果模型是从文件加载的，预处理器状态可能丢失，需要重新拟合
+if not PREPROCESS_STATE.get('preprocessor'):
+    # 用训练集拟合预处理器
+    _ = preprocess(train, mode='train')
+
+# 预处理测试集
+test_clean = preprocess(test, mode='test')
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# 特征工程
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# 清洗特征名
+X_test_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# ========== 测试集预测 ==========
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+# 保存测试预测
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+    'probability': test_probs
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("测试集预测已保存到 output/test_predictions.csv")
+
+# ========== 保存模型到 output/ ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("模型已保存到 output/model.pkl")
+
+# ========== 特征重要性（直接从模型获取）==========
+feature_names = X_test_fe.columns.tolist()
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("特征重要性已保存到 output/feature_importance.csv")
+
+# ========== 生成 HTML 报告（纯文本表格，无复杂可视化）==========
+# 计算训练集上的指标（用于报告）
+train_clean_full = preprocess(train, mode='train')
+if target_col in train_clean_full.columns:
+    y_train_full = train_clean_full[target_col]
+    X_train_full = train_clean_full.drop(columns=[target_col])
+else:
+    y_train_full = train[target_col]
+    X_train_full = train_clean_full
+
+X_train_fe_full = feature_engineering(X_train_full)
+if isinstance(X_train_fe_full, np.ndarray):
+    X_train_fe_full = pd.DataFrame(X_train_fe_full, index=X_train_full.index)
+X_train_fe_full.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_train_fe_full.columns]
+if X_train_fe_full.columns.duplicated().any():
+    X_train_fe_full.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe_full.columns)]
+
+if hasattr(model, 'predict_proba'):
+    train_probs = model.predict_proba(X_train_fe_full)[:, 1]
+else:
+    train_probs = model.predict(X_train_fe_full).astype(float)
+train_preds = (train_probs >= 0.5).astype(int)
+
+train_auc = float(roc_auc_score(y_train_full, train_probs))
+train_acc = float(accuracy_score(y_train_full, train_preds))
+
+# 混淆矩阵
+cm = confusion_matrix(y_train_full, train_preds)
+tn, fp, fn, tp = cm.ravel()
+
+# 分类报告
+report_dict = classification_report(y_train_full, train_preds, output_dict=True, target_names=['No Churn', 'Churn'])
+
+# 构建 HTML
+top_features_html = ""
+for i, row in importance_df.head(20).iterrows():
+    top_features_html += f"<tr><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>"
+
+html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>模型报告 - 客户流失预测</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
+        .container {{ max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
+        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:hover {{ background-color: #f1f1f1; }}
+        .metric-box {{ display: inline-block; background: #e8f5e9; padding: 15px 25px; margin: 10px; border-radius: 6px; text-align: center; }}
+        .metric-value {{ font-size: 28px; font-weight: bold; color: #2e7d32; }}
+        .metric-label {{ font-size: 14px; color: #666; }}
+        .warning {{ background: #fff3e0; padding: 15px; border-left: 4px solid #ff9800; margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>二分类模型报告 - 客户流失预测 (Churn)</h1>
+        
+        <div class="warning">
+            <strong>注意：</strong> 数据集超过 10 万行（训练集 {len(train):,} 行），已跳过复杂可视化生成。
+        </div>
+        
+        <h2>模型信息</h2>
+        <table>
+            <tr><td>模型类型</td><td>LightGBM (LGBMClassifier)</td></tr>
+            <tr><td>任务类型</td><td>二分类 (Binary Classification)</td></tr>
+            <tr><td>目标列</td><td>Churn</td></tr>
+            <tr><td>评估指标</td><td>AUC-ROC</td></tr>
+            <tr><td>训练集大小</td><td>{len(train):,} 行</td></tr>
+            <tr><td>测试集大小</td><td>{len(test):,} 行</td></tr>
+            <tr><td>特征数量</td><td>{len(feature_names)}</td></tr>
+        </table>
+        
+        <h2>模型性能指标（训练集）</h2>
+        <div style="text-align: center;">
+            <div class="metric-box">
+                <div class="metric-value">{train_auc:.4f}</div>
+                <div class="metric-label">AUC-ROC</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{train_acc:.4f}</div>
+                <div class="metric-label">准确率 (Accuracy)</div>
+            </div>
+        </div>
+        
+        <h2>混淆矩阵（训练集）</h2>
+        <table>
+            <tr><th></th><th>预测: No Churn</th><th>预测: Churn</th></tr>
+            <tr><td><strong>实际: No Churn</strong></td><td>{tn:,} (TN)</td><td>{fp:,} (FP)</td></tr>
+            <tr><td><strong>实际: Churn</strong></td><td>{fn:,} (FN)</td><td>{tp:,} (TP)</td></tr>
+        </table>
+        
+        <h2>分类报告（训练集）</h2>
+        <table>
+            <tr><th>类别</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>
+            <tr>
+                <td>No Churn (0)</td>
+                <td>{report_dict['No Churn']['precision']:.4f}</td>
+                <td>{report_dict['No Churn']['recall']:.4f}</td>
+                <td>{report_dict['No Churn']['f1-score']:.4f}</td>
+                <td>{int(report_dict['No Churn']['support']):,}</td>
+            </tr>
+            <tr>
+                <td>Churn (1)</td>
+                <td>{report_dict['Churn']['precision']:.4f}</td>
+                <td>{report_dict['Churn']['recall']:.4f}</td>
+                <td>{report_dict['Churn']['f1-score']:.4f}</td>
+                <td>{int(report_dict['Churn']['support']):,}</td>
+            </tr>
+        </table>
+        
+        <h2>特征重要性 Top 20</h2>
+        <table>
+            <tr><th>特征名称</th><th>重要性</th></tr>
+            {top_features_html}
+        </table>
+        
+        <h2>测试集预测预览</h2>
+        <table>
+            <tr><th>ID</th><th>预测类别</th><th>正类概率</th></tr>
+"""
+for i in range(min(10, len(result_df))):
+    row = result_df.iloc[i]
+    pred_label = 'Churn' if row['prediction'] == 1 else 'No Churn'
+    html_content += f"<tr><td>{row['id']}</td><td>{pred_label}</td><td>{row['probability']:.4f}</td></tr>\n"
+
+html_content += """
+        </table>
+        <p style="text-align: center; color: #999; margin-top: 30px;">报告生成时间: """ + pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
+    </div>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML 报告已保存到 output/report.html")
+
+# ========== 生成配套预测脚本 ==========
+predict_script = '''import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+# 预处理函数（与训练时一致）
+def preprocess(df):
+    df = df.copy()
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    for col in ['StreamingTV', 'StreamingMovies']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    if 'Churn' in df.columns:
+        df['Churn'] = df['Churn'].map({'Yes': 1, 'No': 0}).astype(int)
+    return df
+
+def feature_engineering(df):
+    df = df.copy()
+    if 'Churn' in df.columns:
+        y = df['Churn']
+        X = df.drop(columns=['Churn'])
+    else:
+        X = df
+    
+    tenure_cols = [c for c in X.columns if 'tenure' in c.lower()]
+    monthly_charges_cols = [c for c in X.columns if 'MonthlyCharges' in c.lower()]
+    total_charges_cols = [c for c in X.columns if 'TotalCharges' in c.lower()]
+    
+    if tenure_cols and monthly_charges_cols:
+        X['tenure_monthly_ratio'] = np.where(X[tenure_cols[0]] > 0, X[monthly_charges_cols[0]] / X[tenure_cols[0]], 0)
+    if total_charges_cols and tenure_cols:
+        X['avg_monthly_total'] = np.where(X[tenure_cols[0]] > 0, X[total_charges_cols[0]] / X[tenure_cols[0]], 0)
+    if tenure_cols:
+        X['tenure_group'] = pd.cut(X[tenure_cols[0]], bins=[-np.inf, 12, 24, 48, np.inf], labels=[0, 1, 2, 3]).astype(float)
+    
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    X = X.fillna(0)
+    
+    if 'y' in locals():
+        X['Churn'] = y.values
+    return X
+
+def predict(new_data_path, output_path=None):
+    """
+    对新数据进行预测。
+    
+    参数:
+        new_data_path: str, 新数据 CSV 文件路径
+        output_path: str, 输出 CSV 文件路径（可选，默认返回 DataFrame）
+    
+    返回:
+        pd.DataFrame: 包含 id, prediction, probability 列
+    """
+    # 加载模型
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(new_data_path)
+    
+    # 保存 id 列
+    id_col = 'id' if 'id' in df.columns else df.columns[0]
+    ids = df[id_col] if id_col in df.columns else range(len(df))
+    
+    # 预处理
+    df_clean = preprocess(df)
+    
+    # 特征工程
+    X = feature_engineering(df_clean)
+    if 'Churn' in X.columns:
+        X = X.drop(columns=['Churn'])
+    
+    # 清洗特征名
+    X.columns = [re.sub('[^\\\\w]', '_', str(c)) for c in X.columns]
+    
+    # 预测
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X)[:, 1]
+    else:
+        probs = model.predict(X).astype(float)
+    preds = (probs >= 0.5).astype(int)
+    
+    result = pd.DataFrame({
+        'id': ids,
+        'prediction': preds,
+        'probability': probs
+    })
+    
+    if output_path:
+        result.to_csv(output_path, index=False)
+        print(f"预测结果已保存到 {output_path}")
+    
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1:
+        input_file = sys.argv[1]
+        output_file = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+        predict(input_file, output_file)
+    else:
+        print("用法: python predict.py <输入CSV文件> [输出CSV文件]")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("预测脚本已保存到 output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    "status": "success",
+    "model_loaded_from_file": model_loaded,
+    "train_rows": len(train),
+    "test_rows": len(test),
+    "features_count": len(feature_names),
+    "train_auc": round(train_auc, 4),
+    "train_accuracy": round(train_acc, 4),
+    "test_predictions_saved": "output/test_predictions.csv",
+    "model_saved": "output/model.pkl",
+    "feature_importance_saved": "output/feature_importance.csv",
+    "report_saved": "output/report.html",
+    "predict_script_saved": "output/predict.py",
+    "note": "大数据集模式：已跳过 feature_importance.png 和复杂可视化生成"
+}
+print(json.dumps(summary))
+```
+</code>

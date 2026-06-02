@@ -1,0 +1,387 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于华盛顿特区共享单车系统的历史租用数据，预测每小时的单车租赁总量。数据集包含日期时间、季节、节假日、天气状况、温度、湿度、风速等信息。任务为回归预测，评估指标采用RMSE。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 13903,
+  "col_count": 17,
+  "columns": [
+    {
+      "name": "instant",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 13903,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0
+      ],
+      "min": 1.0,
+      "max": 13903.0,
+      "mean": 6952.0,
+      "std": 4013.594731243635,
+      "median": 6952.0,
+      "skewness": 0.0,
+      "isMonotonic": true
+    },
+    {
+      "name": "dteday",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 585,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "2011-01-01",
+        "2011-01-01",
+        "2011-01-01",
+        "2011-01-01",
+        "2011-01-01"
+      ],
+      "mostCommon": "2011-01-01",
+      "mostCommonFreq": 24,
+      "cardinality": "high",
+      "isDateParseable": true
+    },
+    {
+      "name": "season",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 4.0,
+      "mean": 2.263827950801985,
+      "std": 1.03625402539847,
+      "median": 2.0,
+      "skewness": 0.2845491197223162
+    },
+    {
+      "name": "yr",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.3781917571747105,
+      "std": 0.48495326344864426,
+      "median": 0.0,
+      "skewness": 0.5024227162181614
+    },
+    {
+      "name": "mnth",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 12,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 12.0,
+      "mean": 5.650147450190606,
+      "std": 3.2184226968006806,
+      "median": 5.0,
+      "skewness": 0.34518425571415734
+    },
+    {
+      "name": "hr",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 24,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "min": 0.0,
+      "max": 23.0,
+      "mean": 11.546572682154931,
+      "std": 6.912235196366729,
+      "median": 12.0,
+      "skewness": -0.010607862692816543
+    },
+    {
+      "name": "holiday",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.027404157376105878,
+      "std": 0.16326385623573844,
+      "median": 0.0,
+      "skewness": 5.790183424940483
+    },
+    {
+      "name": "weekday",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 7,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        6.0,
+        6.0,
+        6.0,
+        6.0,
+        6.0
+      ],
+      "min": 0.0,
+      "max": 6.0,
+      "mean": 2.999424584622024,
+      "std": 2.0057103667861753,
+      "median": 3.0,
+      "skewness": 0.002073394814984178
+    },
+    {
+      "name": "workingday",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.6844565921024239,
+      "std": 0.4647486430528752,
+      "median": 1.0,
+      "skewness": -0.7939049783907896
+    },
+    {
+      "name": "weathersit",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 4.0,
+      "mean": 1.4199812990002159,
+      "std": 0.644059716683715,
+      "median": 1.0,
+      "skewness": 1.2659838231926572
+    },
+    {
+      "name": "temp",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 50,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.24,
+        0.22,
+        0.22,
+        0.24,
+        0.24
+      ],
+      "min": 0.02,
+      "max": 1.0,
+      "mean": 0.4991699633172697,
+      "std": 0.1977161394548785,
+      "median": 0.5,
+      "skewness": -0.033799472445313304
+    },
+    {
+      "name": "atemp",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 65,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.2879,
+        0.2727,
+        0.2727,
+        0.2879,
+        0.2879
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.4780173703517226,
+      "std": 0.17661391898721227,
+      "median": 0.4848,
+      "skewness": -0.11708984373044025
+    },
+    {
+      "name": "hum",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 88,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.81,
+        0.8,
+        0.8,
+        0.75,
+        0.75
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.6229957563115874,
+      "std": 0.1981943245180266,
+      "median": 0.62,
+      "skewness": -0.09574711502106444
+    },
+    {
+      "name": "windspeed",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 30,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 0.8507,
+      "mean": 0.1940965906638855,
+      "std": 0.12302320304086307,
+      "median": 0.194,
+      "skewness": 0.577642704360163
+    },
+    {
+      "name": "casual",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 303,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        3.0,
+        8.0,
+        5.0,
+        3.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 367.0,
+      "mean": 34.03797741494641,
+      "std": 47.34118590497228,
+      "median": 15.0,
+      "skewness": 2.51420318897321
+    },
+    {
+      "name": "registered",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 701,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        13.0,
+        32.0,
+        27.0,
+        10.0,
+        1.0
+      ],
+      "min": 0.0,
+      "max": 796.0,
+      "mean": 140.6011652161404,
+      "std": 137.5123670459184,
+      "median": 107.0,
+      "skewness": 1.5562883042204616
+    },
+    {
+      "name": "cnt",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 789,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        16.0,
+        40.0,
+        32.0,
+        13.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 957.0,
+      "mean": 174.63914263108683,
+      "std": 166.95541350230462,
+      "median": 130.0,
+      "skewness": 1.2812298704575635
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

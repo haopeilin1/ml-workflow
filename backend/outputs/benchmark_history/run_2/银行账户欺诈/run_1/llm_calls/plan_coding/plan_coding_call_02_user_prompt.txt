@@ -1,0 +1,458 @@
+【任务配置】:
+- 任务类型: TaskType.BINARY_CLASSIFICATION
+- 目标列: fraud_bool
+- 评估指标: ROC-AUC
+- 是否有测试集: 是
+
+【沙箱可用数据文件】（产物代码只能使用以下存在的文件，禁止读取不存在的文件）：
+- data/train.csv（训练数据，一定存在）
+- data/test.csv（测试数据）
+- data/best_model.pkl（已保存的最佳模型）
+
+【用户建模建议】（重要参考，灵活采纳）:
+无
+
+【最佳代码参考】（请基于以下代码的逻辑重新编写产物生成代码，确保模型训练和预处理方式一致）:
+```python
+import pandas as pd
+import numpy as np
+import dill
+import json
+import re
+import warnings
+from sklearn.metrics import accuracy_score, roc_auc_score, root_mean_squared_error, mean_absolute_error, r2_score, f1_score
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态（用于保存预处理参数）==========
+PREPROCESS_STATE = {}
+
+# ========== LLM 填充区（开始）==========
+import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, recall_score, precision_score, confusion_matrix
+import lightgbm as lgb
+import re
+
+# 全局状态：用于在preprocess的train和test模式间传递参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    global PREPROCESS_STATE
+    target_col = 'fraud_bool'
+    
+    # 1. 丢弃疑似ID列和常数特征
+    id_cols = ['id', 'name_email_similarity', 'days_since_request', 
+               'intended_balcon_amount', 'velocity_6h', 'velocity_24h', 
+               'velocity_4w', 'session_length_in_minutes']
+    constant_cols = ['device_fraud_count', 'month']
+    drop_cols = id_cols + constant_cols
+    
+    # 安全丢弃（使用errors='ignore'防止列不存在时报错）
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    # 2. 将-1值识别为缺失标记并替换为NaN
+    cols_with_minus_one = ['prev_address_months_count', 'current_address_months_count', 
+                           'bank_months_count', 'device_distinct_emails_8w']
+    # session_length_in_minutes已被丢弃，但为安全起见也处理
+    if 'session_length_in_minutes' in df.columns:
+        cols_with_minus_one.append('session_length_in_minutes')
+    
+    for col in cols_with_minus_one:
+        if col in df.columns:
+            # 创建缺失指示列
+            missing_col_name = f'{col}_missing'
+            df[missing_col_name] = (df[col] == -1).astype(int)
+            # 将-1替换为NaN
+            df.loc[df[col] == -1, col] = np.nan
+    
+    # 3. 对高度右偏特征进行log1p变换（在填充缺失值之后）
+    # 注意：log1p变换需要在填充NaN之后进行，因为NaN无法做log1p
+    # 这里先不做变换，留到feature_engineering中通过Pipeline处理
+    # 但为了保持preprocess的完整性，我们在这里先填充缺失值
+    
+    if mode == 'train':
+        # 计算中位数用于填充
+        PREPROCESS_STATE['medians'] = {}
+        for col in cols_with_minus_one:
+            if col in df.columns:
+                PREPROCESS_STATE['medians'][col] = df[col].median()
+        
+        # 计算log1p变换所需的偏移量（确保非负）
+        PREPROCESS_STATE['log_cols'] = ['prev_address_months_count', 'bank_branch_count_8w']
+        if 'session_length_in_minutes' in df.columns:
+            PREPROCESS_STATE['log_cols'].append('session_length_in_minutes')
+    
+    # 填充缺失值
+    if mode == 'train':
+        for col in cols_with_minus_one:
+            if col in df.columns:
+                df[col] = df[col].fillna(PREPROCESS_STATE['medians'][col])
+    else:
+        for col in cols_with_minus_one:
+            if col in df.columns and col in PREPROCESS_STATE.get('medians', {}):
+                df[col] = df[col].fillna(PREPROCESS_STATE['medians'][col])
+    
+    # 4. 对高度右偏特征进行log1p变换
+    log_cols = PREPROCESS_STATE.get('log_cols', ['prev_address_months_count', 'bank_branch_count_8w'])
+    for col in log_cols:
+        if col in df.columns:
+            # 确保非负（log1p要求输入>=0）
+            min_val = df[col].min()
+            if min_val < 0:
+                df[col] = df[col] - min_val  # 平移使最小值为0
+            df[col] = np.log1p(df[col])
+    
+    # 5. 清洗特征名（移除特殊JSON字符）
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    return df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    '''
+    target_col = 'fraud_bool'
+    
+    # 分离特征和目标列
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    # 1. 创建交叉特征：收入与信用评分的交互
+    if 'income' in X.columns and 'credit_risk_score' in X.columns:
+        X['income_credit_risk_interaction'] = X['income'] * X['credit_risk_score']
+    
+    # 2. 创建比率特征：地址变更频率
+    if 'prev_address_months_count' in X.columns and 'current_address_months_count' in X.columns:
+        # 避免除零
+        X['address_change_ratio'] = np.where(
+            X['current_address_months_count'] > 0,
+            X['prev_address_months_count'] / (X['current_address_months_count'] + 1),
+            0
+        )
+    
+    # 3. 创建聚合特征：设备关联邮箱数与出生日期关联邮箱数的差值
+    if 'device_distinct_emails_8w' in X.columns and 'date_of_birth_distinct_emails_4w' in X.columns:
+        X['email_diff_device_dob'] = X['device_distinct_emails_8w'] - X['date_of_birth_distinct_emails_4w']
+    
+    # 4. 确保所有列都是数值类型
+    # 识别类别列（object/string类型）
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    # 对类别列使用OneHotEncoder
+    if cat_cols:
+        encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+        X_cat_encoded = encoder.fit_transform(X[cat_cols])
+        # 获取编码后的特征名
+        encoded_feature_names = encoder.get_feature_names_out(cat_cols)
+        # 清洗特征名
+        encoded_feature_names = [re.sub(r'[^\w]', '_', str(c)) for c in encoded_feature_names]
+        X_cat_df = pd.DataFrame(X_cat_encoded, columns=encoded_feature_names, index=X.index)
+        
+        # 合并数值列和编码后的类别列
+        X_num_df = X[num_cols].reset_index(drop=True)
+        X_cat_df = X_cat_df.reset_index(drop=True)
+        X = pd.concat([X_num_df, X_cat_df], axis=1)
+    
+    # 5. 最终清洗所有特征名
+    X.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X.columns]
+    
+    # 6. 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+        if X[col].dtype == 'bool':
+            X[col] = X[col].astype(int)
+    
+    # 填充可能因类型转换产生的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    '''
+    # 计算scale_pos_weight（负类数/正类数）
+    # 根据数据画像：正样本率1.14%，不平衡比86.34
+    scale_pos_weight = 86.34
+    
+    # 构建LightGBM模型
+    model = lgb.LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=5,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        random_state=42,
+        verbose=-1  # 静默模式
+    )
+    
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    '''
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    '''
+    # 预测概率
+    y_pred_proba = model.predict_proba(X_val)[:, 1]
+    
+    # 计算ROC-AUC
+    val_auc = roc_auc_score(y_val, y_pred_proba)
+    
+    # 计算Average Precision
+    val_ap = average_precision_score(y_val, y_pred_proba)
+    
+    # 搜索最优阈值（在0.01到0.5范围内，步长0.01）
+    best_threshold = 0.5
+    best_f1 = 0.0
+    for threshold in np.arange(0.01, 0.51, 0.01):
+        y_pred = (y_pred_proba >= threshold).astype(int)
+        f1 = f1_score(y_val, y_pred)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+    
+    # 使用最优阈值计算指标
+    y_pred_optimal = (y_pred_proba >= best_threshold).astype(int)
+    val_f1 = f1_score(y_val, y_pred_optimal)
+    val_recall = recall_score(y_val, y_pred_optimal)
+    val_precision = precision_score(y_val, y_pred_optimal)
+    
+    # 计算混淆矩阵
+    cm = confusion_matrix(y_val, y_pred_optimal)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+    
+    return {
+        'val_auc': float(val_auc),
+        'val_ap': float(val_ap),
+        'val_f1': float(val_f1),
+        'val_recall': float(val_recall),
+        'val_precision': float(val_precision),
+        'val_best_threshold': float(best_threshold),
+        'val_tp': int(tp),
+        'val_fp': int(fp),
+        'val_tn': int(tn),
+        'val_fn': int(fn)
+    }
+# ========== LLM 填充区（结束）==========
+
+# ========== 数据加载（系统负责）==========
+train = pd.read_csv('data/train.csv')
+val = pd.read_csv('data/validation.csv')
+test = pd.read_csv('data/test.csv')
+
+# 获取目标列和 id 列
+target_col = 'fraud_bool'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 检查目标列是否存在
+if target_col not in train.columns:
+    raise ValueError(f"目标列 '{target_col}' 不在训练数据中，可用列: {list(train.columns)}")
+
+# ========== 预处理（系统调用 LLM 填充的函数）==========
+train_clean = preprocess(train, mode='train')
+val_clean = preprocess(val, mode='test')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标（兼容 preprocess 是否保留目标列的情况）
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+# 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
+# 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    from sklearn.preprocessing import LabelEncoder
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程（系统调用 LLM 填充的函数）==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# ========== 清洗特征名（LGBM/XGBoost 不支持特殊 JSON 字符）==========
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+# 去重列名
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 模型训练（系统负责）==========
+model = build_model()
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+try:
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+except Exception:
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 验证评估（LLM 可覆盖，系统兜底）==========
+# 如果 LLM 定义了 evaluate_model()，使用 LLM 的评估逻辑；否则使用系统默认指标
+try:
+    if 'evaluate_model' in globals():
+        metrics = evaluate_model(model, X_val_fe, y_val)
+    else:
+        if hasattr(model, 'predict_proba'):
+            val_probs = model.predict_proba(X_val_fe)[:, 1]
+        else:
+            val_probs = model.predict(X_val_fe).astype(float)
+        val_preds = (val_probs >= 0.5).astype(int)
+        metrics = {
+            'val_auc': float(roc_auc_score(y_val, val_probs)),
+            'val_accuracy': float(accuracy_score(y_val, val_preds))
+        }
+except Exception as e:
+    print(f"[EVAL_ERROR] {e}")
+    metrics = {}
+    # 尝试最基本的预测来兜底
+    try:
+        _pred = model.predict(X_val_fe)
+        if task_type == "binary_classification" and hasattr(model, 'predict_proba'):
+            _prob = model.predict_proba(X_val_fe)[:, 1]
+            metrics = {'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}
+        elif task_type == "multiclass_classification":
+            metrics = {'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}
+        elif task_type in ("regression", "time_series_forecasting"):
+            metrics = {'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}
+    except Exception as e2:
+        print(f"[EVAL_FALLBACK_ERROR] {e2}")
+        metrics = {}
+
+# ========== 测试预测（系统保证格式）==========
+# 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
+# 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df['probability'] = test_probs
+result_df.to_csv('data/test_predictions.csv', index=False)
+
+# ========== 模型保存（系统保证可序列化）==========
+with open('data/best_model.pkl', 'wb') as f:
+    dill.dump(model, f)
+
+# ========== 输出指标（系统抓取）==========
+print('METRICS_JSON_START')
+print(json.dumps(metrics))
+print('METRICS_JSON_END')
+
+```
+
+【重要：上一次执行的报错信息】:
+```
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_qqr5rkv7\script.py", line 44, in <module>
+    test_probs = model.predict_proba(X_test)[:, 1]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1627, in predict_proba
+    result = super().predict(
+             ^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1144, in predict
+    return self._Booster.predict(  # type: ignore[union-attr]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 4767, in predict
+    return predictor.predict(
+           ^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 1158, in predict
+    data = _data_from_pandas(
+           ^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 868, in _data_from_pandas
+    _pandas_to_numpy(data, target_dtype=target_dtype),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 814, in _pandas_to_numpy
+    _check_for_bad_pandas_dtypes(data.dtypes)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\basic.py", line 805, in _check_for_bad_pandas_dtypes
+    raise ValueError(
+ValueError: pandas dtypes must be int, float or bool.
+Fields with bad pandas dtypes: payment_type: str, employment_status: str, housing_status: str, source: str, device_os: str
+
+```
+请根据上述报错修复代码，确保所有依赖库均已导入且正确使用，然后重新生成完整的产物代码。
+
+
+【重要提示】：data/best_model.pkl 已经存在（这是之前训练阶段保存的最优模型）。
+请直接在产物代码中加载该模型（`pickle.load(open('data/best_model.pkl', 'rb'))`），**无需重新训练**。
+加载模型后即可进行测试集预测、生成特征重要性和报告。
+如果加载失败，才回退到重新训练。
+
+
+请生成产物代码，要求：
+1. 加载 data/best_model.pkl（优先）或重新训练最终模型
+2. 保存模型到 output/model.pkl
+3. 生成特征重要性图到 output/feature_importance.png
+4. 生成特征重要性 CSV 到 output/feature_importance.csv（直接从模型属性获取，禁止 SHAP）
+5. 生成 HTML 报告到 output/report.html（包含模型指标摘要、特征重要性表格、测试集预测预览）
+6. 对测试集预测并保存到 output/test_predictions.csv
+7. 最后 print(json.dumps(Ellipsis)) 输出摘要

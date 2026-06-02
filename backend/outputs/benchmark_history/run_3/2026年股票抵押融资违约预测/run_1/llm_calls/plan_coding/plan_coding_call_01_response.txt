@@ -1,0 +1,723 @@
+<plan>
+产物生成计划：
+1. 加载已存在的 data/best_model.pkl 模型（优先），如果加载失败则回退到重新训练
+2. 对测试集 data/test.csv 进行预测，生成 output/test_predictions.csv（含 prediction 和 probability 列）
+3. 保存模型到 output/model.pkl
+4. 从模型属性提取特征重要性，生成 output/feature_importance.csv 和 output/feature_importance.png
+5. 生成二分类任务差异化产物：output/report_fig.png（ROC 曲线，标注 AUC 值）
+6. 生成 output/report.html（含模型指标摘要、特征重要性表格、混淆矩阵、分类报告、测试集预测预览）
+7. 生成 output/predict.py 独立预测脚本
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import os
+import json
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import (
+    roc_auc_score, roc_curve, confusion_matrix,
+    classification_report, accuracy_score, precision_score,
+    recall_score, f1_score
+)
+from sklearn.preprocessing import LabelEncoder
+warnings.filterwarnings('ignore')
+
+# ========== 确保输出目录存在 ==========
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {
+    'skew_cols': None,
+    'scaler': None,
+    'feature_cols': None,
+    'target_col': 'IsDefault',
+    'id_cols_to_drop': ['Stock code'],
+    'skew_threshold': 5.0,
+}
+
+# ========== 预处理函数（与最佳代码一致）==========
+def preprocess(df, mode='train'):
+    df = df.copy()
+    target_col = PREPROCESS_STATE['target_col']
+    
+    df = df.drop(columns=PREPROCESS_STATE['id_cols_to_drop'], errors='ignore')
+    
+    if 'P/E ratio' in df.columns:
+        df['P/E ratio'] = pd.to_numeric(df['P/E ratio'], errors='coerce')
+    
+    for col in df.columns:
+        if col == target_col:
+            continue
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    if target_col in df.columns:
+        PREPROCESS_STATE['target_col'] = target_col
+    else:
+        for col in df.columns:
+            if col.lower().replace('_', '') == target_col.lower().replace('_', ''):
+                PREPROCESS_STATE['target_col'] = col
+                break
+    
+    return df
+
+
+def feature_engineering(df):
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    
+    df = df.copy()
+    target_col = PREPROCESS_STATE['target_col']
+    
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.drop(columns=[target_col], errors='ignore')
+    
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    skew_cols = []
+    for col in num_cols:
+        unique_vals = X[col].dropna().unique()
+        if len(unique_vals) <= 2:
+            continue
+        col_min = X[col].min()
+        if col_min < 0:
+            continue
+        col_skew = X[col].skew()
+        if abs(col_skew) > PREPROCESS_STATE['skew_threshold']:
+            skew_cols.append(col)
+    
+    PREPROCESS_STATE['skew_cols'] = skew_cols
+    
+    def log1p_transform(X_np, skew_indices=None):
+        X_np = X_np.copy()
+        if skew_indices is not None and len(skew_indices) > 0:
+            for idx in skew_indices:
+                col_data = X_np[:, idx]
+                col_data = np.maximum(col_data, 0)
+                X_np[:, idx] = np.log1p(col_data)
+        return X_np
+    
+    skew_indices = [num_cols.index(c) for c in skew_cols if c in num_cols]
+    
+    cat_pipeline = Pipeline([
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+    
+    num_pipeline = Pipeline([
+        ('imputer', SimpleImputer(strategy='median')),
+        ('log1p', FunctionTransformer(
+            log1p_transform,
+            kw_args={'skew_indices': skew_indices},
+            validate=False
+        )),
+        ('scaler', StandardScaler())
+    ])
+    
+    preprocessor = ColumnTransformer([
+        ('cat', cat_pipeline, cat_cols),
+        ('num', num_pipeline, num_cols)
+    ], remainder='passthrough')
+    
+    X_processed = preprocessor.fit_transform(X)
+    
+    if cat_cols:
+        cat_encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = cat_encoder.get_feature_names_out(cat_cols).tolist()
+    else:
+        cat_feature_names = []
+    
+    num_feature_names = num_cols.copy()
+    remainder_cols = [c for c in X.columns if c not in cat_cols and c not in num_cols]
+    all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+    all_feature_names = [re.sub(r'[^\w]', '_', str(c)) for c in all_feature_names]
+    
+    X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+    
+    # 交互特征
+    pledge_cols = [c for c in X_df.columns if 'Share_pledge_ratio' in c or 'share_pledge' in c.lower().replace(' ', '_')]
+    debt_cols = [c for c in X_df.columns if 'Asset_liability_ratio' in c or 'asset_liability' in c.lower().replace(' ', '_')]
+    
+    for pc in pledge_cols:
+        for dc in debt_cols:
+            interact_name = f'interact_{pc}_x_{dc}'
+            interact_name = re.sub(r'[^\w]', '_', interact_name)
+            X_df[interact_name] = X_df[pc] * X_df[dc]
+    
+    concentration_cols = [c for c in X_df.columns if 'Equity_concentration' in c or 'equity_concentration' in c.lower().replace(' ', '_')]
+    checks_cols = [c for c in X_df.columns if 'Equity_checks' in c or 'equity_checks' in c.lower().replace(' ', '_')]
+    
+    for cc in concentration_cols:
+        for ec in checks_cols:
+            ratio_name = f'ratio_{cc}_div_{ec}'
+            ratio_name = re.sub(r'[^\w]', '_', ratio_name)
+            X_df[ratio_name] = X_df[cc] / (X_df[ec].replace(0, np.nan)).fillna(1e-6)
+    
+    PREPROCESS_STATE['feature_cols'] = X_df.columns.tolist()
+    
+    return X_df
+
+
+# ========== 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'IsDefault'
+id_col = 'Stock code'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# ========== 尝试加载已保存模型 ==========
+model = None
+model_loaded = False
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    model_loaded = True
+    print("Successfully loaded model from data/best_model.pkl")
+except Exception as e:
+    print(f"Failed to load data/best_model.pkl: {e}")
+    print("Will retrain the model...")
+
+# ========== 预处理数据 ==========
+train_clean = preprocess(train, mode='train')
+test_clean = preprocess(test, mode='test')
+
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train_raw = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train_raw = train_clean
+
+X_test_raw = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test_raw is test_clean:
+    X_test_raw = test_clean.copy()
+
+# ========== 特征工程 ==========
+X_train_fe = feature_engineering(X_train_raw)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train_raw.index)
+X_test_fe = feature_engineering(X_test_raw)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test_raw.index)
+
+# 清洗特征名
+for _df in [X_train_fe, X_test_fe]:
+    _df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in _df.columns]
+for _df in [X_train_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 如果模型加载失败，重新训练 ==========
+if not model_loaded:
+    from lightgbm import LGBMClassifier
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=4.4,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=300,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbose=-1,
+        n_jobs=-1
+    )
+    model.fit(X_train_fe, y_train)
+    print("Model retrained successfully.")
+
+# ========== 保存模型到 output/model.pkl ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 测试集预测 ==========
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+# 保存测试预测
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+    'probability': test_probs
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 特征重要性 ==========
+feature_names = X_train_fe.columns.tolist()
+
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    importances = np.abs(model.coef_).flatten()
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    min_len = min(len(importances), len(feature_names))
+    feature_names = feature_names[:min_len]
+    importances = importances[:min_len]
+
+# 保存特征重要性 CSV
+fi_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+fi_df = fi_df.sort_values('importance', ascending=False)
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# 特征重要性图（取前 20 个）
+top_n = min(20, len(fi_df))
+top_fi = fi_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(top_n), top_fi['importance'].values[::-1], color='steelblue')
+plt.yticks(range(top_n), top_fi['name'].values[::-1], fontsize=9)
+plt.xlabel('Importance')
+plt.title('Top {} Feature Importance'.format(top_n))
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 计算训练集上的指标（用于报告）==========
+train_probs = model.predict_proba(X_train_fe)[:, 1]
+train_preds = (train_probs >= 0.5).astype(int)
+
+train_auc = float(roc_auc_score(y_train, train_probs))
+train_accuracy = float(accuracy_score(y_train, train_preds))
+train_precision = float(precision_score(y_train, train_preds, zero_division=0))
+train_recall = float(recall_score(y_train, train_preds, zero_division=0))
+train_f1 = float(f1_score(y_train, train_preds, zero_division=0))
+
+cm = confusion_matrix(y_train, train_preds)
+tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+
+# 分类报告
+report_dict = classification_report(y_train, train_preds, output_dict=True, zero_division=0)
+
+# ========== ROC 曲线图 ==========
+fpr, tpr, thresholds = roc_curve(y_train, train_probs)
+
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, color='darkorange', lw=2, label='ROC curve (AUC = {:.4f})'.format(train_auc))
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curve')
+plt.legend(loc='lower right')
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("ROC curve saved to output/report_fig.png")
+
+# ========== 生成 HTML 报告 ==========
+# 构建混淆矩阵 HTML 表格
+cm_html = """
+<table border="1" cellpadding="5" cellspacing="0" style="border-collapse:collapse; text-align:center;">
+    <tr><th></th><th>Predicted Negative</th><th>Predicted Positive</th></tr>
+    <tr><th>Actual Negative</th><td style="background-color:#d4edda;">TN: {tn}</td><td style="background-color:#f8d7da;">FP: {fp}</td></tr>
+    <tr><th>Actual Positive</th><td style="background-color:#f8d7da;">FN: {fn}</td><td style="background-color:#d4edda;">TP: {tp}</td></tr>
+</table>
+""".format(tn=tn, fp=fp, fn=fn, tp=tp)
+
+# 构建分类报告 HTML 表格
+cr_rows = ""
+for label, metrics in report_dict.items():
+    if isinstance(metrics, dict):
+        cr_rows += "<tr><td>{}</td><td>{:.4f}</td><td>{:.4f}</td><td>{:.4f}</td><td>{}</td></tr>".format(
+            label, metrics['precision'], metrics['recall'], metrics['f1-score'], int(metrics['support'])
+        )
+
+classification_report_html = """
+<table border="1" cellpadding="5" cellspacing="0" style="border-collapse:collapse; text-align:center;">
+    <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>
+    {rows}
+</table>
+""".format(rows=cr_rows)
+
+# 构建特征重要性 HTML 表格（前 20）
+fi_rows = ""
+for _, row in top_fi.iterrows():
+    fi_rows += "<tr><td>{}</td><td>{:.6f}</td></tr>".format(row['name'], row['importance'])
+
+fi_html = """
+<table border="1" cellpadding="5" cellspacing="0" style="border-collapse:collapse; text-align:left;">
+    <tr><th>Feature</th><th>Importance</th></tr>
+    {rows}
+</table>
+""".format(rows=fi_rows)
+
+# 测试集预测预览（前 10 行）
+test_preview_rows = ""
+for _, row in result_df.head(10).iterrows():
+    test_preview_rows += "<tr><td>{}</td><td>{}</td><td>{:.6f}</td></tr>".format(
+        row['id'], int(row['prediction']), row['probability']
+    )
+
+test_preview_html = """
+<table border="1" cellpadding="5" cellspacing="0" style="border-collapse:collapse; text-align:center;">
+    <tr><th>ID</th><th>Prediction</th><th>Probability</th></tr>
+    {rows}
+</table>
+""".format(rows=test_preview_rows)
+
+html_content = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Binary Classification</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f9f9f9;
+            color: #333;
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #2980b9;
+            margin-top: 30px;
+        }}
+        .section {{
+            background-color: #fff;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        table {{
+            width: 100%;
+            margin: 10px 0;
+        }}
+        th {{
+            background-color: #3498db;
+            color: white;
+        }}
+        td, th {{
+            padding: 8px 12px;
+        }}
+        .metric-card {{
+            display: inline-block;
+            background: #ecf0f1;
+            padding: 15px 25px;
+            margin: 10px;
+            border-radius: 6px;
+            text-align: center;
+        }}
+        .metric-value {{
+            font-size: 24px;
+            font-weight: bold;
+            color: #2c3e50;
+        }}
+        .metric-label {{
+            font-size: 12px;
+            color: #7f8c8d;
+        }}
+        img {{
+            max-width: 100%;
+            height: auto;
+            margin: 20px 0;
+        }}
+    </style>
+</head>
+<body>
+    <h1>Binary Classification Model Report</h1>
+    
+    <div class="section">
+        <h2>Model Performance Metrics</h2>
+        <div class="metric-card">
+            <div class="metric-value">{auc:.4f}</div>
+            <div class="metric-label">ROC-AUC</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{accuracy:.4f}</div>
+            <div class="metric-label">Accuracy</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{precision:.4f}</div>
+            <div class="metric-label">Precision</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{recall:.4f}</div>
+            <div class="metric-label">Recall</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{f1:.4f}</div>
+            <div class="metric-label">F1-Score</div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>ROC Curve</h2>
+        <img src="report_fig.png" alt="ROC Curve">
+    </div>
+    
+    <div class="section">
+        <h2>Confusion Matrix</h2>
+        {cm_table}
+    </div>
+    
+    <div class="section">
+        <h2>Classification Report</h2>
+        {cr_table}
+    </div>
+    
+    <div class="section">
+        <h2>Feature Importance (Top 20)</h2>
+        <img src="feature_importance.png" alt="Feature Importance">
+        {fi_table}
+    </div>
+    
+    <div class="section">
+        <h2>Test Set Predictions Preview (First 10 Rows)</h2>
+        {test_preview}
+        <p>Total test samples: {total_test}</p>
+    </div>
+</body>
+</html>
+""".format(
+    auc=train_auc,
+    accuracy=train_accuracy,
+    precision=train_precision,
+    recall=train_recall,
+    f1=train_f1,
+    cm_table=cm_html,
+    cr_table=classification_report_html,
+    fi_table=fi_html,
+    test_preview=test_preview_html,
+    total_test=len(result_df)
+)
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 生成独立预测脚本 ==========
+predict_script = '''#!/usr/bin/env python3
+"""
+Independent prediction script.
+Usage: python predict.py <input_csv_path> [output_csv_path]
+If output_csv_path is not provided, predictions are saved to predictions.csv
+"""
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import sys
+import os
+
+# ========== 预处理函数（与训练时一致）==========
+def preprocess(df):
+    df = df.copy()
+    id_cols_to_drop = ['Stock code']
+    df = df.drop(columns=id_cols_to_drop, errors='ignore')
+    
+    if 'P/E ratio' in df.columns:
+        df['P/E ratio'] = pd.to_numeric(df['P/E ratio'], errors='coerce')
+    
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    return df
+
+
+def feature_engineering(df):
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    
+    df = df.copy()
+    X = df
+    
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    def log1p_transform(X_np, skew_indices=None):
+        X_np = X_np.copy()
+        if skew_indices is not None and len(skew_indices) > 0:
+            for idx in skew_indices:
+                col_data = X_np[:, idx]
+                col_data = np.maximum(col_data, 0)
+                X_np[:, idx] = np.log1p(col_data)
+        return X_np
+    
+    # 使用训练时保存的 skew_cols
+    skew_cols = {skew_cols}
+    skew_indices = [num_cols.index(c) for c in skew_cols if c in num_cols]
+    
+    cat_pipeline = Pipeline([
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+    
+    num_pipeline = Pipeline([
+        ('imputer', SimpleImputer(strategy='median')),
+        ('log1p', FunctionTransformer(
+            log1p_transform,
+            kw_args={{'skew_indices': skew_indices}},
+            validate=False
+        )),
+        ('scaler', StandardScaler())
+    ])
+    
+    preprocessor = ColumnTransformer([
+        ('cat', cat_pipeline, cat_cols),
+        ('num', num_pipeline, num_cols)
+    ], remainder='passthrough')
+    
+    X_processed = preprocessor.fit_transform(X)
+    
+    if cat_cols:
+        cat_encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = cat_encoder.get_feature_names_out(cat_cols).tolist()
+    else:
+        cat_feature_names = []
+    
+    num_feature_names = num_cols.copy()
+    remainder_cols = [c for c in X.columns if c not in cat_cols and c not in num_cols]
+    all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+    all_feature_names = [re.sub(r'[^\\w]', '_', str(c)) for c in all_feature_names]
+    
+    X_df = pd.DataFrame(X_processed, index=X.index, columns=all_feature_names)
+    
+    # 交互特征
+    pledge_cols = [c for c in X_df.columns if 'Share_pledge_ratio' in c or 'share_pledge' in c.lower().replace(' ', '_')]
+    debt_cols = [c for c in X_df.columns if 'Asset_liability_ratio' in c or 'asset_liability' in c.lower().replace(' ', '_')]
+    
+    for pc in pledge_cols:
+        for dc in debt_cols:
+            interact_name = f'interact_{{pc}}_x_{{dc}}'
+            interact_name = re.sub(r'[^\\w]', '_', interact_name)
+            X_df[interact_name] = X_df[pc] * X_df[dc]
+    
+    concentration_cols = [c for c in X_df.columns if 'Equity_concentration' in c or 'equity_concentration' in c.lower().replace(' ', '_')]
+    checks_cols = [c for c in X_df.columns if 'Equity_checks' in c or 'equity_checks' in c.lower().replace(' ', '_')]
+    
+    for cc in concentration_cols:
+        for ec in checks_cols:
+            ratio_name = f'ratio_{{cc}}_div_{{ec}}'
+            ratio_name = re.sub(r'[^\\w]', '_', ratio_name)
+            X_df[ratio_name] = X_df[cc] / (X_df[ec].replace(0, np.nan)).fillna(1e-6)
+    
+    return X_df
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv_path> [output_csv_path]")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+    
+    # 加载模型
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(input_path)
+    original_df = df.copy()
+    
+    # 预处理
+    df_clean = preprocess(df)
+    X = feature_engineering(df_clean)
+    if isinstance(X, np.ndarray):
+        X = pd.DataFrame(X)
+    
+    # 清洗特征名
+    X.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X.columns]
+    
+    # 预测
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X)[:, 1]
+    else:
+        probs = model.predict(X).astype(float)
+    preds = (probs >= 0.5).astype(int)
+    
+    # 保存结果
+    result = original_df.copy()
+    result['prediction'] = preds
+    result['probability'] = probs
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {{output_path}}")
+    print(f"Total samples: {{len(result)}}")
+    print(f"Positive predictions: {{preds.sum()}} ({{preds.mean()*100:.2f}}%)")
+
+
+if __name__ == '__main__':
+    main()
+'''.format(skew_cols=PREPROCESS_STATE.get('skew_cols', []))
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    "status": "success",
+    "model_loaded_from_cache": model_loaded,
+    "output_files": [
+        "output/model.pkl",
+        "output/feature_importance.csv",
+        "output/feature_importance.png",
+        "output/report.html",
+        "output/report_fig.png",
+        "output/test_predictions.csv",
+        "output/predict.py"
+    ],
+    "metrics": {
+        "train_auc": train_auc,
+        "train_accuracy": train_accuracy,
+        "train_precision": train_precision,
+        "train_recall": train_recall,
+        "train_f1": train_f1,
+        "confusion_matrix": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)}
+    },
+    "test_samples": len(result_df),
+    "test_positive_rate": float(test_preds.mean()),
+    "feature_count": len(fi_df)
+}
+
+print(json.dumps(summary))
+```
+</code>

@@ -1,0 +1,61 @@
+============================================================
+  任务运行摘要: 红酒品质预测-有序多分类 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: multiclass_classification
+  目标列: quality
+  评估指标: F1-macro
+  复杂度判定: complex (LLM直接判定为complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ❌ 否
+
+【核心指标】
+  Best Score: 63.90
+  总耗时: 0.0s
+
+【各阶段耗时】
+  意图识别: 1.0s
+  代码生成: 68.6s
+  沙箱执行: 20.4s
+  评估优化: 17.1s
+  产物生成: 166.3s
+  测试预测: 0.0s
+  总计: 434.5s
+
+【Token 消耗】
+  Plan/Coding 调用: 2 次, 23818 tokens
+  Evaluation 调用: 4 次, 9891 tokens
+  总计: 6 次, 33709 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 4823tokens | 0.9s
+    - qwen3.5-flash@openai: 1 calls, 4823 tokens, 0.9s
+  plan_coding : deepseek-v4-pro@openai | 2calls | 23818tokens | 157.7s
+    - deepseek-v4-pro@openai: 2 calls, 23818 tokens, 157.7s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9891tokens | 17.1s
+    - deepseek-v4-flash@openai: 4 calls, 9891 tokens, 17.1s
+  judge       : qwen3.5-flash@openai | 1calls | 1573tokens | 2.2s
+    - qwen3.5-flash@openai: 1 calls, 1573 tokens, 2.2s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：F1-macro】为核心标准。模型在测试集上的 F1-macro 得分为 0.4056，远低于多分类任务通常可接受的基线（F1-macro > 0.55）。虽然测试集 Accuracy (0.6254) 略高于验证集 Accuracy (0.6147)，表现出一定的泛化一致性，但核心指标 F1-macro 的低下表明模型在区分不同类别时表现极差，未能有效捕捉各类别的特征分布。此外，验证集 Accuracy 仅为 0.6147，说明模型在训练阶段的基础性能就不够理想，进一步印证了该模型无法达到交付质量要求。...
+
+【维度评分】
+  unknown: 38.0 (weight=0.3)
+  unknown: 85.0 (weight=0.25)
+  unknown: 70.0 (weight=0.2)
+  unknown: 75.0 (weight=0.15)
+  unknown: 60.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 17:27:22 UTC
+============================================================

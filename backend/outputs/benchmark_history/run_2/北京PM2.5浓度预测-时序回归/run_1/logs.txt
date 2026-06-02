@@ -1,0 +1,512 @@
+[Plan & Coding Agent] 生成初始基线代码
+=== 建模计划 ===
+============================================================
+【结构化建模计划】
+============================================================
+
+【任务分析】
+  task_type: regression
+  primary_metric: RMSE
+  secondary_metrics: ['MAE', 'R2']
+  dataset_size: 35059 行
+  class_balance: 不适用（回归任务）
+  time_series: True
+  key_features: 时间特征（year, month, day, hour）和气象特征（DEWP, TEMP, PRES, cbwd, Iws）是预测 PM2.5 浓度的核心。累计雪/雨量（Is, Ir）虽然高度偏斜，但可能对极端天气事件有指示作用。
+  data_quality_issues: ['目标列 pm2.5 缺失 5.61%', '特征 Iws, Is, Ir 高度右偏', '存在 ID 列 No', '类别特征 cbwd 需编码']
+
+【核心挑战】
+  1. 挑战1：目标变量 pm2.5 存在 1968 个缺失值（5.61%）。如果不处理，模型无法训练或预测，导致 Pipeline 失败。
+  2. 挑战2：特征 Iws（风速）、Is（累计雪量）、Ir（累计雨量）高度右偏（偏度分别为 4.19, 18.45, 11.39）。如果不进行变换，模型（尤其是线性模型）可能对这些特征的极端值过度敏感，导致 RMSE 被异常值拉高。
+  3. 挑战3：数据为时间序列（2010-2014 年逐小时），但数据画像未提供明确的时间戳列，而是拆分为 year, month, day, hour。如果不正确处理时间依赖性，模型可能无法捕捉季节性、周期性（如日变化、周变化）和趋势，导致预测精度下降。
+  4. 挑战4：存在 ID 列 'No'，该列单调递增，与目标变量无因果关系。如果将其作为特征输入模型，会导致严重的过拟合和数据泄露，在测试集上表现极差。
+  5. 挑战5：类别特征 'cbwd'（风向）有 4 个类别。如果不进行编码，大多数机器学习模型无法直接处理字符串，会报错。
+  6. 挑战6：特征 'Is' 和 'Ir' 的分布极度稀疏（中位数为 0，均值接近 0），大部分值为 0。如果不进行特殊处理（如二值化或保留原值），模型可能难以学习其有效信息，或引入噪声。
+
+【必须执行 (MUST DO) —— 后续代码必须逐项实现】
+  1. 【关键】丢弃 ID 列 'No'
+     原因: 该列是单调递增的索引，与 PM2.5 浓度无因果关系。保留它会引入数据泄露，导致模型在训练集上过拟合，在测试集上泛化能力极差，RMSE 会显著升高。
+  2. 【关键】处理目标变量 'pm2.5' 的缺失值
+     原因: 目标变量缺失会导致模型无法训练。必须采用合适的策略填充或删除这些样本。考虑到是时间序列数据，推荐使用前向填充（ffill）或基于时间临近点的插值方法，以保持时间连续性。直接删除 5.61% 的数据可能导致信息损失。
+  3. 【关键】对高度右偏的数值特征（Iws, Is, Ir）进行变换
+     原因: 这些特征的偏度极高（>4），包含极端值。如果不处理，模型（尤其是线性模型和基于距离的模型）会被这些极端值主导，导致 RMSE 被异常值严重拉高。推荐使用 log1p 变换或 Box-Cox 变换来压缩偏度。
+  4. 【关键】对类别特征 'cbwd' 进行编码
+     原因: 该特征是字符串类型，大多数模型（包括树模型）无法直接处理。必须将其转换为数值形式，如 One-Hot Encoding 或 Ordinal Encoding。
+  5. 【关键】构建时间序列特征以捕捉时间依赖性
+     原因: 数据是逐小时的，但特征只提供了 year, month, day, hour。直接使用这些数值特征可能无法让模型学习到周期性（如一天中的小时是循环的）。必须创建循环编码（sin/cos）或滞后特征来显式地提供时间结构信息，否则模型可能无法有效利用时间信息，导致预测精度不足。
+  6. 在验证集上进行模型选择和调优，严禁在测试集上做任何调优
+     原因: 在测试集上调参会引入信息泄露，导致对模型泛化能力的乐观估计。所有超参数搜索、特征选择等决策必须基于验证集（validation.csv）的性能（RMSE）。
+  7. 标准化所有数值特征（除目标变量外）
+     原因: 虽然树模型对尺度不敏感，但标准化有助于梯度下降类模型（如神经网络，如果使用）的收敛，并且在使用正则化模型（如 Ridge）时是必须的。为了 Pipeline 的通用性，建议对所有数值特征进行标准化（如 StandardScaler 或 RobustScaler）。
+
+【必须避免 (AVOID) —— 代码中严禁出现】
+  1. 使用 'No' 列作为特征
+     原因: 该列是 ID，与目标无关。使用它会导致严重的数据泄露和过拟合，是建模中的常见反模式。
+  2. 对目标变量 'pm2.5' 进行标准化或归一化
+     原因: 回归任务的目标变量通常应保持原始尺度，以便直接计算 RMSE 等指标。标准化目标变量会使预测结果难以解释，且需要逆变换才能计算 RMSE，增加了不必要的复杂性。
+  3. 对所有缺失值使用统一的填充策略（如 fillna(0)）
+     原因: 不同列的缺失值含义不同。目标变量 'pm2.5' 的缺失值应使用时间序列插值，而其他特征的缺失值（如果存在）应根据其分布和业务含义选择填充策略。统一填充可能导致信息失真。
+  4. 忽略时间序列特性，将数据视为独立同分布样本
+     原因: 数据是逐小时采集的，存在时间自相关性。如果打乱数据或使用标准 K-Fold 交叉验证，会破坏时间顺序，导致模型无法学习到时间模式，并可能造成数据泄露（未来信息泄露到过去）。必须使用 TimeSeriesSplit 或基于时间的验证集。
+  5. 在测试集上进行任何模型调优或阈值选择
+     原因: 这是数据科学中的基本准则。测试集仅用于最终评估模型泛化能力。任何基于测试集性能的调整都会导致模型过拟合到测试集，失去评估意义。
+  6. 对 'Is' 和 'Ir' 特征仅做简单的 log1p 变换而不考虑其稀疏性
+     原因: 由于大部分值为 0，log1p(0) = 0，变换后仍然高度稀疏。可以考虑创建一个二值特征（是否下雨/雪）来捕捉事件发生与否的信息，同时保留变换后的数值特征来捕捉量级信息。
+
+【Pipeline 计划】
+  ▶ 数据预处理
+    - 加载训练集（train.csv）、验证集（validation.csv）和测试集（test.csv）。
+    - 丢弃所有数据集中的 'No' 列。
+    - 处理目标变量 'pm2.5' 的缺失值：对训练集和验证集采用时间序列插值（如按时间顺序的前向填充或线性插值）。测试集若存在缺失，同样处理。
+    - 检查并处理其他特征列的缺失值（如果有）。
+  ▶ 特征工程
+    - 对类别特征 'cbwd' 进行编码（如 One-Hot Encoding）。
+    - 对高度右偏的数值特征 'Iws', 'Is', 'Ir' 进行 log1p 变换。
+    - 为 'Is' 和 'Ir' 创建二值指示特征（如 'is_raining' 和 'is_snowing'），标记事件是否发生。
+    - 构建时间循环特征：对 'hour', 'month' 进行 sin/cos 变换，以编码其周期性。
+    - （可选）创建滞后特征：例如，创建前 1-3 小时的 PM2.5 浓度作为特征（需注意，这可能导致测试集第一行数据无滞后值，需妥善处理）。
+    - （可选）创建滚动统计特征：例如，过去 6 小时的平均温度、风速等。
+  ▶ 模型训练
+    - 选择 LightGBM 作为基础模型，因为它对缺失值鲁棒、能处理非线性关系、训练速度快，且自带处理类别特征的能力（但需先编码）。
+    - 使用训练集数据训练 LightGBM 回归模型。
+    - 在验证集上评估模型性能，计算 RMSE, MAE, R2。
+  ▶ 验证与调优
+    - 使用 TimeSeriesSplit 或基于时间顺序的验证集进行超参数调优。
+    - 调优的关键超参数包括：n_estimators, max_depth, learning_rate, num_leaves, subsample, colsample_bytree, reg_alpha, reg_lambda。
+    - 调优目标：最小化验证集上的 RMSE。
+    - 在最终确定的模型上，使用整个训练集（train + validation）进行重训练，然后在测试集上进行预测并生成最终 RMSE。
+  ▶ 最终评估与保存
+    - 在测试集上计算最终 RMSE 和辅助指标（MAE, R2）。
+    - 保存训练好的模型 Pipeline（包括所有预处理步骤和模型）。
+    - 生成预测结果文件。
+
+【模型选择】LightGBM
+【选择理由】1. 处理缺失值：LightGBM 原生支持缺失值，可以自动学习最佳分裂方向，无需额外填充。2. 处理非线性：PM2.5 与气象特征的关系复杂，LightGBM 作为树模型能很好地捕捉非线性交互。3. 效率：对于 3.5 万行数据，LightGBM 训练速度远快于 XGBoost 或深度学习模型。4. 鲁棒性：对异常值和特征尺度不敏感。关键超参如 num_leaves 和 max_depth 需要调优以防止过拟合，learning_rate 和 n_estimators 需要平衡训练时间和精度。
+
+【预期表现】验证集 RMSE < 30（基于类似 Kaggle 竞赛的基准），R2 > 0.85
+
+【风险预判】
+  ⚠ 风险1：时间序列泄露。如果使用标准 K-Fold 交叉验证，未来数据可能被用于训练，导致模型在验证集上表现虚高，但在真实测试集上表现差。必须使用 TimeSeriesSplit。
+  ⚠ 风险2：滞后特征导致测试集首行缺失。如果创建了滞后特征，测试集的第一行（或前几行）将没有滞后值。必须制定策略（如用 0 填充或用全局均值填充）来处理这些缺失值。
+  ⚠ 风险3：模型过拟合。LightGBM 容易过拟合，尤其是在特征较多时。必须通过早停（early_stopping）、正则化（reg_alpha, reg_lambda）和限制树复杂度（max_depth, num_leaves）来防止过拟合。
+  ⚠ 风险4：特征重要性误判。高度偏斜的特征（如 Is, Ir）即使经过变换，其重要性也可能被低估或高估。需要结合业务知识和特征重要性分析来综合判断。
+============================================================
+
+============================================================
+【Coding Agent 实现计划】
+============================================================
+基于结构化计划，我将在代码中实现以下关键点：
+
+**MUST DO 实现：**
+1. **丢弃 ID 列 'No'**：在 preprocess 中删除该列
+2. **处理目标变量缺失值**：对 pm2.5 使用前向填充（ffill）和后向填充（bfill），保持时间序列连续性
+3. **对右偏特征变换**：在 feature_engineering 中对 Iws, Is, Ir 做 log1p 变换
+4. **类别特征编码**：cbwd 使用 OneHotEncoder 编码
+5. **时间序列特征**：构建 hour 和 month 的 sin/cos 循环编码，创建 Is/Ir 的二值指示特征
+6. **标准化数值特征**：使用 StandardScaler
+7. **验证集调优**：使用 TimeSeriesSplit 进行超参搜索
+
+**AVOID 规避：**
+1. 不使用 'No' 列作为特征
+2. 不对目标变量 pm2.5 做标准化/归一化
+3. 不使用统一填充策略（目标列用时间序列插值，特征列用中位数/众数）
+4. 不忽略时间序列特性（使用 TimeSeriesSplit）
+5. 不在测试集上调优
+6. 对 Is/Ir 创建二值特征，而非仅做 log1p
+
+**Pipeline 实现：**
+- preprocess：丢弃 No 列，处理目标列缺失值（ffill+bfill），确保数值列类型正确
+- feature_engineering：构建时间循环特征、log1p 变换、二值指示特征、OneHot 编码
+- build_model：返回包含预处理+特征工程+LightGBM 的完整 Pipeline
+=== LLM 原始响应 ===
+<plan>
+基于结构化计划，我将在代码中实现以下关键点：
+
+**MUST DO 实现：**
+1. **丢弃 ID 列 'No'**：在 preprocess 中删除该列
+2. **处理目标变量缺失值**：对 pm2.5 使用前向填充（ffill）和后向填充（bfill），保持时间序列连续性
+3. **对右偏特征变换**：在 feature_engineering 中对 Iws, Is, Ir 做 log1p 变换
+4. **类别特征编码**：cbwd 使用 OneHotEncoder 编码
+5. **时间序列特征**：构建 hour 和 month 的 sin/cos 循环编码，创建 Is/Ir 的二值指示特征
+6. **标准化数值特征**：使用 StandardScaler
+7. **验证集调优**：使用 TimeSeriesSplit 进行超参搜索
+
+**AVOID 规避：**
+1. 不使用 'No' 列作为特征
+2. 不对目标变量 pm2.5 做标准化/归一化
+3. 不使用统一填充策略（目标列用时间序列插值，特征列用中位数/众数）
+4. 不忽略时间序列特性（使用 TimeSeriesSplit）
+5. 不在测试集上调优
+6. 对 Is/Ir 创建二值特征，而非仅做 log1p
+
+**Pipeline 实现：**
+- preprocess：丢弃 No 列，处理目标列缺失值（ffill+bfill），确保数值列类型正确
+- feature_engineering：构建时间循环特征、log1p 变换、二值指示特征、OneHot 编码
+- build_model：返回包含预处理+特征工程+LightGBM 的完整 Pipeline
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMRegressor
+import re
+
+# 全局变量：目标列名
+TARGET_COL = 'pm2.5'
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    df = df.copy()
+    
+    # 1. 丢弃 ID 列 'No'（MUST DO #1）
+    df = df.drop(columns=['No'], errors='ignore')
+    
+    # 2. 清洗列名：移除特殊字符，防止 LightGBM 报 JSON 特殊字符错误
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 确保数值列类型正确（防止 object 类型数值列导致后续错误）
+    # 已知数值列（排除目标列和类别列）
+    numeric_cols = ['year', 'month', 'day', 'hour', 'DEWP', 'TEMP', 'PRES', 'Iws', 'Is', 'Ir']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 目标列也确保为数值类型
+    if TARGET_COL in df.columns:
+        df[TARGET_COL] = pd.to_numeric(df[TARGET_COL], errors='coerce')
+    
+    # 4. 处理目标变量 'pm2.5' 的缺失值（MUST DO #2）
+    # 使用时间序列插值：前向填充 + 后向填充（保持时间连续性）
+    if TARGET_COL in df.columns:
+        df[TARGET_COL] = df[TARGET_COL].ffill().bfill()
+    
+    # 5. 处理特征列的缺失值（如果有的话）
+    # 数值特征用中位数填充，类别特征用众数填充
+    # 注意：这里做初步填充，Pipeline 中还会再做一次（双重保险）
+    for col in df.columns:
+        if col == TARGET_COL:
+            continue
+        if df[col].dtype in ['object', 'category', 'str']:
+            if df[col].isnull().any():
+                df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'missing')
+        else:
+            if df[col].isnull().any():
+                df[col] = df[col].fillna(df[col].median())
+    
+    return df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    
+    包含：
+    - 时间循环特征（hour, month 的 sin/cos 编码）
+    - 右偏特征 log1p 变换（Iws, Is, Ir）
+    - 二值指示特征（is_raining, is_snowing）
+    - 类别特征 OneHot 编码（cbwd）
+    - 数值特征标准化
+    '''
+    df = df.copy()
+    
+    # 分离目标列（如果存在）
+    y = None
+    if TARGET_COL in df.columns:
+        y = df[TARGET_COL]
+        df = df.drop(columns=[TARGET_COL])
+    
+    # 1. 构建时间循环特征（MUST DO #5）
+    # hour 循环编码（0-23 -> sin/cos）
+    if 'hour' in df.columns:
+        hour = df['hour'].astype(float)
+        df['hour_sin'] = np.sin(2 * np.pi * hour / 24.0)
+        df['hour_cos'] = np.cos(2 * np.pi * hour / 24.0)
+    
+    # month 循环编码（1-12 -> sin/cos）
+    if 'month' in df.columns:
+        month = df['month'].astype(float)
+        df['month_sin'] = np.sin(2 * np.pi * month / 12.0)
+        df['month_cos'] = np.cos(2 * np.pi * month / 12.0)
+    
+    # 2. 对高度右偏特征做 log1p 变换（MUST DO #3）
+    skewed_cols = ['Iws', 'Is', 'Ir']
+    for col in skewed_cols:
+        if col in df.columns:
+            # 确保非负（log1p 要求 >= 0）
+            df[col] = df[col].clip(lower=0)
+            df[col + '_log1p'] = np.log1p(df[col])
+    
+    # 3. 创建二值指示特征（MUST DO #6 的补充，AVOID #6）
+    if 'Is' in df.columns:
+        df['is_snowing'] = (df['Is'] > 0).astype(int)
+    if 'Ir' in df.columns:
+        df['is_raining'] = (df['Ir'] > 0).astype(int)
+    
+    # 4. 确保所有列都是数值类型（类别列 cbwd 将在 Pipeline 中由 OneHotEncoder 处理）
+    # 这里不做 OneHot 编码，留给 Pipeline 中的 ColumnTransformer 处理
+    
+    # 5. 如果目标列存在，重新附加（但 feature_engineering 应该返回不含目标列的 X）
+    # 根据系统要求，feature_engineering 返回的 df 应该是不含目标列的特征矩阵
+    # 目标列的处理由系统骨架负责
+    
+    return df
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的 Pipeline 对象（支持 fit/predict）。
+    
+    Pipeline 结构：
+    1. ColumnTransformer：
+       - 类别特征：SimpleImputer + OneHotEncoder
+       - 数值特征：SimpleImputer + StandardScaler
+    2. LightGBM 回归器（带正则化防止过拟合）
+    '''
+    # 定义类别特征列（cbwd 是唯一的类别特征）
+    cat_cols = ['cbwd']
+    
+    # 定义数值特征列（所有其他列，包括原始数值列和工程特征列）
+    # 注意：这里使用 'passthrough' 处理未明确列出的列，确保所有列都被处理
+    # 但我们需要明确列出数值列以应用 StandardScaler
+    
+    # 类别特征 Pipeline
+    cat_pipeline = Pipeline([
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+    
+    # 数值特征 Pipeline
+    num_pipeline = Pipeline([
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', StandardScaler())
+    ])
+    
+    # ColumnTransformer：根据列类型分别处理
+    # 使用 make_column_selector 或显式指定列名
+    # 由于 feature_engineering 会动态添加列，这里使用 selector 更灵活
+    from sklearn.compose import make_column_selector
+    
+    preprocessor = ColumnTransformer([
+        ('cat', cat_pipeline, make_column_selector(dtype_include=['object', 'category', 'str'])),
+        ('num', num_pipeline, make_column_selector(dtype_include=['number']))
+    ], remainder='passthrough')
+    
+    # LightGBM 回归器（MUST DO：防止过拟合的配置）
+    # 数据集约 35059 行，属于中等规模，可以使用适中的树深度
+    lgbm = LGBMRegressor(
+        objective='regression',
+        metric='rmse',
+        n_estimators=300,           # 适中的树数量
+        max_depth=8,                # 限制深度防止过拟合（MUST DO 过拟合控制）
+        num_leaves=63,              # 适中的叶子数
+        learning_rate=0.05,         # 较小的学习率
+        subsample=0.8,              # 行采样（MUST DO 过拟合控制）
+        colsample_bytree=0.8,       # 列采样
+        reg_alpha=0.1,              # L1 正则化
+        reg_lambda=0.1,             # L2 正则化
+        min_child_samples=20,       # 叶子最小样本数（MUST DO 过拟合控制）
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1                  # 静默模式
+    )
+    
+    # 完整 Pipeline
+    pipeline = Pipeline([
+        ('preprocess', preprocessor),
+        ('model', lgbm)
+    ])
+    
+    return pipeline
+```
+</code>
+[ERROR] 初始代码执行失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ia31o4bh\script.py", line 282, in <module>
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 612, in fit
+    routed_params = self._check_method_params(method="fit", props=params)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 418, in _check_method_params
+    raise ValueError(
+ValueError: Pipeline.fit does not accept the eval_set parameter. You can pass parameters to specific steps of your pipeline using the stepname__parameter format, e.g. `Pipeline.fit(X, y, logisticregression__sample_weight=sample_weight)`.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ia31o4bh\script.py", line 287, in <module>
+    model.fit(X_train_fe, y_train)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 621, in fit
+    self._final_estimator.fit(Xt, y, **last_step_params["fit"])
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1398, in fit
+    super().fit(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 949, in fit
+    _X, _y = _LGBMValidateData(
+             ^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 2919, in validate_data
+    X, y = check_X_y(X, y, **check_params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 1331, in check_X_y
+    y = _check_y(y, multi_output=multi_output, y_numeric=y_numeric, estimator=estimator)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 1353, in _check_y
+    _assert_all_finite(y, input_name="y", estimator_name=estimator_name)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 133, in _assert_all_finite
+    _assert_all_finite_element_wise(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 182, in _assert_all_finite_element_wise
+    raise ValueError(msg_err)
+ValueError: Input y contains NaN.
+
+[ERROR] 第 1 次代码执行失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ia31o4bh\script.py", line 282, in <module>
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 612, in fit
+    routed_params = self._check_method_params(method="fit", props=params)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 418, in _check_method_params
+    raise ValueError(
+ValueError: Pipeline.fit does not accept the eval_set parameter. You can pass parameters to specific steps of your pipeline using the stepname__parameter format, e.g. `Pipeline.fit(X, y, logisticregression__sample_weight=sample_weight)`.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ia31o4bh\script.py", line 287, in <module>
+    model.fit(X_train_fe, y_train)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 621, in fit
+    self._final_estimator.fit(Xt, y, **last_step_params["fit"])
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1398, in fit
+    super().fit(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 949, in fit
+    _X, _y = _LGBMValidateData(
+             ^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 2919, in validate_data
+    X, y = check_X_y(X, y, **check_params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 1331, in check_X_y
+    y = _check_y(y, multi_output=multi_output, y_numeric=y_numeric, estimator=estimator)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 1353, in _check_y
+    _assert_all_finite(y, input_name="y", estimator_name=estimator_name)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 133, in _assert_all_finite
+    _assert_all_finite_element_wise(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 182, in _assert_all_finite_element_wise
+    raise ValueError(msg_err)
+ValueError: Input y contains NaN.
+
+[ERROR] Debug 代码验证失败: 第1次Debug修复代码 语法错误: unexpected indent (<unknown>, line 280)
+[ERROR] 第 1 次修复后执行仍失败:
+代码验证失败: 第1次Debug修复代码 语法错误: unexpected indent (<unknown>, line 280)
+[ERROR] 第 2 次代码执行失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ia31o4bh\script.py", line 282, in <module>
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 612, in fit
+    routed_params = self._check_method_params(method="fit", props=params)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 418, in _check_method_params
+    raise ValueError(
+ValueError: Pipeline.fit does not accept the eval_set parameter. You can pass parameters to specific steps of your pipeline using the stepname__parameter format, e.g. `Pipeline.fit(X, y, logisticregression__sample_weight=sample_weight)`.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ia31o4bh\script.py", line 287, in <module>
+    model.fit(X_train_fe, y_train)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 621, in fit
+    self._final_estimator.fit(Xt, y, **last_step_params["fit"])
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1398, in fit
+    super().fit(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 949, in fit
+    _X, _y = _LGBMValidateData(
+             ^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 2919, in validate_data
+    X, y = check_X_y(X, y, **check_params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 1331, in check_X_y
+    y = _check_y(y, multi_output=multi_output, y_numeric=y_numeric, estimator=estimator)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 1353, in _check_y
+    _assert_all_finite(y, input_name="y", estimator_name=estimator_name)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 133, in _assert_all_finite
+    _assert_all_finite_element_wise(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 182, in _assert_all_finite_element_wise
+    raise ValueError(msg_err)
+ValueError: Input y contains NaN.
+
+[ERROR] Debug 代码验证失败: 第2次Debug修复代码 语法错误: unexpected indent (<unknown>, line 241)
+[ERROR] 第 2 次修复后执行仍失败:
+代码验证失败: 第2次Debug修复代码 语法错误: unexpected indent (<unknown>, line 241)
+[ERROR] 第 3 次代码执行失败:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ia31o4bh\script.py", line 282, in <module>
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 612, in fit
+    routed_params = self._check_method_params(method="fit", props=params)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 418, in _check_method_params
+    raise ValueError(
+ValueError: Pipeline.fit does not accept the eval_set parameter. You can pass parameters to specific steps of your pipeline using the stepname__parameter format, e.g. `Pipeline.fit(X, y, logisticregression__sample_weight=sample_weight)`.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_ia31o4bh\script.py", line 287, in <module>
+    model.fit(X_train_fe, y_train)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\base.py", line 1336, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\pipeline.py", line 621, in fit
+    self._final_estimator.fit(Xt, y, **last_step_params["fit"])
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 1398, in fit
+    super().fit(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\lightgbm\sklearn.py", line 949, in fit
+    _X, _y = _LGBMValidateData(
+             ^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 2919, in validate_data
+    X, y = check_X_y(X, y, **check_params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 1331, in check_X_y
+    y = _check_y(y, multi_output=multi_output, y_numeric=y_numeric, estimator=estimator)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 1353, in _check_y
+    _assert_all_finite(y, input_name="y", estimator_name=estimator_name)
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 133, in _assert_all_finite
+    _assert_all_finite_element_wise(
+  File "D:\git_vscode\ml-workflow\backend\venv\Lib\site-packages\sklearn\utils\validation.py", line 182, in _assert_all_finite_element_wise
+    raise ValueError(msg_err)
+ValueError: Input y contains NaN.
+
+[ERROR] Debug 代码验证失败: 第3次Debug修复代码 语法错误: unexpected indent (<unknown>, line 244)
+[ERROR] 第 3 次修复后执行仍失败:
+代码验证失败: 第3次Debug修复代码 语法错误: unexpected indent (<unknown>, line 244)

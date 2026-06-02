@@ -1,0 +1,65 @@
+============================================================
+  任务运行摘要: 糖尿病预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: Outcome
+  评估指标: AUC
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 72.50
+  总耗时: 0.0s
+  验证集 AUC: 0.8004
+  测试集 F1: 0.6154
+  测试集 AUC: 0.7867
+
+【各阶段耗时】
+  意图识别: 0.9s
+  代码生成: 12.2s
+  沙箱执行: 17.6s
+  评估优化: 15.9s
+  产物生成: 63.3s
+  测试预测: 0.0s
+  总计: 157.8s
+
+【Token 消耗】
+  Plan/Coding 调用: 5 次, 55521 tokens
+  Evaluation 调用: 4 次, 9266 tokens
+  总计: 9 次, 64787 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 4022tokens | 0.9s
+    - qwen3.5-flash@openai: 1 calls, 4022 tokens, 0.9s
+  plan_coding : deepseek-v4-flash@openai | 5calls | 55521tokens | 112.6s
+    - deepseek-v4-flash@openai: 4 calls, 45306 tokens, 54.8s
+    - deepseek-v4-pro@openai: 1 calls, 10215 tokens, 57.8s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9266tokens | 15.9s
+    - deepseek-v4-flash@openai: 4 calls, 9266 tokens, 15.9s
+  judge       : qwen3.5-flash@openai | 1calls | 1610tokens | 2.3s
+    - qwen3.5-flash@openai: 1 calls, 1610 tokens, 2.3s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：AUC】为核心标准。模型在验证集上的 AUC 为 0.8004，在测试集上的 AUC 为 0.7867。核心指标表现良好（>0.7），且测试集与验证集的相对差距约为 1.7% ((0.8004-0.7867)/0.8004)，远小于 20% 的可接受阈值，表明模型泛化能力一致，未出现严重过拟合或分布偏移。虽然 F1 分数 (0.6154) 略低于常规优秀水平，但鉴于任务明确指定 AUC 为主要指标，且 AUC 表现稳健，模型整体质量符合交付标准。...
+
+【维度评分】
+  unknown: 70.0 (weight=0.3)
+  unknown: 85.0 (weight=0.25)
+  unknown: 75.0 (weight=0.2)
+  unknown: 70.0 (weight=0.15)
+  unknown: 65.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 17:17:02 UTC
+============================================================

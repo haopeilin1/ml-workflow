@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": null,
+    "val_accuracy": null,
+    "val_f1_macro": null,
+    "val_rmse": 5031.642035610384,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": null,
+    "accuracy": null,
+    "f1": null,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": 5942.421172749952,
+    "mae": 3402.8470862979098,
+    "r2": 0.7786667920593424
+  },
+  "best_score": 55.0,
+  "task_type": "regression",
+  "target_column": "charges",
+  "eval_metric": "RMSE",
+  "complexity": "simple",
+  "complexity_reason": "LLM判定为simple，无复杂信号触发",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

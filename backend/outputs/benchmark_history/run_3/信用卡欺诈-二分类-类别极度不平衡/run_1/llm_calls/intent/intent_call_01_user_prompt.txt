@@ -1,0 +1,732 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于信用卡交易数据构建二分类模型，识别欺诈交易。数据集包含交易时间、金额及28个经PCA匿名化的特征，类别极度不平衡（欺诈率约0.18%）。要求使用训练集建模，对测试集输出欺诈概率，以ROC-AUC为唯一评估指标，衡量模型区分正负样本的能力。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 20000,
+  "col_count": 32,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 20000,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        105204.0,
+        144398.0,
+        59651.0,
+        111162.0,
+        99101.0
+      ],
+      "min": 0.0,
+      "max": 149998.0,
+      "mean": 75088.292,
+      "std": 43007.066854256715,
+      "median": 75069.0,
+      "skewness": 0.0029664607355941877,
+      "isMonotonic": false
+    },
+    {
+      "name": "Time",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 10288,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        61961.0,
+        72792.0,
+        49552.0,
+        63565.0,
+        60597.0
+      ],
+      "min": 0.0,
+      "max": 73899.0,
+      "mean": 49912.72445,
+      "std": 18529.86598666046,
+      "median": 53800.0,
+      "skewness": -1.0359159386887695
+    },
+    {
+      "name": "feat1",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19931,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        1.18669528,
+        -0.98754036,
+        -0.798065953,
+        -1.413828283,
+        1.238839783
+      ],
+      "min": -21.83668276,
+      "max": 2.331936391,
+      "mean": 0.07191147206180001,
+      "std": 1.3675121032926651,
+      "median": 0.685093871,
+      "skewness": -2.30200813832758
+    },
+    {
+      "name": "feat2",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19934,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.152813234,
+        0.766277799,
+        -2.449567014,
+        -0.377825331,
+        -0.164815385
+      ],
+      "min": -44.24791434,
+      "max": 10.5825125,
+      "mean": -0.01459726782545,
+      "std": 1.2310615765617232,
+      "median": -0.00397833,
+      "skewness": -5.502007651864941
+    },
+    {
+      "name": "feat3",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19922,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.25857155,
+        1.8125818,
+        -0.038781065,
+        1.989935655,
+        -0.327844237
+      ],
+      "min": -18.26666026,
+      "max": 3.56635364,
+      "mean": 0.7364214202908,
+      "std": 1.0017827613889052,
+      "median": 0.82408023,
+      "skewness": -1.5726131541760944
+    },
+    {
+      "name": "feat4",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19935,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.918952219,
+        2.898367725,
+        -2.085898574,
+        0.299884436,
+        0.347870583
+      ],
+      "min": -5.069483613,
+      "max": 12.54799704,
+      "mean": 0.10736565287190002,
+      "std": 1.2438915311265848,
+      "median": 0.094192363,
+      "skewness": 0.14087545575644453
+    },
+    {
+      "name": "feat5",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19933,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.281399372,
+        0.195538774,
+        -0.823339936,
+        0.134460643,
+        1.72225509
+      ],
+      "min": -9.241597177,
+      "max": 34.58125978,
+      "mean": -0.2543370482415,
+      "std": 1.0758420776189919,
+      "median": -0.3302655835,
+      "skewness": 2.6862744363898043
+    },
+    {
+      "name": "feat6",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19924,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        1.302317013,
+        1.591377335,
+        -0.826142906,
+        -0.351605473,
+        3.957329718
+      ],
+      "min": -25.65975029,
+      "max": 6.628968141,
+      "mean": 0.1594909753755,
+      "std": 1.1999244998961136,
+      "median": -0.06571083350000001,
+      "skewness": 0.8588835220369284
+    },
+    {
+      "name": "feat7",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19937,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.636983667,
+        -0.898459989,
+        1.507564345,
+        -0.380148504,
+        -1.097088279
+      ],
+      "min": -31.17979912,
+      "max": 10.09841028,
+      "mean": -0.1787720814327,
+      "std": 0.8295691338914702,
+      "median": -0.15755543900000002,
+      "skewness": -3.4316877619452097
+    },
+    {
+      "name": "feat8",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19928,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.463153024,
+        1.180922873,
+        -0.356501703,
+        0.437858333,
+        1.050647787
+      ],
+      "min": -23.06826183,
+      "max": 8.49593845,
+      "mean": 0.1703969295201,
+      "std": 0.6878903581840428,
+      "median": 0.130854477,
+      "skewness": -5.831749352274434
+    },
+    {
+      "name": "feat9",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19926,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.788473634,
+        -0.365817158,
+        -2.929144969,
+        0.243858144,
+        0.378089154
+      ],
+      "min": -6.82357287,
+      "max": 6.938676824,
+      "mean": -0.13499660144929998,
+      "std": 0.9967149243133764,
+      "median": -0.176800598,
+      "skewness": 0.29895938790403315
+    },
+    {
+      "name": "feat10",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19934,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.005700142,
+        0.16161555,
+        0.652499182,
+        -0.943279965,
+        -0.038952827
+      ],
+      "min": -16.03960597,
+      "max": 11.6198683,
+      "mean": -0.016082453331899997,
+      "std": 0.7776026675049396,
+      "median": -0.0838923195,
+      "skewness": 0.312322708301912
+    },
+    {
+      "name": "feat11",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19931,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.405046609,
+        -0.939686466,
+        1.353317454,
+        -1.127567141,
+        -0.435049798
+      ],
+      "min": -3.215914491,
+      "max": 5.566369549,
+      "mean": 0.1639088570521,
+      "std": 0.9799848153322247,
+      "median": 0.0980676225,
+      "skewness": 0.04596778597934933
+    },
+    {
+      "name": "feat12",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19935,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.395959805,
+        -0.396523663,
+        0.230089666,
+        -0.228816245,
+        0.187875896
+      ],
+      "min": -9.37756956,
+      "max": 5.306747247,
+      "mean": -0.005279467661799998,
+      "std": 0.9344109575020138,
+      "median": 0.094037923,
+      "skewness": -1.1125723382627721
+    },
+    {
+      "name": "feat13",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19934,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.636952433,
+        -1.156849231,
+        1.068492618,
+        -0.446413755,
+        0.044908766
+      ],
+      "min": -3.996733889,
+      "max": 5.97626475,
+      "mean": -0.0674213887095,
+      "std": 1.0095924318380085,
+      "median": -0.06468422,
+      "skewness": 0.06417816982204326
+    },
+    {
+      "name": "feat14",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19932,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.090536781,
+        -1.12283364,
+        -0.146626271,
+        -0.304878003,
+        -0.065667029
+      ],
+      "min": -13.71110505,
+      "max": 5.959229475,
+      "mean": 0.0280099314509,
+      "std": 0.7485051624202229,
+      "median": 0.0158473265,
+      "skewness": -1.0156894275658361
+    },
+    {
+      "name": "feat15",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19941,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.202449671,
+        -0.566055018,
+        -0.499960555,
+        0.373389775,
+        0.768883859
+      ],
+      "min": -3.351439088,
+      "max": 3.373323185,
+      "mean": 0.16397337508055,
+      "std": 0.881578759892514,
+      "median": 0.2427373765,
+      "skewness": -0.4838682150537355
+    },
+    {
+      "name": "feat16",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19939,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.087233967,
+        0.48609813,
+        -1.036068581,
+        -0.019836685,
+        0.546253964
+      ],
+      "min": -8.053359397,
+      "max": 4.180925133,
+      "mean": 0.027986948394899996,
+      "std": 0.8000318788568904,
+      "median": 0.0665547395,
+      "skewness": -0.5003950180087997
+    },
+    {
+      "name": "feat17",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19936,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.505429662,
+        0.938786725,
+        0.470016663,
+        0.056447176,
+        -0.827144899
+      ],
+      "min": -12.13377501,
+      "max": 5.926491267,
+      "mean": 0.0463062137378,
+      "std": 0.6809672358095844,
+      "median": -0.0024864205,
+      "skewness": -0.47357502097001736
+    },
+    {
+      "name": "feat18",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19930,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.353850599,
+        0.979170741,
+        0.391666503,
+        0.072412756,
+        0.497555596
+      ],
+      "min": -6.709614173,
+      "max": 2.783701181,
+      "mean": -0.08533606442265,
+      "std": 0.7941112108479245,
+      "median": -0.0728584555,
+      "skewness": -0.1291874059021625
+    },
+    {
+      "name": "feat19",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19938,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.36456889,
+        1.114049097,
+        -0.164040654,
+        -0.054248658,
+        -0.002833881
+      ],
+      "min": -3.170199668,
+      "max": 3.836182419,
+      "mean": -0.004979855875550001,
+      "std": 0.7404592159318121,
+      "median": -0.002613008,
+      "skewness": -0.08749607672238771
+    },
+    {
+      "name": "feat20",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19939,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.175912983,
+        0.162858779,
+        0.974409802,
+        0.295539754,
+        -0.011698786
+      ],
+      "min": -8.848898284,
+      "max": 8.637667056,
+      "mean": 0.01863746487365,
+      "std": 0.4292088142645506,
+      "median": -0.0298736345,
+      "skewness": 1.8973638565897766
+    },
+    {
+      "name": "feat21",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19940,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.071085229,
+        -0.019913957,
+        0.540733755,
+        0.22141728,
+        -0.033869578
+      ],
+      "min": -7.869381828,
+      "max": 22.06294548,
+      "mean": -0.02352402309085,
+      "std": 0.43132439218184826,
+      "median": -0.0403349715,
+      "skewness": 11.09963031859249
+    },
+    {
+      "name": "feat22",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19936,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.183667756,
+        -0.06253399,
+        0.928992706,
+        0.390737142,
+        -0.078877651
+      ],
+      "min": -5.052655648,
+      "max": 2.764944891,
+      "mean": -0.0652253331477,
+      "std": 0.5731237096949792,
+      "median": -0.0392591585,
+      "skewness": -0.24009999065550716
+    },
+    {
+      "name": "feat23",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19937,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.222801071,
+        -0.30083814,
+        1.356629358,
+        -0.173844187,
+        -0.031607449
+      ],
+      "min": -9.846372699,
+      "max": 9.383398654,
+      "mean": -0.06104100046995001,
+      "std": 0.3143204143164529,
+      "median": -0.06809657499999999,
+      "skewness": 0.6397373214081227
+    },
+    {
+      "name": "feat24",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19925,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -1.270139357,
+        -1.410889527,
+        0.311901582,
+        -0.061899374,
+        1.009580674
+      ],
+      "min": -2.711761625,
+      "max": 3.95,
+      "mean": -0.0021031384429499997,
+      "std": 0.5873885815120332,
+      "median": 0.039772356,
+      "skewness": -0.36492420211281806
+    },
+    {
+      "name": "feat25",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19929,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.667045791,
+        0.097261709,
+        -0.237558981,
+        0.331328682,
+        0.47281248
+      ],
+      "min": -2.71708567,
+      "max": 2.131357246,
+      "mean": 0.16110954869385,
+      "std": 0.3854788209867183,
+      "median": 0.1827563625,
+      "skewness": -0.5465392130235206
+    },
+    {
+      "name": "feat26",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19936,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.171837154,
+        0.447897993,
+        -0.140977792,
+        0.506826374,
+        -0.356655131
+      ],
+      "min": -1.316522143,
+      "max": 3.012216085,
+      "mean": 0.023099167436900003,
+      "std": 0.47397890396304004,
+      "median": -0.08759803499999999,
+      "skewness": 0.8231019893612941
+    },
+    {
+      "name": "feat27",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19932,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.063279452,
+        0.058687701,
+        -0.045030454,
+        0.052717291,
+        0.07689968
+      ],
+      "min": -4.501916016,
+      "max": 3.811148915,
+      "mean": 0.0124410080009,
+      "std": 0.22303100729590578,
+      "median": 0.0169564075,
+      "skewness": -2.8993934857898416
+    },
+    {
+      "name": "feat28",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 19926,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        -0.004261247,
+        0.101133577,
+        0.051879267,
+        0.087263923,
+        0.019007662
+      ],
+      "min": -4.454058592,
+      "max": 3.005928254,
+      "mean": 0.01829036383505,
+      "std": 0.1513867284982973,
+      "median": 0.0240348705,
+      "skewness": -5.659069539821564
+    },
+    {
+      "name": "Transaction_Amount",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 5161,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        4.99,
+        12.01,
+        527.6,
+        69.99,
+        1.0
+      ],
+      "min": 0.0,
+      "max": 3209.32,
+      "mean": 71.226256,
+      "std": 150.57829586547908,
+      "median": 25.0,
+      "skewness": 6.756406776794096
+    },
+    {
+      "name": "IsFraud",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.0018,
+      "std": 0.042389265651720416,
+      "median": 0.0,
+      "skewness": 23.508301798678428
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

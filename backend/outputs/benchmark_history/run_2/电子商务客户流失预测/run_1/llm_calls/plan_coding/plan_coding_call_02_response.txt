@@ -1,0 +1,328 @@
+<plan>
+## 优化计划
+
+### 当前问题分析
+1. **AUC 0.917 vs Accuracy 0.82**：说明模型排序能力好但分类阈值（默认0.5）可能不是最优，需要优化阈值
+2. **过拟合风险**：当前模型配置（num_leaves=31, max_depth=6, n_estimators=500）可能偏复杂，需要更强的正则化
+3. **特征工程可增强**：当前只做了简单的交互特征，可以增加更多有意义的特征
+
+### 优化策略
+
+#### 1. 预处理优化
+- 保持现有预处理逻辑（已正确实现）
+- 确保 `StreamingTV` 和 `StreamingMovies` 正确转换为数值
+- 确保 `id` 列被丢弃
+
+#### 2. 特征工程增强
+- 保留现有交互特征（tenure_monthly_ratio, avg_monthly_total, tenure_group）
+- 新增特征：
+  - `charges_per_service`：月费与使用服务数的比值
+  - `service_count`：客户订阅的服务数量
+  - `has_multiple_services`：是否订阅了多项服务
+  - `is_high_risk_contract`：是否为月付合同且无技术支持
+  - `tenure_squared`：tenure的平方项（捕捉非线性关系）
+  - `monthly_charges_squared`：MonthlyCharges的平方项
+
+#### 3. 模型优化
+- 降低 `learning_rate` 到 0.03，增加 `n_estimators` 到 800（配合早停）
+- 增加正则化：`reg_alpha=0.5`, `reg_lambda=0.5`
+- 降低 `num_leaves` 到 24，`max_depth` 保持 6
+- 增加 `min_child_samples` 到 30
+- 使用 `scale_pos_weight` 处理类别不平衡
+
+#### 4. 阈值优化（关键）
+- 在 `evaluate_model` 中，使用验证集搜索最优阈值（最大化 F1 或 G-mean）
+- 返回优化后的指标
+
+#### 5. 早停配置
+- 使用 `callbacks=[lgb.early_stopping(stopping_rounds=50)]` 防止过拟合
+- 设置 `eval_metric='auc'` 作为早停监控指标
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量，用于存储训练时拟合的预处理器
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃id列（防止过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 将StreamingTV和StreamingMovies从字符串转换为数值
+    for col in ['StreamingTV', 'StreamingMovies']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 3. 处理目标列（仅在训练/验证时存在）
+    if 'Churn' in df.columns:
+        df['Churn'] = df['Churn'].map({'Yes': 1, 'No': 0}).astype(int)
+    
+    # 4. 识别类别列和数值列
+    cat_cols = ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines',
+                'InternetService', 'OnlineSecurity', 'OnlineBackup', 'DeviceProtection',
+                'TechSupport', 'Contract', 'PaperlessBilling', 'PaymentMethod']
+    # 只保留数据中实际存在的列
+    cat_cols = [c for c in cat_cols if c in df.columns]
+    
+    # 数值列：所有非类别、非目标、非id的列
+    exclude_cols = set(cat_cols + ['Churn', 'id'])
+    num_cols = [c for c in df.columns if c not in exclude_cols and df[c].dtype in ['int64', 'float64']]
+    
+    if mode == 'train':
+        # 构建预处理器
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 分离特征和目标
+        if 'Churn' in df.columns:
+            X = df.drop(columns=['Churn'])
+            y = df['Churn']
+        else:
+            X = df
+            y = None
+        
+        # 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        PREPROCESS_STATE['feature_names'] = preprocessor.get_feature_names_out()
+        
+        # 转换数据
+        X_transformed = preprocessor.transform(X)
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(X_transformed, columns=PREPROCESS_STATE['feature_names'])
+        if y is not None:
+            processed_df['Churn'] = y.values
+        
+        return processed_df
+    
+    elif mode == 'test':
+        # 加载已拟合的预处理器
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        
+        # 分离特征和目标
+        if 'Churn' in df.columns:
+            X = df.drop(columns=['Churn'])
+            y = df['Churn']
+        else:
+            X = df
+            y = None
+        
+        # 转换数据
+        X_transformed = preprocessor.transform(X)
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(X_transformed, columns=PREPROCESS_STATE['feature_names'])
+        if y is not None:
+            processed_df['Churn'] = y.values
+        
+        return processed_df
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 分离目标列（如果存在）
+    if 'Churn' in df.columns:
+        y = df['Churn']
+        X = df.drop(columns=['Churn'])
+    else:
+        X = df
+    
+    # 查找关键列
+    tenure_cols = [c for c in X.columns if 'tenure' in c.lower()]
+    monthly_charges_cols = [c for c in X.columns if 'MonthlyCharges' in c.lower()]
+    total_charges_cols = [c for c in X.columns if 'TotalCharges' in c.lower()]
+    
+    # 创建tenure与MonthlyCharges的交互特征
+    if tenure_cols and monthly_charges_cols:
+        tenure_col = tenure_cols[0]
+        monthly_col = monthly_charges_cols[0]
+        # 平均每月费用（避免除零）
+        X['tenure_monthly_ratio'] = np.where(
+            X[tenure_col] > 0,
+            X[monthly_col] / X[tenure_col],
+            0
+        )
+    
+    # 创建TotalCharges与tenure的比值
+    if total_charges_cols and tenure_cols:
+        total_col = total_charges_cols[0]
+        tenure_col = tenure_cols[0]
+        X['avg_monthly_total'] = np.where(
+            X[tenure_col] > 0,
+            X[total_col] / X[tenure_col],
+            0
+        )
+    
+    # 创建tenure的分组特征（短期/中期/长期客户）
+    if tenure_cols:
+        tenure_col = tenure_cols[0]
+        X['tenure_group'] = pd.cut(
+            X[tenure_col],
+            bins=[-np.inf, 12, 24, 48, np.inf],
+            labels=[0, 1, 2, 3]
+        ).astype(float)
+    
+    # 新增特征1：tenure的平方项（捕捉非线性关系）
+    if tenure_cols:
+        tenure_col = tenure_cols[0]
+        X['tenure_squared'] = X[tenure_col] ** 2
+    
+    # 新增特征2：MonthlyCharges的平方项
+    if monthly_charges_cols:
+        monthly_col = monthly_charges_cols[0]
+        X['monthly_charges_squared'] = X[monthly_col] ** 2
+    
+    # 新增特征3：服务数量统计
+    # 查找OneHotEncoder生成的列名中与服务相关的列
+    service_cols = [c for c in X.columns if any(s in c.lower() for s in 
+                    ['PhoneService', 'MultipleLines', 'InternetService', 
+                     'OnlineSecurity', 'OnlineBackup', 'DeviceProtection',
+                     'TechSupport', 'StreamingTV', 'StreamingMovies'])]
+    # 只保留数值列（OneHotEncoder生成的0/1列）
+    service_cols = [c for c in service_cols if X[c].dtype in ['int64', 'float64']]
+    if service_cols:
+        X['service_count'] = X[service_cols].sum(axis=1)
+    
+    # 新增特征4：月费与服务数的比值
+    if monthly_charges_cols and service_cols:
+        monthly_col = monthly_charges_cols[0]
+        X['charges_per_service'] = np.where(
+            X['service_count'] > 0,
+            X[monthly_col] / X['service_count'],
+            0
+        )
+    
+    # 新增特征5：是否为高风险合同（月付且无技术支持）
+    contract_monthly_cols = [c for c in X.columns if 'Contract_Month' in c]
+    tech_support_no_cols = [c for c in X.columns if 'TechSupport_No' in c]
+    if contract_monthly_cols and tech_support_no_cols:
+        X['high_risk_contract'] = (
+            X[contract_monthly_cols[0]] * X[tech_support_no_cols[0]]
+        ).astype(float)
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 填充可能的NaN值
+    X = X.fillna(0)
+    
+    # 如果存在目标列，将其加回（供后续训练使用）
+    if 'Churn' in locals() or 'y' in locals():
+        X['Churn'] = y.values
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（Churn比例约22.5%）
+    # 使用scale_pos_weight处理不平衡
+    scale_pos_weight = (475355 - 107054) / 107054  # 非流失/流失 ≈ 3.44
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=24,           # 降低复杂度，防止过拟合
+        max_depth=6,             # 保持合理深度
+        learning_rate=0.03,      # 降低学习率，配合更多迭代
+        n_estimators=800,        # 增加迭代次数，配合早停
+        subsample=0.7,           # 降低采样率，增加随机性
+        colsample_bytree=0.7,    # 降低特征采样率
+        min_child_samples=30,    # 增加最小叶子样本数
+        min_child_weight=1e-3,
+        reg_alpha=0.5,           # 增加L1正则化
+        reg_lambda=0.5,          # 增加L2正则化
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1,
+        metric='auc'             # 使用AUC作为早停监控指标
+    )
+    
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    同时优化分类阈值以最大化F1分数。
+    """
+    # 获取预测概率
+    val_probs = model.predict_proba(X_val)[:, 1]
+    
+    # 计算AUC
+    val_auc = float(roc_auc_score(y_val, val_probs))
+    
+    # 搜索最优阈值（最大化F1）
+    best_threshold = 0.5
+    best_f1 = 0.0
+    thresholds = np.arange(0.3, 0.7, 0.01)
+    
+    for threshold in thresholds:
+        val_preds = (val_probs >= threshold).astype(int)
+        f1 = f1_score(y_val, val_preds)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+    
+    # 使用最优阈值计算指标
+    val_preds_optimized = (val_probs >= best_threshold).astype(int)
+    val_accuracy = float(accuracy_score(y_val, val_preds_optimized))
+    val_f1 = float(best_f1)
+    
+    # 保存最优阈值到全局状态（供测试预测使用）
+    PREPROCESS_STATE['best_threshold'] = best_threshold
+    
+    return {
+        'val_auc': val_auc,
+        'val_accuracy': val_accuracy,
+        'val_f1': val_f1,
+        'val_best_threshold': best_threshold
+    }
+```
+</code>

@@ -1,0 +1,610 @@
+<plan>
+产物生成计划：
+1. 加载已保存的最佳模型（data/best_model.pkl），如果加载失败则回退到重新训练
+2. 对测试集进行预测，生成 output/test_predictions.csv（含原始数据 + prediction + 各类概率）
+3. 保存模型到 output/model.pkl
+4. 从模型提取特征重要性，生成 output/feature_importance.csv 和 output/feature_importance.png
+5. 生成混淆矩阵热力图 output/report_fig.png
+6. 生成 HTML 报告 output/report.html（含指标摘要、特征重要性表格、混淆矩阵、分类报告、预测预览）
+7. 生成独立预测脚本 output/predict.py
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import dill
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import (
+    accuracy_score, f1_score, confusion_matrix, classification_report,
+    roc_auc_score
+)
+from sklearn.preprocessing import LabelEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+
+warnings.filterwarnings('ignore')
+
+# ========== 确保输出目录存在 ==========
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局预处理状态 ==========
+PREPROCESS_STATE = {
+    'id_cols': None,
+    'bp_col': 'Blood Pressure (systolic/diastolic)',
+    'target_col': 'Sleep Disorder',
+    'fitted': False
+}
+
+# ========== 预处理函数 ==========
+def preprocess(df, mode='train'):
+    df = df.copy()
+    
+    id_cols = [
+        'Person ID',
+        'Sleep Duration (hours)',
+        'Quality of Sleep (scale: 1-10)',
+        'Physical Activity Level (minutes/day)',
+        'Stress Level (scale: 1-10)',
+        'Heart Rate (bpm)',
+        'Daily Steps'
+    ]
+    existing_id_cols = [c for c in id_cols if c in df.columns]
+    if existing_id_cols:
+        df = df.drop(columns=existing_id_cols)
+    
+    bp_col = PREPROCESS_STATE['bp_col']
+    if bp_col in df.columns:
+        bp_split = df[bp_col].str.split('/', expand=True)
+        df['Systolic BP'] = pd.to_numeric(bp_split[0], errors='coerce')
+        df['Diastolic BP'] = pd.to_numeric(bp_split[1], errors='coerce')
+        df = df.drop(columns=[bp_col])
+    
+    num_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    target_col = PREPROCESS_STATE['target_col']
+    if target_col in num_cols:
+        num_cols.remove(target_col)
+    if target_col in cat_cols:
+        cat_cols.remove(target_col)
+    
+    for col in num_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+    for col in cat_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Unknown')
+    
+    if mode == 'train':
+        PREPROCESS_STATE['fitted'] = True
+    
+    return df
+
+
+def feature_engineering(df):
+    target_col = PREPROCESS_STATE['target_col']
+    
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    gender_col = 'Gender' if 'Gender' in cat_cols else None
+    other_cat_cols = [c for c in cat_cols if c != gender_col]
+    
+    preprocessor = PREPROCESS_STATE.get('preprocessor', None)
+    
+    if preprocessor is None:
+        transformers = []
+        
+        if gender_col:
+            transformers.append(
+                ('gender', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+                ]), [gender_col])
+            )
+        
+        if other_cat_cols:
+            transformers.append(
+                ('cat', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+                ]), other_cat_cols)
+            )
+        
+        if num_cols:
+            transformers.append(
+                ('num', Pipeline([
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler())
+                ]), num_cols)
+            )
+        
+        preprocessor = ColumnTransformer(transformers, remainder='drop')
+        X_processed = preprocessor.fit_transform(X)
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+    else:
+        X_processed = preprocessor.transform(X)
+    
+    feature_names = []
+    for name, _, cols in preprocessor.transformers_:
+        if name == 'gender':
+            feature_names.append('Gender_encoded')
+        elif name == 'cat':
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            feature_names.extend(encoder.get_feature_names_out(other_cat_cols).tolist())
+        elif name == 'num':
+            feature_names.extend(cols)
+    
+    feature_names = [re.sub(r'[^\w]', '_', str(c)) for c in feature_names]
+    X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    
+    return X_processed
+
+
+def build_model():
+    model = LGBMClassifier(
+        objective='multiclass',
+        num_class=3,
+        metric='multi_logloss',
+        is_unbalance=True,
+        max_depth=4,
+        num_leaves=15,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.7,
+        colsample_bytree=0.7,
+        min_child_samples=10,
+        min_split_gain=0.01,
+        reg_alpha=0.5,
+        reg_lambda=0.5,
+        random_state=42,
+        verbose=-1,
+    )
+    return model
+
+
+# ========== 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'Sleep Disorder'
+id_col = 'Person ID'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# ========== 预处理 ==========
+train_clean = preprocess(train, mode='train')
+test_clean = preprocess(test, mode='test')
+
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+_label_encoder = None
+_is_string_target = train[target_col].dtype == object or str(train[target_col].dtype).lower() == 'category'
+if _is_string_target:
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程 ==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+for _df in [X_train_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+for _df in [X_train_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 加载或训练模型 ==========
+model = None
+model_loaded = False
+
+if os.path.exists('data/best_model.pkl'):
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = dill.load(f)
+        model_loaded = True
+        print("Successfully loaded model from data/best_model.pkl")
+    except Exception as e:
+        print(f"Failed to load data/best_model.pkl: {e}, will retrain.")
+
+if model is None:
+    print("Retraining model...")
+    model = build_model()
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 保存模型到 output/model.pkl ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 测试集预测 ==========
+test_preds = model.predict(X_test_fe)
+test_probs_all = model.predict_proba(X_test_fe)
+
+if _label_encoder is not None:
+    test_preds_labels = _label_encoder.inverse_transform(test_preds)
+else:
+    test_preds_labels = test_preds
+
+# 构建预测结果 DataFrame
+result_df = test.copy()
+result_df['prediction'] = test_preds_labels
+for i in range(test_probs_all.shape[1]):
+    class_label = _label_encoder.inverse_transform([i])[0] if _label_encoder is not None else f'class_{i}'
+    result_df[f'proba_{class_label}'] = test_probs_all[:, i]
+
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 特征重要性 ==========
+feature_names = X_train_fe.columns.tolist()
+
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    importances = np.abs(model.coef_).flatten()
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保特征重要性只包含 X 的特征（排除目标列）
+fi_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+fi_df = fi_df.sort_values('importance', ascending=False).reset_index(drop=True)
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# ========== 特征重要性图 ==========
+top_n = min(20, len(fi_df))
+fi_top = fi_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(fi_top)), fi_top['importance'].values, color='steelblue')
+plt.yticks(range(len(fi_top)), fi_top['name'].values)
+plt.gca().invert_yaxis()
+plt.xlabel('Importance')
+plt.title('Top Feature Importances')
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 混淆矩阵热力图（多分类） ==========
+# 使用训练集做交叉验证评估来生成混淆矩阵（测试集无标签）
+# 这里用训练集上的预测来展示模型拟合情况
+train_preds = model.predict(X_train_fe)
+if _label_encoder is not None:
+    train_preds_labels = _label_encoder.inverse_transform(train_preds)
+    y_train_labels = _label_encoder.inverse_transform(y_train)
+else:
+    train_preds_labels = train_preds
+    y_train_labels = y_train
+
+cm = confusion_matrix(y_train_labels, train_preds_labels)
+class_labels = sorted(set(list(y_train_labels) + list(train_preds_labels)))
+
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=class_labels, yticklabels=class_labels)
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix (Training Set)')
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Confusion matrix saved to output/report_fig.png")
+
+# ========== 计算指标 ==========
+accuracy = accuracy_score(y_train_labels, train_preds_labels)
+f1_macro = f1_score(y_train_labels, train_preds_labels, average='macro')
+f1_weighted = f1_score(y_train_labels, train_preds_labels, average='weighted')
+cr_dict = classification_report(y_train_labels, train_preds_labels, output_dict=True)
+
+metrics_summary = {
+    'accuracy': round(float(accuracy), 4),
+    'f1_macro': round(float(f1_macro), 4),
+    'f1_weighted': round(float(f1_weighted), 4),
+    'num_classes': len(class_labels),
+    'classes': class_labels
+}
+
+# ========== 生成 HTML 报告 ==========
+# 特征重要性表格 HTML
+fi_html_rows = ''
+for _, row in fi_top.iterrows():
+    fi_html_rows += f'<tr><td>{row["name"]}</td><td>{row["importance"]:.6f}</td></tr>'
+
+# 分类报告表格 HTML
+cr_html_rows = ''
+for cls_name, cls_metrics in cr_dict.items():
+    if isinstance(cls_metrics, dict):
+        cr_html_rows += f'''<tr>
+            <td>{cls_name}</td>
+            <td>{cls_metrics.get("precision", 0):.4f}</td>
+            <td>{cls_metrics.get("recall", 0):.4f}</td>
+            <td>{cls_metrics.get("f1-score", 0):.4f}</td>
+            <td>{cls_metrics.get("support", 0)}</td>
+        </tr>'''
+
+# 混淆矩阵表格 HTML
+cm_html_rows = ''
+cm_html_header = '<th></th>' + ''.join([f'<th>Pred {lbl}</th>' for lbl in class_labels])
+for i, true_label in enumerate(class_labels):
+    cm_html_rows += f'<tr><td><b>True {true_label}</b></td>'
+    for j in range(len(class_labels)):
+        cm_html_rows += f'<td>{cm[i][j]}</td>'
+    cm_html_rows += '</tr>'
+
+# 测试集预测预览
+preview_rows = ''
+for i in range(min(10, len(result_df))):
+    preview_rows += f'<tr><td>{i}</td><td>{result_df.iloc[i]["prediction"]}</td></tr>'
+
+html_content = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Sleep Disorder Classification</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; background: #f9f9f9; }}
+        h1 {{ color: #333; }}
+        h2 {{ color: #555; border-bottom: 2px solid #ddd; padding-bottom: 5px; }}
+        table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; background: #fff; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metrics {{ display: flex; gap: 20px; flex-wrap: wrap; }}
+        .metric-card {{ background: #fff; padding: 15px 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .metric-card h3 {{ margin: 0 0 5px 0; color: #4CAF50; }}
+        .metric-card p {{ margin: 0; font-size: 24px; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>Sleep Disorder Classification Report</h1>
+    
+    <h2>Model Metrics (Training Set)</h2>
+    <div class="metrics">
+        <div class="metric-card">
+            <h3>Accuracy</h3>
+            <p>{metrics_summary['accuracy']:.4f}</p>
+        </div>
+        <div class="metric-card">
+            <h3>Macro F1</h3>
+            <p>{metrics_summary['f1_macro']:.4f}</p>
+        </div>
+        <div class="metric-card">
+            <h3>Weighted F1</h3>
+            <p>{metrics_summary['f1_weighted']:.4f}</p>
+        </div>
+        <div class="metric-card">
+            <h3>Classes</h3>
+            <p>{metrics_summary['num_classes']}</p>
+        </div>
+    </div>
+    
+    <h2>Confusion Matrix</h2>
+    <table>
+        <tr>{cm_html_header}</tr>
+        {cm_html_rows}
+    </table>
+    <img src="report_fig.png" alt="Confusion Matrix" style="max-width:600px; display:block; margin:10px 0;">
+    
+    <h2>Classification Report</h2>
+    <table>
+        <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>
+        {cr_html_rows}
+    </table>
+    
+    <h2>Feature Importance (Top 20)</h2>
+    <table>
+        <tr><th>Feature</th><th>Importance</th></tr>
+        {fi_html_rows}
+    </table>
+    <img src="feature_importance.png" alt="Feature Importance" style="max-width:600px; display:block; margin:10px 0;">
+    
+    <h2>Test Predictions Preview (First 10 Rows)</h2>
+    <table>
+        <tr><th>Row</th><th>Prediction</th></tr>
+        {preview_rows}
+    </table>
+    
+    <p><em>Report generated automatically. Full predictions saved to test_predictions.csv</em></p>
+</body>
+</html>'''
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 生成独立预测脚本 ==========
+predict_script = '''#!/usr/bin/env python3
+"""独立预测脚本：加载模型对新数据进行预测"""
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+import sys
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+
+# 预处理状态（需与训练时一致）
+PREPROCESS_STATE = {
+    'bp_col': 'Blood Pressure (systolic/diastolic)',
+    'target_col': 'Sleep Disorder',
+    'preprocessor': None,
+    'label_encoder': None
+}
+
+def preprocess(df):
+    df = df.copy()
+    id_cols = [
+        'Person ID', 'Sleep Duration (hours)', 'Quality of Sleep (scale: 1-10)',
+        'Physical Activity Level (minutes/day)', 'Stress Level (scale: 1-10)',
+        'Heart Rate (bpm)', 'Daily Steps'
+    ]
+    existing_id_cols = [c for c in id_cols if c in df.columns]
+    if existing_id_cols:
+        df = df.drop(columns=existing_id_cols)
+    
+    bp_col = PREPROCESS_STATE['bp_col']
+    if bp_col in df.columns:
+        bp_split = df[bp_col].str.split('/', expand=True)
+        df['Systolic BP'] = pd.to_numeric(bp_split[0], errors='coerce')
+        df['Diastolic BP'] = pd.to_numeric(bp_split[1], errors='coerce')
+        df = df.drop(columns=[bp_col])
+    
+    num_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    target_col = PREPROCESS_STATE['target_col']
+    if target_col in num_cols:
+        num_cols.remove(target_col)
+    if target_col in cat_cols:
+        cat_cols.remove(target_col)
+    
+    for col in num_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+    for col in cat_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Unknown')
+    
+    return df
+
+
+def feature_engineering(df):
+    target_col = PREPROCESS_STATE['target_col']
+    if target_col in df.columns:
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    preprocessor = PREPROCESS_STATE.get('preprocessor', None)
+    if preprocessor is None:
+        raise ValueError("Preprocessor not loaded. Load model.pkl first.")
+    
+    X_processed = preprocessor.transform(X)
+    
+    feature_names = []
+    for name, _, cols in preprocessor.transformers_:
+        if name == 'gender':
+            feature_names.append('Gender_encoded')
+        elif name == 'cat':
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            other_cat_cols = [c for c in X.select_dtypes(include=['object', 'category']).columns if c != 'Gender']
+            feature_names.extend(encoder.get_feature_names_out(other_cat_cols).tolist())
+        elif name == 'num':
+            feature_names.extend(cols)
+    
+    feature_names = [re.sub(r'[^\\w]', '_', str(c)) for c in feature_names]
+    X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    return X_processed
+
+
+def load_model(model_path='output/model.pkl'):
+    """加载模型和预处理器"""
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    return model
+
+
+def predict(model, data_path, output_path=None):
+    """对新数据进行预测"""
+    df = pd.read_csv(data_path)
+    df_clean = preprocess(df)
+    X = feature_engineering(df_clean)
+    
+    # 清洗特征名
+    X.columns = [re.sub('[^\\w]', '_', str(c)) for c in X.columns]
+    
+    preds = model.predict(X)
+    probs = model.predict_proba(X)
+    
+    result = df.copy()
+    result['prediction'] = preds
+    
+    for i in range(probs.shape[1]):
+        result[f'proba_class_{i}'] = probs[:, i]
+    
+    if output_path:
+        result.to_csv(output_path, index=False)
+        print(f"Predictions saved to {output_path}")
+    
+    return result
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv> [output_csv]")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+    
+    model = load_model()
+    result = predict(model, input_path, output_path)
+    print(result.head())
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_loaded': model_loaded,
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report_fig.png',
+        'output/report.html',
+        'output/test_predictions.csv',
+        'output/predict.py'
+    ],
+    'metrics': metrics_summary,
+    'test_samples': len(result_df),
+    'num_features': len(feature_names)
+}
+print(json.dumps(summary))
+```
+</code>

@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": null,
+    "val_accuracy": null,
+    "val_f1_macro": null,
+    "val_rmse": 1.8724146525687624,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": null,
+    "accuracy": null,
+    "f1": null,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": 1.6500763915933645,
+    "mae": 1.1525933913017314,
+    "r2": 0.9456521081445644
+  },
+  "best_score": 87.0,
+  "task_type": "regression",
+  "target_column": "SSPL",
+  "eval_metric": "RMSE",
+  "complexity": "simple",
+  "complexity_reason": "LLM判定为simple，无复杂信号触发",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

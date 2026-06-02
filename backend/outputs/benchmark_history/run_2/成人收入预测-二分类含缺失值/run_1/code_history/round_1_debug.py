@@ -1,0 +1,1 @@
+X['age_group'] = pd.cut(X['age'], bins=[0, 25, 35, 45, 55, 100], labels=[0, 1, 2, 3, 4]).astype(int)

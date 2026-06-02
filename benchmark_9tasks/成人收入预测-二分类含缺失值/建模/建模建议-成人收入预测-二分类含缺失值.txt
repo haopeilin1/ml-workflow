@@ -1,0 +1,1 @@
+workclass、occupation和native_country列存在缺失值，建议用众数填充或单独设缺失类别。类别特征较多，需进行One-Hot或Target编码。capital_gain和capital_loss高度稀疏，建议构造总资本收益特征。

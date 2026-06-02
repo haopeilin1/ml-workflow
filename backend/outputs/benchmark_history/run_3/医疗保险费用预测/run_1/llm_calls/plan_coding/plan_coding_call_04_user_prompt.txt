@@ -1,0 +1,536 @@
+【当前运行状态 Run State】: OPTIMIZE
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.REGRESSION
+- 目标列: charges
+- 评估指标: RMSE
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于被保险人的人口统计、健康指标与生活方式数据，构建回归模型预测年度医疗保险费用（charges）。特征包括年龄、性别、BMI、受抚养人数量、是否吸烟及地理区域。评估指标采用RMSE，值越小精度越高。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- 类别特征列 ['sex', 'smoker', 'region'] 必须纳入 Pipeline 的 ColumnTransformer 中，使用 OneHotEncoder(handle_unknown='ignore') 或 OrdinalEncoder 编码，严禁直接传入模型。
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 charges。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['charges'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "train.csv",
+  "rowCount": 856,
+  "columnCount": 8,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 856,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        1.0,
+        2.0,
+        5.0,
+        6.0,
+        7.0
+      ],
+      "min": 1.0,
+      "max": 1070.0,
+      "mean": 542.3399532710281,
+      "std": 312.0957269430938,
+      "median": 546.5,
+      "skewness": -0.027121396269772908,
+      "isMonotonic": true
+    },
+    {
+      "name": "age",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 47,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        46.0,
+        47.0,
+        54.0,
+        63.0,
+        22.0
+      ],
+      "min": 18.0,
+      "max": 64.0,
+      "mean": 39.32943925233645,
+      "std": 14.144744571162816,
+      "median": 39.5,
+      "skewness": 0.03338898745558283
+    },
+    {
+      "name": "sex",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "female",
+        "female",
+        "female",
+        "male",
+        "female"
+      ],
+      "mostCommon": "male",
+      "mostCommonFreq": 440,
+      "cardinality": "low"
+    },
+    {
+      "name": "bmi",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 439,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        19.95,
+        24.32,
+        21.47,
+        41.47,
+        24.3
+      ],
+      "min": 16.815,
+      "max": 53.13,
+      "mean": 30.529293224299064,
+      "std": 6.140077832278152,
+      "median": 30.205,
+      "skewness": 0.30194175425590675
+    },
+    {
+      "name": "children",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 6,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        2.0,
+        0.0,
+        3.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 5.0,
+      "mean": 1.1144859813084111,
+      "std": 1.2315446364692235,
+      "median": 1.0,
+      "skewness": 0.9636069180272021
+    },
+    {
+      "name": "smoker",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "no",
+        "no",
+        "no",
+        "no",
+        "no"
+      ],
+      "mostCommon": "no",
+      "mostCommonFreq": 678,
+      "cardinality": "low"
+    },
+    {
+      "name": "region",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "northwest",
+        "northeast",
+        "northwest",
+        "southeast",
+        "southwest"
+      ],
+      "mostCommon": "southwest",
+      "mostCommonFreq": 223,
+      "cardinality": "low"
+    },
+    {
+      "name": "charges",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 856,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        9193.8385,
+        8534.6718,
+        12475.3513,
+        13405.3903,
+        2150.469
+      ],
+      "min": 1121.8739,
+      "max": 62592.87309,
+      "mean": 13185.568185233646,
+      "std": 11856.071131794048,
+      "median": 9573.46115,
+      "skewness": 1.5620280383324152,
+      "isMonotonic": false
+    }
+  ],
+  "timeSeriesSignal": {
+    "coherent": false,
+    "column": "id",
+    "intervalStd": 0.5262,
+    "intervalMean": 1.2503,
+    "reason": "列 'id' 单调递增，但相邻间隔不稳定（std/mean=0.42）"
+  }
+}
+
+【上下文载荷 Context Payload】:
+历史已尝试增加树深度和迭代次数但效果提升有限，建议换用XGBoost回归器并设置max_depth=6~8、learning_rate=0.05、n_estimators=500，同时启用early_stopping_rounds=50防止过拟合。
+
+【历史代码 Previous Code】:
+```python
+import pandas as pd
+import numpy as np
+import dill
+import json
+import re
+import warnings
+from sklearn.metrics import accuracy_score, roc_auc_score, root_mean_squared_error, mean_absolute_error, r2_score, f1_score
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态（用于保存预处理参数）==========
+PREPROCESS_STATE = {}
+
+# ========== LLM 填充区（开始）==========
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder
+import lightgbm as lgb
+
+# 全局状态变量，用于保存预处理参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    global PREPROCESS_STATE
+    
+    # 复制数据，避免修改原始数据
+    df = df.copy()
+    
+    # 丢弃ID列（所有模式下都丢弃）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    if mode == 'train':
+        # 定义类别列和数值列
+        cat_cols = ['sex', 'smoker', 'region']
+        num_cols = ['age', 'bmi', 'children']
+        
+        # 构建预处理 Pipeline
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 分离特征和目标
+        if 'charges' in df.columns:
+            X = df.drop(columns=['charges'])
+            y = df['charges']
+        else:
+            X = df
+            y = None
+        
+        # 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 获取特征名（用于后续特征工程）
+        # 获取 one-hot 编码后的列名
+        ohe = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = ohe.get_feature_names_out(cat_cols)
+        num_feature_names = num_cols
+        PREPROCESS_STATE['feature_names'] = list(cat_feature_names) + list(num_feature_names)
+        
+    elif mode == 'test':
+        # 从状态中读取已拟合的预处理器
+        if 'preprocessor' not in PREPROCESS_STATE:
+            raise ValueError("PREPROCESS_STATE 中没有预处理器，请先运行 mode='train'")
+        
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        
+        # 分离特征和目标
+        if 'charges' in df.columns:
+            X = df.drop(columns=['charges'])
+            y = df['charges']
+        else:
+            X = df
+            y = None
+    
+    # 应用预处理
+    X_processed = preprocessor.transform(X)
+    
+    # 将 numpy 数组转回 DataFrame
+    feature_names = PREPROCESS_STATE.get('feature_names', [f'feature_{i}' for i in range(X_processed.shape[1])])
+    X_processed_df = pd.DataFrame(X_processed, columns=feature_names, index=df.index)
+    
+    # 如果目标列存在，合并回去
+    if y is not None:
+        X_processed_df['charges'] = y.values
+    
+    return X_processed_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 复制数据
+    df = df.copy()
+    
+    # 分离目标列
+    if 'charges' in df.columns:
+        y = df['charges']
+        X = df.drop(columns=['charges'])
+    else:
+        X = df
+        y = None
+    
+    # 预处理后所有列已经是数值类型（OneHot + StandardScaler）
+    # 不需要额外创建特征，因为已经在 preprocess 中基于原始值创建了
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = lgb.LGBMRegressor(
+        objective='regression',
+        metric='rmse',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbose=-1  # 抑制训练日志
+    )
+    
+    return model
+# ========== LLM 填充区（结束）==========
+
+# ========== 数据加载（系统负责）==========
+train = pd.read_csv('data/train.csv')
+val = pd.read_csv('data/validation.csv')
+test = pd.read_csv('data/test.csv')
+
+# 获取目标列和 id 列
+target_col = 'charges'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 检查目标列是否存在
+if target_col not in train.columns:
+    raise ValueError(f"目标列 '{target_col}' 不在训练数据中，可用列: {list(train.columns)}")
+
+# ========== 预处理（系统调用 LLM 填充的函数）==========
+train_clean = preprocess(train, mode='train')
+val_clean = preprocess(val, mode='test')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标（兼容 preprocess 是否保留目标列的情况）
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+# 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
+# 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    from sklearn.preprocessing import LabelEncoder
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程（系统调用 LLM 填充的函数）==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# ========== 清洗特征名（LGBM/XGBoost 不支持特殊 JSON 字符）==========
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+# 去重列名
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 模型训练（系统负责）==========
+model = build_model()
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+try:
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+except Exception:
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 验证评估（LLM 可覆盖，系统兜底）==========
+# 如果 LLM 定义了 evaluate_model()，使用 LLM 的评估逻辑；否则使用系统默认指标
+try:
+    if 'evaluate_model' in globals():
+        metrics = evaluate_model(model, X_val_fe, y_val)
+    else:
+        val_preds = model.predict(X_val_fe)
+        metrics = {
+            'val_rmse': float(root_mean_squared_error(y_val, val_preds)),
+            'val_mae': float(mean_absolute_error(y_val, val_preds)),
+            'val_r2': float(r2_score(y_val, val_preds))
+        }
+except Exception as e:
+    print(f"[EVAL_ERROR] {e}")
+    metrics = {}
+    # 尝试最基本的预测来兜底
+    try:
+        _pred = model.predict(X_val_fe)
+        if task_type == "binary_classification" and hasattr(model, 'predict_proba'):
+            _prob = model.predict_proba(X_val_fe)[:, 1]
+            metrics = {'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}
+        elif task_type == "multiclass_classification":
+            metrics = {'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}
+        elif task_type in ("regression", "time_series_forecasting"):
+            metrics = {'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}
+    except Exception as e2:
+        print(f"[EVAL_FALLBACK_ERROR] {e2}")
+        metrics = {}
+
+# ========== 测试预测（系统保证格式）==========
+# 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
+# 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
+test_preds = model.predict(X_test_fe)
+test_probs = test_preds
+
+# 【系统】目标变换逆变换（如 LLM 在 PREPROCESS_STATE 中声明了 target_transform）
+# 兼容多种常见键名: target_transform, target_log_transformer
+_test_tform = PREPROCESS_STATE.get('target_transform') or PREPROCESS_STATE.get('target_log_transformer')
+if _test_tform == 'log1p':
+    test_preds = np.expm1(test_preds)
+elif _test_tform == 'log':
+    test_preds = np.exp(test_preds)
+elif _test_tform == 'sqrt':
+    test_preds = np.square(test_preds)
+
+
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df['probability'] = test_probs
+result_df.to_csv('data/test_predictions.csv', index=False)
+
+# ========== 模型保存（系统保证可序列化）==========
+with open('data/best_model.pkl', 'wb') as f:
+    dill.dump(model, f)
+
+# ========== 输出指标（系统抓取）==========
+print('METRICS_JSON_START')
+print(json.dumps(metrics))
+print('METRICS_JSON_END')
+
+```
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

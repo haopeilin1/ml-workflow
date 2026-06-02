@@ -1,0 +1,188 @@
+<plan>
+根据错误信息分析，问题出在 feature_engineering 函数中：
+1. **第1次错误**：`Shape of passed values is (20838, 64), indices imply (20838, 65)` — 特征矩阵的列数（64）与 feature_names 的长度（65）不匹配。这是因为在 ColumnTransformer 中使用了 `remainder='passthrough'`，导致某些列被重复包含或遗漏。
+2. **第2次错误**：`NameError: name 'pd' is not defined` — 在 feature_engineering 中使用了 `pd.DataFrame` 但没有 import pandas。
+
+修复策略：
+- **简化 feature_engineering**：不再手动从 ColumnTransformer 提取列名并重建 DataFrame。而是直接在 preprocess 中完成所有预处理（包括编码和缩放），返回一个干净的 DataFrame，然后在 feature_engineering 中直接操作这个 DataFrame（丢弃 id 列、目标列，创建新特征）。
+- **使用 sklearn Pipeline 的正确方式**：在 preprocess 中，用 ColumnTransformer 处理类别和数值列，但返回 DataFrame 而不是 numpy array，避免列名丢失问题。
+- **确保所有类别列被编码**：使用 OneHotEncoder 处理所有类别列。
+- **丢弃 id 列**：在 feature_engineering 中丢弃 id 列。
+- **保留目标列**：preprocess 中保留 income 列，feature_engineering 中丢弃它。
+
+具体实现：
+1. **preprocess**：用 ColumnTransformer 对类别列做 OneHotEncoding，对数值列做 StandardScaler，返回 DataFrame（包含目标列）。
+2. **feature_engineering**：丢弃 id 列和目标列 income，创建交叉特征（如 age 分组、capital 相关特征），确保所有列是数值类型。
+3. **build_model**：使用 LightGBM 分类器，设置合理的正则化参数。
+</plan>
+
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+
+# 全局状态存储
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 定义类别列和数值列
+    cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                'relationship', 'race', 'sex', 'native_country']
+    num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 
+                'capital_loss', 'hours_per_week']
+    
+    # 确保 native_country 是字符串类型（防止被误识别为数值）
+    if 'native_country' in df.columns:
+        df['native_country'] = df['native_country'].astype(str)
+    
+    if mode == 'train':
+        # 构建预处理器
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 拟合预处理器
+        # 注意：这里我们只对特征列进行拟合，不包含目标列和id列
+        feature_cols = cat_cols + num_cols
+        X = df[feature_cols]
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        PREPROCESS_STATE['feature_cols'] = feature_cols
+        
+        # 获取转换后的列名
+        # 获取 OneHotEncoder 的类别名称
+        cat_encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            categories = cat_encoder.categories_[i]
+            for cat in categories:
+                cat_feature_names.append(f"{col}_{cat}")
+        
+        num_feature_names = num_cols
+        # remainder 列（如果有的话）
+        remainder_cols = [col for col in df.columns if col not in cat_cols + num_cols and col != 'income']
+        
+        all_feature_names = cat_feature_names + num_feature_names + remainder_cols
+        PREPROCESS_STATE['feature_names'] = all_feature_names
+        
+        # 转换数据
+        X_processed = preprocessor.transform(X)
+        df_processed = pd.DataFrame(X_processed, columns=all_feature_names)
+        
+        # 添加目标列（如果存在）
+        if 'income' in df.columns:
+            df_processed['income'] = df['income'].values
+        
+        # 添加 id 列（用于后续丢弃）
+        if 'id' in df.columns:
+            df_processed['id'] = df['id'].values
+        
+    else:  # mode='test'
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        feature_cols = PREPROCESS_STATE['feature_cols']
+        feature_names = PREPROCESS_STATE['feature_names']
+        
+        # 确保测试集有所有需要的列
+        X = df[feature_cols]
+        X_processed = preprocessor.transform(X)
+        df_processed = pd.DataFrame(X_processed, columns=feature_names)
+        
+        # 添加 id 列（如果存在）
+        if 'id' in df.columns:
+            df_processed['id'] = df['id'].values
+    
+    return df_processed
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 丢弃目标列（如果存在）
+    if 'income' in df.columns:
+        df = df.drop(columns=['income'])
+    
+    # 创建新特征
+    # 1. 年龄分组特征
+    if 'age' in df.columns:
+        df['age_squared'] = df['age'] ** 2
+        df['age_log'] = np.log1p(df['age'])
+    
+    # 2. 资本相关特征
+    if 'capital_gain' in df.columns and 'capital_loss' in df.columns:
+        df['capital_total'] = df['capital_gain'] - df['capital_loss']
+        df['capital_gain_log'] = np.log1p(df['capital_gain'])
+        df['capital_loss_log'] = np.log1p(df['capital_loss'])
+    
+    # 3. 工作时长特征
+    if 'hours_per_week' in df.columns:
+        df['hours_per_week_squared'] = df['hours_per_week'] ** 2
+    
+    # 4. 教育程度与年龄交互
+    if 'education_num' in df.columns and 'age' in df.columns:
+        df['edu_age_interaction'] = df['education_num'] * df['age']
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能出现的 NaN
+    df = df.fillna(0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = LGBMClassifier(
+        objective='binary',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    return model
+```
+</code>

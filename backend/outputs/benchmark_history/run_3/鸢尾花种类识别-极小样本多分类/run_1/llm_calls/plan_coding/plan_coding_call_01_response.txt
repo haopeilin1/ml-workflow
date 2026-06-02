@@ -1,0 +1,580 @@
+<plan>
+产物生成计划：
+1. 加载已保存的最佳模型（data/best_model.pkl），如果加载失败则回退到重新训练
+2. 对测试集进行预测，生成 output/test_predictions.csv（含原始数据 + prediction + 各类概率）
+3. 生成特征重要性 CSV 和 PNG（从模型属性获取，排除目标列）
+4. 生成混淆矩阵热力图 output/report_fig.png
+5. 生成 HTML 报告 output/report.html（含指标摘要、特征重要性表格、混淆矩阵、分类报告、测试集预测预览）
+6. 保存模型到 output/model.pkl
+7. 生成配套预测脚本 output/predict.py
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import dill
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+warnings.filterwarnings('ignore')
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {
+    'scaler': None,
+    'target_col': 'species',
+    'id_col': 'id',
+    'feature_cols': ['sepal_length', 'sepal_width', 'petal_length', 'petal_width'],
+    'label_encoder': None
+}
+
+# ========== 预处理函数 ==========
+def preprocess(df, mode='train'):
+    if PREPROCESS_STATE['id_col'] in df.columns:
+        df = df.drop(columns=[PREPROCESS_STATE['id_col']])
+    
+    for col in PREPROCESS_STATE['feature_cols']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    for col in PREPROCESS_STATE['feature_cols']:
+        if col in df.columns and df[col].isnull().any():
+            if mode == 'train':
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                df[col] = df[col].fillna(df[col].median())
+    
+    return df
+
+
+def feature_engineering(df):
+    target_col = PREPROCESS_STATE['target_col']
+    feature_cols = PREPROCESS_STATE['feature_cols']
+    
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col], errors='ignore')
+    else:
+        X = df.copy()
+    
+    available_features = [c for c in feature_cols if c in X.columns]
+    X = X[available_features].copy()
+    
+    if 'petal_length' in X.columns and 'petal_width' in X.columns:
+        X['petal_area'] = X['petal_length'] * X['petal_width']
+    
+    if PREPROCESS_STATE['scaler'] is None:
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+    else:
+        X_scaled = PREPROCESS_STATE['scaler'].transform(X)
+    
+    X_result = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+    return X_result
+
+
+def build_model():
+    model = LogisticRegression(
+        solver='lbfgs',
+        max_iter=1000,
+        random_state=42,
+        C=1.0
+    )
+    return model
+
+
+# ========== 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'species'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# ========== 尝试加载已保存模型 ==========
+model = None
+label_encoder = None
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = dill.load(f)
+    print("[INFO] Loaded model from data/best_model.pkl")
+    
+    # 尝试加载预处理状态
+    if os.path.exists('data/preprocess_state.pkl'):
+        with open('data/preprocess_state.pkl', 'rb') as f:
+            PREPROCESS_STATE = pickle.load(f)
+        print("[INFO] Loaded preprocess state from data/preprocess_state.pkl")
+    else:
+        # 从训练数据重新拟合预处理
+        train_clean = preprocess(train, mode='train')
+        if target_col in train_clean.columns:
+            y_train_raw = train_clean[target_col]
+            X_train_raw = train_clean.drop(columns=[target_col])
+        else:
+            y_train_raw = train[target_col]
+            X_train_raw = train_clean
+        _ = feature_engineering(X_train_raw)
+        print("[INFO] Re-fitted preprocess state from training data")
+    
+    # 检查是否需要 label_encoder
+    if target_col in train.columns and (train[target_col].dtype == object or str(train[target_col].dtype) == 'category'):
+        le = LabelEncoder()
+        le.fit(train[target_col])
+        PREPROCESS_STATE['label_encoder'] = le
+        label_encoder = le
+        print("[INFO] Fitted label encoder from training data")
+    
+except Exception as e:
+    print(f"[WARN] Failed to load model: {e}, will retrain")
+    model = None
+
+# ========== 如果加载失败，重新训练 ==========
+if model is None:
+    print("[INFO] Retraining model...")
+    val = pd.read_csv('data/validation.csv')
+    
+    train_clean = preprocess(train, mode='train')
+    val_clean = preprocess(val, mode='test')
+    
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train = train_clean
+    
+    if target_col in val_clean.columns:
+        y_val = val_clean[target_col]
+        X_val = val_clean.drop(columns=[target_col])
+    else:
+        y_val = val[target_col]
+        X_val = val_clean
+    
+    # 处理字符串目标列
+    _is_string_target = target_col in train.columns and (
+        train[target_col].dtype == object or str(train[target_col].dtype) == 'category'
+    )
+    if _is_string_target:
+        le = LabelEncoder()
+        y_train = le.fit_transform(train[target_col])
+        y_val = le.transform(val[target_col])
+        PREPROCESS_STATE['label_encoder'] = le
+        label_encoder = le
+    
+    X_train_fe = feature_engineering(X_train)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+    X_val_fe = feature_engineering(X_val)
+    if isinstance(X_val_fe, np.ndarray):
+        X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+    
+    # 清洗特征名
+    for _df in [X_train_fe, X_val_fe]:
+        _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+    
+    model = build_model()
+    model.fit(X_train_fe, y_train)
+    print("[INFO] Model retrained successfully")
+
+# ========== 预处理测试集 ==========
+test_clean = preprocess(test, mode='test')
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+X_test_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_test_fe.columns]
+
+# ========== 测试集预测 ==========
+test_preds = model.predict(X_test_fe)
+test_probs_all = None
+try:
+    test_probs_all = model.predict_proba(X_test_fe)
+except Exception:
+    pass
+
+# 反编码预测标签
+label_encoder = PREPROCESS_STATE.get('label_encoder', None)
+if label_encoder is not None:
+    try:
+        test_preds_decoded = label_encoder.inverse_transform(test_preds)
+    except Exception:
+        test_preds_decoded = test_preds
+else:
+    test_preds_decoded = test_preds
+
+# 构建预测结果 DataFrame
+result_df = test.copy()
+result_df['prediction'] = test_preds_decoded
+if test_probs_all is not None:
+    # 获取类别名称
+    if label_encoder is not None:
+        class_names = label_encoder.classes_
+    else:
+        class_names = [f'class_{i}' for i in range(test_probs_all.shape[1])]
+    for i, col_name in enumerate(class_names):
+        result_df[f'proba_{col_name}'] = test_probs_all[:, i]
+
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("[INFO] Saved test_predictions.csv")
+
+# ========== 保存模型 ==========
+with open('output/model.pkl', 'wb') as f:
+    dill.dump(model, f)
+print("[INFO] Saved model.pkl")
+
+# ========== 特征重要性 ==========
+feature_names = X_test_fe.columns.tolist()
+if hasattr(model, 'coef_'):
+    # LogisticRegression 使用系数绝对值作为重要性
+    importances = np.abs(model.coef_).mean(axis=0)
+elif hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    importances = importances[:len(feature_names)]
+
+fi_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+fi_df = fi_df.sort_values('importance', ascending=False)
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print("[INFO] Saved feature_importance.csv")
+
+# 特征重要性图
+plt.figure(figsize=(10, 6))
+colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(fi_df)))
+plt.barh(range(len(fi_df)), fi_df['importance'].values, color=colors)
+plt.yticks(range(len(fi_df)), fi_df['name'].values)
+plt.xlabel('Importance')
+plt.title('Feature Importance (Multiclass Classification)')
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("[INFO] Saved feature_importance.png")
+
+# ========== 混淆矩阵热力图 ==========
+# 使用验证集计算混淆矩阵（如果有验证集）
+val_exists = os.path.exists('data/validation.csv')
+if val_exists:
+    val = pd.read_csv('data/validation.csv')
+    val_clean = preprocess(val, mode='test')
+    if target_col in val_clean.columns:
+        y_val_true = val_clean[target_col]
+        X_val_raw = val_clean.drop(columns=[target_col])
+    else:
+        y_val_true = val[target_col]
+        X_val_raw = val_clean
+    
+    X_val_fe = feature_engineering(X_val_raw)
+    if isinstance(X_val_fe, np.ndarray):
+        X_val_fe = pd.DataFrame(X_val_fe, index=X_val_raw.index)
+    X_val_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_val_fe.columns]
+    
+    val_preds = model.predict(X_val_fe)
+    
+    if label_encoder is not None:
+        y_val_true_encoded = label_encoder.transform(y_val_true)
+        val_preds_encoded = val_preds
+        class_labels = label_encoder.classes_
+    else:
+        y_val_true_encoded = y_val_true
+        val_preds_encoded = val_preds
+        class_labels = sorted(set(y_val_true_encoded))
+    
+    cm = confusion_matrix(y_val_true_encoded, val_preds_encoded)
+    
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=class_labels, yticklabels=class_labels)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix (Validation Set)')
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("[INFO] Saved report_fig.png")
+    
+    # 计算指标
+    val_accuracy = accuracy_score(y_val_true_encoded, val_preds_encoded)
+    val_f1_macro = f1_score(y_val_true_encoded, val_preds_encoded, average='macro')
+    val_f1_weighted = f1_score(y_val_true_encoded, val_preds_encoded, average='weighted')
+    
+    # 分类报告
+    cr_dict = classification_report(y_val_true_encoded, val_preds_encoded, 
+                                     target_names=[str(l) for l in class_labels], 
+                                     output_dict=True)
+else:
+    cm = None
+    val_accuracy = None
+    val_f1_macro = None
+    val_f1_weighted = None
+    cr_dict = None
+    class_labels = None
+
+# ========== 生成 HTML 报告 ==========
+html_content = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型报告 - 多分类任务</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; background: #f5f7fa; color: #333; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; margin-top: 30px; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e0e0e0; }
+        th { background: #3498db; color: white; font-weight: 600; }
+        tr:hover { background: #f8f9fa; }
+        .metric-card { display: inline-block; background: #eaf2f8; padding: 15px 25px; margin: 10px; border-radius: 8px; text-align: center; }
+        .metric-value { font-size: 28px; font-weight: bold; color: #2c3e50; }
+        .metric-label { font-size: 14px; color: #7f8c8d; }
+        .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #e0e0e0; color: #95a5a6; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>多分类模型报告</h1>
+        <p>任务类型: 多分类 (Multiclass Classification) | 目标列: species | 模型: LogisticRegression</p>
+        
+        <h2>模型指标摘要</h2>
+        <div style="text-align: center;">
+"""
+
+if val_exists and val_accuracy is not None:
+    html_content += f"""
+            <div class="metric-card">
+                <div class="metric-value">{val_accuracy:.4f}</div>
+                <div class="metric-label">Accuracy</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{val_f1_macro:.4f}</div>
+                <div class="metric-label">F1 (Macro)</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{val_f1_weighted:.4f}</div>
+                <div class="metric-label">F1 (Weighted)</div>
+            </div>
+"""
+
+html_content += """
+        </div>
+        
+        <h2>特征重要性</h2>
+        <table>
+            <tr><th>排名</th><th>特征名称</th><th>重要性</th></tr>
+"""
+for i, row in fi_df.iterrows():
+    html_content += f"<tr><td>{fi_df.index.get_loc(i) + 1}</td><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>\n"
+
+html_content += """
+        </table>
+"""
+
+if val_exists and cm is not None and cr_dict is not None:
+    html_content += """
+        <h2>混淆矩阵</h2>
+        <table>
+            <tr><th></th>"""
+    for lbl in class_labels:
+        html_content += f"<th>预测 {lbl}</th>"
+    html_content += "</tr>\n"
+    for i, lbl in enumerate(class_labels):
+        html_content += f"<tr><th>真实 {lbl}</th>"
+        for j in range(len(class_labels)):
+            html_content += f"<td>{cm[i][j]}</td>"
+        html_content += "</tr>\n"
+    html_content += """
+        </table>
+        
+        <h2>分类报告</h2>
+        <table>
+            <tr><th>类别</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>
+    """
+    for lbl in class_labels:
+        lbl_str = str(lbl)
+        if lbl_str in cr_dict:
+            d = cr_dict[lbl_str]
+            html_content += f"<tr><td>{lbl_str}</td><td>{d['precision']:.4f}</td><td>{d['recall']:.4f}</td><td>{d['f1-score']:.4f}</td><td>{d['support']}</td></tr>\n"
+    # 添加 macro avg 和 weighted avg
+    for avg_type in ['macro avg', 'weighted avg']:
+        if avg_type in cr_dict:
+            d = cr_dict[avg_type]
+            html_content += f"<tr style='font-weight:bold;background:#f0f0f0;'><td>{avg_type}</td><td>{d['precision']:.4f}</td><td>{d['recall']:.4f}</td><td>{d['f1-score']:.4f}</td><td>{d['support']}</td></tr>\n"
+    html_content += """
+        </table>
+    """
+
+html_content += f"""
+        <h2>测试集预测预览</h2>
+        <p>共 {len(result_df)} 条预测结果</p>
+        <table>
+            <tr>"""
+for col in result_df.columns[:8]:
+    html_content += f"<th>{col}</th>"
+html_content += "</tr>\n"
+for idx, row in result_df.head(10).iterrows():
+    html_content += "<tr>"
+    for col in result_df.columns[:8]:
+        val = row[col]
+        if isinstance(val, float):
+            html_content += f"<td>{val:.4f}</td>"
+        else:
+            html_content += f"<td>{val}</td>"
+    html_content += "</tr>\n"
+html_content += """
+        </table>
+        <p style="color:#7f8c8d;">（仅显示前10行，完整结果见 output/test_predictions.csv）</p>
+        
+        <div class="footer">
+            <p>报告自动生成 | 特征重要性图: output/feature_importance.png | 混淆矩阵图: output/report_fig.png</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("[INFO] Saved report.html")
+
+# ========== 生成预测脚本 ==========
+predict_script = '''#!/usr/bin/env python3
+"""独立预测脚本 - 加载模型对新数据进行预测"""
+import pandas as pd
+import numpy as np
+import pickle
+import dill
+import re
+import sys
+import os
+from sklearn.preprocessing import StandardScaler
+
+# 预处理状态（从训练时保存）
+PREPROCESS_STATE = {
+    'scaler': None,
+    'target_col': 'species',
+    'id_col': 'id',
+    'feature_cols': ['sepal_length', 'sepal_width', 'petal_length', 'petal_width'],
+    'label_encoder': None
+}
+
+def preprocess(df):
+    if PREPROCESS_STATE['id_col'] in df.columns:
+        df = df.drop(columns=[PREPROCESS_STATE['id_col']])
+    for col in PREPROCESS_STATE['feature_cols']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    for col in PREPROCESS_STATE['feature_cols']:
+        if col in df.columns and df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+    return df
+
+def feature_engineering(df):
+    feature_cols = PREPROCESS_STATE['feature_cols']
+    X = df.copy()
+    available_features = [c for c in feature_cols if c in X.columns]
+    X = X[available_features].copy()
+    if 'petal_length' in X.columns and 'petal_width' in X.columns:
+        X['petal_area'] = X['petal_length'] * X['petal_width']
+    if PREPROCESS_STATE['scaler'] is not None:
+        X_scaled = PREPROCESS_STATE['scaler'].transform(X)
+    else:
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+    X_result = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+    return X_result
+
+def load_model(model_path='output/model.pkl'):
+    with open(model_path, 'rb') as f:
+        model = dill.load(f)
+    return model
+
+def predict(input_path, output_path=None, model_path='output/model.pkl'):
+    model = load_model(model_path)
+    df = pd.read_csv(input_path)
+    original_df = df.copy()
+    df_clean = preprocess(df)
+    X = feature_engineering(df_clean)
+    X.columns = [re.sub('[^\\\\w]', '_', str(c)) for c in X.columns]
+    
+    predictions = model.predict(X)
+    result_df = original_df.copy()
+    result_df['prediction'] = predictions
+    
+    try:
+        probas = model.predict_proba(X)
+        for i in range(probas.shape[1]):
+            result_df[f'proba_{i}'] = probas[:, i]
+    except Exception:
+        pass
+    
+    if output_path is None:
+        output_path = input_path.replace('.csv', '_predictions.csv')
+    result_df.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    return result_df
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv> [output_csv]")
+        sys.exit(1)
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else None
+    predict(input_path, output_path)
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("[INFO] Saved predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    "status": "success",
+    "task_type": "multiclass_classification",
+    "target_col": target_col,
+    "model_type": type(model).__name__,
+    "test_samples": len(result_df),
+    "feature_count": len(fi_df),
+    "output_files": [
+        "output/model.pkl",
+        "output/feature_importance.csv",
+        "output/feature_importance.png",
+        "output/report_fig.png",
+        "output/report.html",
+        "output/test_predictions.csv",
+        "output/predict.py"
+    ]
+}
+if val_exists and val_accuracy is not None:
+    summary["val_accuracy"] = round(float(val_accuracy), 4)
+    summary["val_f1_macro"] = round(float(val_f1_macro), 4)
+    summary["val_f1_weighted"] = round(float(val_f1_weighted), 4)
+
+print(json.dumps(summary))
+```
+</code>

@@ -1,0 +1,3 @@
+METRICS_JSON_START
+{"val_accuracy": 0.845, "val_f1_macro": 0.643371602187977}
+METRICS_JSON_END

@@ -1,0 +1,202 @@
+<plan>
+## 规划
+
+### 1. 数据预处理 (preprocess)
+- **丢弃id列**：id列是单调递增的，uniqueCount=rowCount，必须丢弃
+- **处理缺失值**：
+  - `workclass`：缺失率5.6%，用众数填充
+  - `occupation`：缺失率5.62%，用众数填充
+  - `native_country`：缺失率1.77%，用众数填充
+- **类别编码**：所有类别列（workclass, education, marital_status, occupation, relationship, race, sex, native_country）使用OneHotEncoder编码
+- **数值缩放**：数值列（age, fnlwgt, education_num, capital_gain, capital_loss, hours_per_week）使用StandardScaler
+- **目标列处理**：将income从字符串'<=50K'/' >50K'转换为0/1二值标签
+- **状态管理**：mode='train'时拟合所有编码器和缩放器，mode='test'时应用已保存的参数
+
+### 2. 特征工程 (feature_engineering)
+- 丢弃id列（如果还没丢弃）
+- 保留所有原始特征，不做额外特征工程（simple任务，避免过拟合）
+- 返回不含income列的数值特征矩阵
+
+### 3. 模型构建 (build_model)
+- 使用LightGBM分类器（LGBMClassifier）
+- 设置合理的正则化参数防止过拟合：
+  - max_depth=6
+  - num_leaves=31
+  - learning_rate=0.05
+  - n_estimators=500
+  - subsample=0.8
+  - min_child_samples=20
+- 使用scale_pos_weight处理类别不平衡（income >50K 占比约24%）
+- 使用early_stopping回调防止过拟合
+
+### 4. 整体Pipeline
+- 使用ColumnTransformer统一处理类别和数值特征
+- 在build_model中返回完整的Pipeline（包含预处理和模型）
+- 这样训练时自动完成所有预处理，测试时也自动应用相同的变换
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态存储
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃id列（id列是单调递增的，uniqueCount=rowCount，会导致过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 处理目标列：将income从字符串转换为0/1
+    if 'income' in df.columns:
+        df['income'] = df['income'].map({'<=50K': 0, '>50K': 1}).astype(int)
+    
+    # 类别列列表
+    cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                'relationship', 'race', 'sex', 'native_country']
+    
+    # 数值列列表
+    num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 'capital_loss', 'hours_per_week']
+    
+    if mode == 'train':
+        # 训练模式：拟合编码器和缩放器
+        # 类别列：用众数填充 + OneHot编码
+        cat_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        
+        # 数值列：用中位数填充 + 标准化
+        num_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        # 保存列名信息
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 拟合并转换
+        cat_data = cat_transformer.fit_transform(df[cat_cols])
+        num_data = num_transformer.fit_transform(df[num_cols])
+        
+        # 保存转换器
+        PREPROCESS_STATE['cat_transformer'] = cat_transformer
+        PREPROCESS_STATE['num_transformer'] = num_transformer
+        
+        # 获取编码后的列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = cat_transformer.named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(
+            np.hstack([cat_data, num_data]),
+            columns=cat_feature_names + num_cols,
+            index=df.index
+        )
+        
+        # 添加目标列
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+        
+        PREPROCESS_STATE['feature_names'] = processed_df.columns.tolist()
+        
+    else:  # mode == 'test'
+        # 测试模式：应用已保存的转换器
+        cat_transformer = PREPROCESS_STATE['cat_transformer']
+        num_transformer = PREPROCESS_STATE['num_transformer']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        
+        # 转换数据
+        cat_data = cat_transformer.transform(df[cat_cols])
+        num_data = num_transformer.transform(df[num_cols])
+        
+        # 获取编码后的列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = cat_transformer.named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        # 构建处理后的DataFrame
+        processed_df = pd.DataFrame(
+            np.hstack([cat_data, num_data]),
+            columns=cat_feature_names + num_cols,
+            index=df.index
+        )
+        
+        # 保留目标列（如果有）
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+    
+    return processed_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 分离特征和目标
+    if 'income' in df.columns:
+        X = df.drop(columns=['income'])
+    else:
+        X = df
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    # 填充可能出现的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重：income >50K 占比约24%，所以scale_pos_weight ≈ 76/24 ≈ 3.17
+    scale_pos_weight = 3.17
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        min_child_samples=20,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

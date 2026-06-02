@@ -1,0 +1,202 @@
+<plan>
+## 优化规划
+
+### 当前状态分析
+- 当前val_auc=0.875，有提升空间
+- 数据画像显示所有特征均为数值型，无缺失值，类别平衡（smoking=1占36.55%）
+- 上下文载荷建议：增加n_estimators、调整learning_rate、使用subsample和colsample_bytree、增加max_depth
+
+### 优化策略
+
+1. **预处理优化**：
+   - 保持现有清洗逻辑（丢弃id、清洗列名、标准化）
+   - 所有特征均为数值型，无需类别编码
+
+2. **特征工程增强**：
+   - 保留现有特征（BMI、血压差、TG/HDL比值、AST/ALT比值）
+   - 新增特征：
+     - 腰围身高比（waist_to_height_ratio）：更好的肥胖指标
+     - 平均视力（avg_eyesight）：左右眼视力的平均值
+     - 总胆固醇/HDL比值（chol_hdl_ratio）：心血管风险指标
+     - 年龄分组特征（age_squared）：年龄的平方项，捕捉非线性关系
+     - 血红蛋白与身高比值（hemoglobin_height_ratio）：可能的吸烟相关指标
+
+3. **模型调优**：
+   - 根据建议调整超参数：
+     - n_estimators=300（配合early_stopping）
+     - learning_rate=0.05
+     - max_depth=7（适度增加复杂度）
+     - subsample=0.8
+     - colsample_bytree=0.8（新增，防止过拟合）
+     - num_leaves=31
+     - min_child_samples=20
+   - 使用LightGBM的early_stopping回调
+   - 保持scale_pos_weight处理类别不平衡
+
+4. **过拟合控制**：
+   - 使用early_stopping（stopping_rounds=50）
+   - 限制max_depth=7
+   - 使用subsample和colsample_bytree
+   - 设置合理的min_child_samples
+</plan>
+<code>
+```python
+import re
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 清洗列名：将特殊字符替换为下划线
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    target_col = 'smoking'
+    # 注意：test.csv 没有目标列，所以需要检查
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df
+    
+    # 4. 数值特征列（所有特征都是数值类型）
+    numeric_cols = X.columns.tolist()
+    
+    # 5. 标准化
+    if mode == 'train':
+        # 拟合 scaler
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+        PREPROCESS_STATE['numeric_cols'] = numeric_cols
+    else:  # mode == 'test'
+        # 应用已拟合的 scaler
+        scaler = PREPROCESS_STATE['scaler']
+        X_scaled = scaler.transform(X)
+    
+    # 6. 转换回 DataFrame
+    X_processed = pd.DataFrame(X_scaled, columns=numeric_cols)
+    
+    # 7. 重新添加目标列（如果存在）
+    if y is not None:
+        X_processed[target_col] = y.values
+    
+    return X_processed
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    # 创建新特征
+    
+    # BMI = weight(kg) / (height(m))^2
+    if 'height_cm_' in df.columns and 'weight_kg_' in df.columns:
+        height_m = df['height_cm_'] / 100.0
+        df['bmi'] = df['weight_kg_'] / (height_m ** 2)
+    
+    # 腰围身高比（waist_to_height_ratio）- 更好的中心性肥胖指标
+    if 'waist_cm_' in df.columns and 'height_cm_' in df.columns:
+        df['waist_to_height_ratio'] = df['waist_cm_'] / df['height_cm_']
+    
+    # 血压差
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['blood_pressure_diff'] = df['systolic'] - df['relaxation']
+    
+    # 平均血压
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['mean_arterial_pressure'] = (2 * df['relaxation'] + df['systolic']) / 3.0
+    
+    # 血脂比值（triglyceride / HDL）
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['tg_hdl_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+    
+    # 总胆固醇/HDL比值 - 心血管风险指标
+    if 'Cholesterol' in df.columns and 'HDL' in df.columns:
+        df['chol_hdl_ratio'] = df['Cholesterol'] / (df['HDL'] + 1e-6)
+    
+    # 肝功比值（AST / ALT）
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['ast_alt_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+    
+    # 平均视力
+    if 'eyesight_left_' in df.columns and 'eyesight_right_' in df.columns:
+        df['avg_eyesight'] = (df['eyesight_left_'] + df['eyesight_right_']) / 2.0
+    
+    # 年龄平方项（捕捉非线性关系）
+    if 'age' in df.columns:
+        df['age_squared'] = df['age'] ** 2
+    
+    # 血红蛋白与身高比值
+    if 'hemoglobin' in df.columns and 'height_cm_' in df.columns:
+        df['hemoglobin_height_ratio'] = df['hemoglobin'] / (df['height_cm_'] + 1e-6)
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能产生的 NaN（除零保护）
+    df = df.fillna(0)
+    
+    # 处理可能的无穷值
+    df = df.replace([np.inf, -np.inf], 0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 类别不平衡比例
+    # 训练集中 smoking=1 的比例约为 0.3655，smoking=0 的比例约为 0.6345
+    # scale_pos_weight = count(0) / count(1) ≈ 0.6345 / 0.3655 ≈ 1.74
+    scale_pos_weight = 0.6345 / 0.3655
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=7,
+        learning_rate=0.05,
+        n_estimators=300,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

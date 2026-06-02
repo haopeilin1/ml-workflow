@@ -1,0 +1,62 @@
+============================================================
+  任务运行摘要: 睡眠障碍预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: multiclass_classification
+  目标列: Sleep Disorder
+  评估指标: Macro F1 Score
+  复杂度判定: complex (多分类任务强制complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ❌ 否
+
+【核心指标】
+  Best Score: 54.80
+  总耗时: 0.0s
+  测试集 F1: 0.3869
+
+【各阶段耗时】
+  意图识别: 1.0s
+  代码生成: 69.8s
+  沙箱执行: 17.4s
+  评估优化: 23.2s
+  产物生成: 353.2s
+  测试预测: 0.0s
+  总计: 612.2s
+
+【Token 消耗】
+  Plan/Coding 调用: 4 次, 45304 tokens
+  Evaluation 调用: 4 次, 9875 tokens
+  总计: 8 次, 55179 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 5319tokens | 1.0s
+    - qwen3.5-flash@openai: 1 calls, 5319 tokens, 1.0s
+  plan_coding : deepseek-v4-pro@openai | 4calls | 45304tokens | 328.2s
+    - deepseek-v4-pro@openai: 4 calls, 45304 tokens, 328.2s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9875tokens | 23.2s
+    - deepseek-v4-flash@openai: 4 calls, 9875 tokens, 23.2s
+  judge       : qwen3.5-flash@openai | 1calls | 1644tokens | 3.6s
+    - qwen3.5-flash@openai: 1 calls, 1644 tokens, 3.6s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【Macro F1 Score】为核心标准。验证集 Accuracy 为 0.625，但测试集 Macro F1 Score 仅为 0.3869。对于多分类任务，F1 分数低于 0.4 通常意味着模型无法有效区分各类别，表现接近随机猜测水平（尤其是当类别不平衡时）。虽然测试集 Accuracy (0.75) 高于验证集 Accuracy (0.625)，但这在 F1 极低的情况下极可能表明模型存在严重的过拟合或预测策略偏差（例如倾向于预测多数类），导致宏观平均的召回率和精确率严重不足。核心指标 F1 未达到可接受基线（通常需 > 0.55-0.6），且与验证集表现相比，F1 指标未提...
+
+【维度评分】
+  unknown: 30.0 (weight=0.3)
+  unknown: 70.0 (weight=0.25)
+  unknown: 60.0 (weight=0.2)
+  unknown: 75.0 (weight=0.15)
+  unknown: 50.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 12:06:26 UTC
+============================================================

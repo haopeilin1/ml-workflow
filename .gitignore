@@ -30,9 +30,10 @@ backend/venv/
 backend/uploads/*
 !backend/uploads/.gitkeep
 
-# 任务产物文件（不应提交到版本库）
+# 任务产物文件：只保留 benchmark_history，其余排除
 backend/outputs/*
 !backend/outputs/.gitkeep
+!backend/outputs/benchmark_history/
 
 # Uvicorn 日志
 backend/*.log
@@ -55,23 +56,11 @@ Thumbs.db
 .history/
 frontend.log
 backend/mlworkflow/
-backend/venv/
-backend/uploads/
-backend/outputs/
-__pycache__/
-*.pyc
 
-
-o/o
 # Sensitive files
 github_ssh_key.txt
 
-
-# Benchmark data & outputs (large files)
-test_data_*/
-benchmark_9tasks/
-test_benchmark/
-backend/outputs/
+# 旧的批量结果文件（排除临时输出）
 backend/batch_results.csv
 backend/batch_summary.json
 backend/judge_result*.json

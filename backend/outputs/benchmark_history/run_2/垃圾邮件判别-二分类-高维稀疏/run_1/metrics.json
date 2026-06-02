@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": 0.991781351476728,
+    "val_accuracy": null,
+    "val_f1_macro": null,
+    "val_rmse": null,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": 0.9862357692269715,
+    "accuracy": null,
+    "f1": null,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": null,
+    "mae": null,
+    "r2": null
+  },
+  "best_score": 92.0,
+  "task_type": "binary_classification",
+  "target_column": "spam",
+  "eval_metric": "ROC-AUC",
+  "complexity": "complex",
+  "complexity_reason": "高维数据(59列)强制complex",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

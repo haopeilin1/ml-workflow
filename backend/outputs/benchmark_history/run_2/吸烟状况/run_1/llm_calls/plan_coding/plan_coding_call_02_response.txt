@@ -1,0 +1,248 @@
+<plan>
+## 优化分析
+
+当前val_auc=0.875，仍有提升空间。根据上下文载荷的建议和数据分析，我将进行以下优化：
+
+### 1. 特征工程增强
+- **BMI计算**：当前代码中列名清洗后为`height_cm_`和`weight_kg_`，但实际列名可能不同，需要更健壮的匹配方式
+- **新增特征**：
+  - 腰臀比（waist/height）— 反映中心性肥胖
+  - 平均视力（左右眼均值）
+  - 总胆固醇/HDL比值 — 心血管风险指标
+  - 血压均值
+  - 年龄分段特征（将年龄离散化，捕捉非线性效应）
+  - 血红蛋白与年龄的交互
+  - 肝酶乘积（AST*ALT）— 反映肝损伤程度
+  - 血脂综合指标（Cholesterol/HDL, LDL/HDL）
+
+### 2. 模型调优
+- 增加n_estimators至300，配合early_stopping
+- 调整learning_rate至0.05（当前已是）
+- 添加colsample_bytree=0.8防止过拟合
+- 调整num_leaves=15（更保守，防止过拟合）
+- 添加min_gain_to_split=0.01（正则化）
+- 使用class_weight='balanced'替代手动scale_pos_weight（更稳定）
+
+### 3. 预处理优化
+- 修复列名匹配问题（使用正则匹配包含关键字的列）
+- 对高度右偏的特征（如triglyceride, Gtp, ALT）做log1p变换
+- 对hearing(left/right)和Urine protein等低基数特征做有序编码
+
+### 4. 关键修复
+- 当前代码在feature_engineering中检查`height_cm_`和`weight_kg_`，但实际列名可能是`height_cm`（无尾随下划线），需要更灵活的匹配
+- 使用`re.search`或`str.contains`来匹配列名
+</plan>
+<code>
+```python
+import re
+import numpy as np
+from sklearn.preprocessing import StandardScaler, PowerTransformer
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 清洗列名：将特殊字符替换为下划线
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df
+    
+    # 4. 识别需要做对数变换的右偏特征
+    skew_cols = ['triglyceride', 'Gtp', 'ALT', 'AST', 'fasting_blood_sugar']
+    # 只取实际存在的列
+    log_cols = [c for c in skew_cols if c in X.columns]
+    
+    # 5. 对数变换（在标准化之前）
+    if mode == 'train':
+        # 保存对数变换的偏移量（防止log(0)）
+        log_offsets = {}
+        for col in log_cols:
+            col_min = X[col].min()
+            offset = -col_min + 1 if col_min <= 0 else 0
+            log_offsets[col] = offset
+        PREPROCESS_STATE['log_offsets'] = log_offsets
+    else:
+        log_offsets = PREPROCESS_STATE['log_offsets']
+    
+    # 应用对数变换
+    for col in log_cols:
+        offset = log_offsets.get(col, 0)
+        X[col] = np.log1p(X[col] + offset)
+    
+    # 6. 标准化
+    numeric_cols = X.columns.tolist()
+    
+    if mode == 'train':
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+        PREPROCESS_STATE['numeric_cols'] = numeric_cols
+    else:
+        scaler = PREPROCESS_STATE['scaler']
+        X_scaled = scaler.transform(X)
+    
+    # 7. 转换回 DataFrame
+    X_processed = pd.DataFrame(X_scaled, columns=numeric_cols)
+    
+    # 8. 重新添加目标列（如果存在）
+    if y is not None:
+        X_processed[target_col] = y.values
+    
+    return X_processed
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    # 使用更健壮的列名匹配（通过包含关键字查找）
+    def find_col(pattern):
+        """查找包含指定模式的列名"""
+        matches = [c for c in df.columns if pattern in c]
+        return matches[0] if matches else None
+    
+    height_col = find_col('height')
+    weight_col = find_col('weight')
+    waist_col = find_col('waist')
+    eyesight_left = find_col('eyesight_left') or find_col('eyesight_left_')
+    eyesight_right = find_col('eyesight_right') or find_col('eyesight_right_')
+    systolic_col = find_col('systolic')
+    relaxation_col = find_col('relaxation')
+    triglyceride_col = find_col('triglyceride')
+    hdl_col = find_col('HDL')
+    ldl_col = find_col('LDL')
+    cholesterol_col = find_col('Cholesterol')
+    ast_col = find_col('AST')
+    alt_col = find_col('ALT')
+    gtp_col = find_col('Gtp')
+    hemoglobin_col = find_col('hemoglobin')
+    age_col = find_col('age')
+    fasting_bs_col = find_col('fasting_blood_sugar') or find_col('fasting_blood')
+    serum_creatinine_col = find_col('serum_creatinine')
+    
+    # BMI
+    if height_col and weight_col:
+        height_m = df[height_col] / 100.0
+        df['bmi'] = df[weight_col] / (height_m ** 2)
+    
+    # 腰臀比（waist/height）
+    if waist_col and height_col:
+        df['waist_height_ratio'] = df[waist_col] / df[height_col]
+    
+    # 血压差和平均血压
+    if systolic_col and relaxation_col:
+        df['blood_pressure_diff'] = df[systolic_col] - df[relaxation_col]
+        df['mean_arterial_pressure'] = (2 * df[relaxation_col] + df[systolic_col]) / 3.0
+    
+    # 血脂比值
+    if triglyceride_col and hdl_col:
+        df['tg_hdl_ratio'] = df[triglyceride_col] / (df[hdl_col] + 1e-6)
+    
+    if cholesterol_col and hdl_col:
+        df['chol_hdl_ratio'] = df[cholesterol_col] / (df[hdl_col] + 1e-6)
+    
+    if ldl_col and hdl_col:
+        df['ldl_hdl_ratio'] = df[ldl_col] / (df[hdl_col] + 1e-6)
+    
+    # 肝功指标
+    if ast_col and alt_col:
+        df['ast_alt_ratio'] = df[ast_col] / (df[alt_col] + 1e-6)
+        df['ast_alt_product'] = df[ast_col] * df[alt_col]
+    
+    if gtp_col and ast_col:
+        df['gtp_ast_ratio'] = df[gtp_col] / (df[ast_col] + 1e-6)
+    
+    # 视力均值
+    if eyesight_left and eyesight_right:
+        df['eyesight_mean'] = (df[eyesight_left] + df[eyesight_right]) / 2.0
+        df['eyesight_diff'] = np.abs(df[eyesight_left] - df[eyesight_right])
+    
+    # 年龄分段（捕捉非线性效应）
+    if age_col:
+        df['age_squared'] = df[age_col] ** 2
+        # 年龄分段：青年(20-35), 中年(35-55), 老年(55+)
+        df['age_mid'] = ((df[age_col] >= 35) & (df[age_col] < 55)).astype(int)
+        df['age_old'] = (df[age_col] >= 55).astype(int)
+    
+    # 血红蛋白与年龄交互
+    if hemoglobin_col and age_col:
+        df['hb_age_interaction'] = df[hemoglobin_col] * df[age_col]
+    
+    # 肾功能指标（血清肌酐的倒数，反映肾滤过功能）
+    if serum_creatinine_col:
+        df['creatinine_inv'] = 1.0 / (df[serum_creatinine_col] + 1e-6)
+    
+    # 空腹血糖与血脂的交互
+    if fasting_bs_col and triglyceride_col:
+        df['fbs_tg_interaction'] = df[fasting_bs_col] * df[triglyceride_col]
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能产生的 NaN
+    df = df.fillna(0)
+    
+    # 处理无穷值
+    df = df.replace([np.inf, -np.inf], 0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 使用 class_weight='balanced' 自动处理类别不平衡
+    model = LGBMClassifier(
+        objective='binary',
+        class_weight='balanced',
+        num_leaves=15,
+        max_depth=5,
+        learning_rate=0.05,
+        n_estimators=300,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=30,
+        min_gain_to_split=0.01,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

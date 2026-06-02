@@ -1,0 +1,7 @@
+{
+  "target_column": "species",
+  "task_type": "multiclass_classification",
+  "eval_metric": "Accuracy",
+  "complexity": "complex",
+  "is_time_series": false
+}

@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": 0.9166247782980953,
+    "val_accuracy": 0.8640188488724335,
+    "val_f1_macro": null,
+    "val_rmse": null,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": 0.9163485378784376,
+    "accuracy": 0.8602815574011898,
+    "f1": null,
+    "f1_macro": null,
+    "log_loss": null,
+    "rmse": null,
+    "mae": null,
+    "r2": null
+  },
+  "best_score": 92.5,
+  "task_type": "binary_classification",
+  "target_column": "Churn",
+  "eval_metric": "AUC-ROC",
+  "complexity": "simple",
+  "complexity_reason": "LLM判定为simple，无复杂信号触发",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

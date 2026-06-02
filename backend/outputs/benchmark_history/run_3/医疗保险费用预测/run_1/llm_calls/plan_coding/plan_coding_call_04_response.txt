@@ -1,0 +1,203 @@
+<plan>
+## 优化计划
+
+根据上下文载荷中的建议和历史代码分析，我制定了以下优化策略：
+
+### 1. 模型更换为 XGBoost
+- 历史代码使用 LightGBM 但效果提升有限，建议换用 XGBoost
+- 设置 `max_depth=7`, `learning_rate=0.05`, `n_estimators=500`
+- 启用 `early_stopping_rounds=50` 防止过拟合
+- 添加正则化参数 `reg_alpha=0.1`, `reg_lambda=0.1`
+
+### 2. 特征工程增强
+- 添加交互特征：`age * bmi`（年龄与BMI的交互）、`bmi * smoker`（BMI与吸烟的交互）
+- 添加多项式特征：`bmi^2`（BMI平方）、`age^2`（年龄平方）
+- 添加聚合特征：`children` 的平方项
+- 这些特征在医疗保险费用预测中具有实际意义（吸烟者BMI高会导致费用剧增）
+
+### 3. 预处理优化
+- 保持原有的 OneHotEncoder 和 StandardScaler 流程
+- 确保 `id` 列被丢弃
+- 确保类别特征正确编码
+
+### 4. 模型训练适配
+- 使用 `XGBRegressor` 的 sklearn 接口
+- 在 `fit()` 中传入 `eval_set` 和 `early_stopping_rounds`
+- 设置 `eval_metric='rmse'` 作为构造参数
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+import xgboost as xgb
+
+# 全局状态变量，用于保存预处理参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    global PREPROCESS_STATE
+    
+    # 复制数据，避免修改原始数据
+    df = df.copy()
+    
+    # 丢弃ID列（所有模式下都丢弃）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    if mode == 'train':
+        # 定义类别列和数值列
+        cat_cols = ['sex', 'smoker', 'region']
+        num_cols = ['age', 'bmi', 'children']
+        
+        # 构建预处理 Pipeline
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 分离特征和目标
+        if 'charges' in df.columns:
+            X = df.drop(columns=['charges'])
+            y = df['charges']
+        else:
+            X = df
+            y = None
+        
+        # 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 获取特征名（用于后续特征工程）
+        ohe = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = ohe.get_feature_names_out(cat_cols)
+        num_feature_names = num_cols
+        PREPROCESS_STATE['feature_names'] = list(cat_feature_names) + list(num_feature_names)
+        
+    elif mode == 'test':
+        # 从状态中读取已拟合的预处理器
+        if 'preprocessor' not in PREPROCESS_STATE:
+            raise ValueError("PREPROCESS_STATE 中没有预处理器，请先运行 mode='train'")
+        
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        
+        # 分离特征和目标
+        if 'charges' in df.columns:
+            X = df.drop(columns=['charges'])
+            y = df['charges']
+        else:
+            X = df
+            y = None
+    
+    # 应用预处理
+    X_processed = preprocessor.transform(X)
+    
+    # 将 numpy 数组转回 DataFrame
+    feature_names = PREPROCESS_STATE.get('feature_names', [f'feature_{i}' for i in range(X_processed.shape[1])])
+    X_processed_df = pd.DataFrame(X_processed, columns=feature_names, index=df.index)
+    
+    # 如果目标列存在，合并回去
+    if y is not None:
+        X_processed_df['charges'] = y.values
+    
+    return X_processed_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 复制数据
+    df = df.copy()
+    
+    # 分离目标列
+    if 'charges' in df.columns:
+        y = df['charges']
+        X = df.drop(columns=['charges'])
+    else:
+        X = df
+        y = None
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    # 添加交互特征和多项式特征
+    # 注意：预处理后的特征名是 one-hot 编码后的，需要根据实际列名操作
+    
+    # 获取原始数值列（经过标准化后的）
+    # 从列名中识别原始数值特征
+    col_names = list(X.columns)
+    
+    # 添加 BMI 平方项（如果存在 bmi 列）
+    if 'bmi' in col_names:
+        X['bmi_squared'] = X['bmi'] ** 2
+    
+    # 添加年龄平方项（如果存在 age 列）
+    if 'age' in col_names:
+        X['age_squared'] = X['age'] ** 2
+    
+    # 添加 children 平方项（如果存在 children 列）
+    if 'children' in col_names:
+        X['children_squared'] = X['children'] ** 2
+    
+    # 添加 age * bmi 交互特征
+    if 'age' in col_names and 'bmi' in col_names:
+        X['age_bmi_interaction'] = X['age'] * X['bmi']
+    
+    # 添加 smoker * bmi 交互特征（smoker_yes 是 one-hot 编码后的列）
+    smoker_yes_col = [c for c in col_names if c.startswith('smoker_') and 'yes' in c.lower()]
+    if smoker_yes_col and 'bmi' in col_names:
+        X['smoker_bmi_interaction'] = X[smoker_yes_col[0]] * X['bmi']
+    
+    # 添加 age * smoker 交互特征
+    if smoker_yes_col and 'age' in col_names:
+        X['smoker_age_interaction'] = X[smoker_yes_col[0]] * X['age']
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = xgb.XGBRegressor(
+        objective='reg:squarederror',
+        eval_metric='rmse',
+        max_depth=7,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=0
+    )
+    
+    return model
+```
+</code>

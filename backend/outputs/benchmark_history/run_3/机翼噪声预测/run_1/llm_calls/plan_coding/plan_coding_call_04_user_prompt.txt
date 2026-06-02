@@ -1,0 +1,531 @@
+【当前运行状态 Run State】: OPTIMIZE
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.REGRESSION
+- 目标列: SSPL
+- 评估指标: unknown
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于NASA翼型自噪声实验数据，构建回归模型预测不同工况下NACA 0012翼型的缩放声压级（SSPL）。输入特征包括频率、攻角、弦长、来流速度及吸力面位移厚度，输出为连续型声压级值。模型需学习气动参数与噪声水平的映射关系，实现精准预测。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 SSPL。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['SSPL'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "AirfoilSelfNoise_train.csv",
+  "rowCount": 1202,
+  "columnCount": 7,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 1202,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        799.0,
+        1349.0,
+        1428.0,
+        1150.0,
+        1100.0
+      ],
+      "min": 0.0,
+      "max": 1502.0,
+      "mean": 750.9292845257903,
+      "std": 436.5211566741454,
+      "median": 749.5,
+      "skewness": 0.00506053895200756,
+      "isMonotonic": false
+    },
+    {
+      "name": "f",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 21,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1000.0,
+        2000.0,
+        400.0,
+        400.0,
+        400.0
+      ],
+      "min": 200.0,
+      "max": 20000.0,
+      "mean": 2872.0382695507487,
+      "std": 3193.4617721407853,
+      "median": 1600.0,
+      "skewness": 2.2077759981155234
+    },
+    {
+      "name": "alpha",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 27,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        8.4,
+        6.7,
+        12.3,
+        17.4,
+        9.5
+      ],
+      "min": 0.0,
+      "max": 22.2,
+      "mean": 6.766222961730449,
+      "std": 5.836720065750422,
+      "median": 5.4,
+      "skewness": 0.6928550324099035
+    },
+    {
+      "name": "c",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 6,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0508,
+        0.1016,
+        0.1016,
+        0.0254,
+        0.0254
+      ],
+      "min": 0.0254,
+      "max": 0.3048,
+      "mean": 0.13756572379367718,
+      "std": 0.0934535815967257,
+      "median": 0.1016,
+      "skewness": 0.46372454459735873
+    },
+    {
+      "name": "U_infinity",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        71.3,
+        71.3,
+        55.5,
+        71.3,
+        31.7
+      ],
+      "min": 31.7,
+      "max": 71.3,
+      "mean": 51.30998336106489,
+      "std": 15.583769503549929,
+      "median": 55.5,
+      "skewness": 0.19386588174891098
+    },
+    {
+      "name": "delta",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 105,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.00529514,
+        0.00478288,
+        0.0368233,
+        0.016104,
+        0.00461377
+      ],
+      "min": 0.000400682,
+      "max": 0.0584113,
+      "mean": 0.011079245730449251,
+      "std": 0.013024109350877238,
+      "median": 0.00495741,
+      "skewness": 1.7163799982259322
+    },
+    {
+      "name": "SSPL",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1166,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        129.946,
+        134.568,
+        136.414,
+        117.396,
+        124.756
+      ],
+      "min": 103.38,
+      "max": 140.987,
+      "mean": 124.87696006655574,
+      "std": 6.852350759967073,
+      "median": 125.81649999999999,
+      "skewness": -0.4065456268748266
+    }
+  ],
+  "classBalance": {
+    "targetColumn": "U_infinity",
+    "nClasses": 4,
+    "maxClassRatio": 0.3203,
+    "minClassRatio": 0.1764,
+    "imbalanceRatio": 1.82,
+    "isSeverelyImbalanced": false
+  }
+}
+
+【上下文载荷 Context Payload】:
+历史已尝试增大n_estimators和降低learning_rate但效果未提升，建议换方向：1) 尝试特征交互或多项式特征（如degree=2）以捕捉非线性关系；2) 使用Optuna进行超参数自动搜索，重点调优num_leaves和min_child_samples；3) 检查是否存在异常值，尝试使用RobustScaler或分位数变换。
+
+【历史代码 Previous Code】:
+```python
+import pandas as pd
+import numpy as np
+import dill
+import json
+import re
+import warnings
+from sklearn.metrics import accuracy_score, roc_auc_score, root_mean_squared_error, mean_absolute_error, r2_score, f1_score
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态（用于保存预处理参数）==========
+PREPROCESS_STATE = {}
+
+# ========== LLM 填充区（开始）==========
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    - 丢弃 id 列
+    - 对偏度大的特征做对数变换（f, delta）
+    - 数值缩放（StandardScaler）在特征工程后统一进行
+    - 训练集拟合 scaler，验证/测试集应用
+    """
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 定义数值特征列
+    feature_cols = ['f', 'alpha', 'c', 'U_infinity', 'delta']
+    
+    # 对偏度大的特征做对数变换（在标准化之前）
+    # f 的偏度=2.21，delta 的偏度=1.72，对数变换可缓解右偏
+    if mode == 'train':
+        # 训练集：拟合对数变换参数
+        f_log_offset = 0  # f 最小值为200，无需偏移
+        delta_log_offset = 0  # delta 最小值为0.0004，无需偏移
+        
+        # 保存偏移量
+        PREPROCESS_STATE['f_log_offset'] = f_log_offset
+        PREPROCESS_STATE['delta_log_offset'] = delta_log_offset
+        
+        # 应用对数变换
+        df['f_log'] = np.log1p(df['f'] - f_log_offset) if f_log_offset > 0 else np.log(df['f'])
+        df['delta_log'] = np.log1p(df['delta'] - delta_log_offset) if delta_log_offset > 0 else np.log(df['delta'])
+        
+        # 拟合 scaler（在特征工程后使用，这里先保存原始数据）
+        # 注意：标准化将在 feature_engineering 之后进行
+        # 这里只做对数变换，不做标准化
+        scaler = StandardScaler()
+        PREPROCESS_STATE['scaler'] = scaler
+    else:
+        # 验证集或测试集：应用已拟合的对数变换参数
+        f_log_offset = PREPROCESS_STATE.get('f_log_offset', 0)
+        delta_log_offset = PREPROCESS_STATE.get('delta_log_offset', 0)
+        
+        # 应用对数变换
+        if 'f' in df.columns:
+            df['f_log'] = np.log1p(df['f'] - f_log_offset) if f_log_offset > 0 else np.log(df['f'])
+        if 'delta' in df.columns:
+            df['delta_log'] = np.log1p(df['delta'] - delta_log_offset) if delta_log_offset > 0 else np.log(df['delta'])
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    - 创建有物理意义的交叉特征
+    - 标准化所有特征
+    - 丢弃目标列 SSPL
+    - 返回纯数值特征矩阵
+    """
+    df = df.copy()
+    
+    # 创建交叉特征（物理意义明确）
+    # 频率与速度的交互（与涡脱落频率相关）
+    df['f_x_U'] = df['f'] * df['U_infinity']
+    # 攻角与位移厚度的交互（与分离泡相关）
+    df['alpha_x_delta'] = df['alpha'] * df['delta']
+    # 速度与弦长的比值（与雷诺数相关）
+    df['U_div_c'] = df['U_infinity'] / (df['c'] + 1e-8)
+    # 频率与位移厚度的交互（与边界层特征相关）
+    df['f_x_delta'] = df['f'] * df['delta']
+    # 频率与弦长的比值（与斯特劳哈尔数相关）
+    df['f_div_c'] = df['f'] / (df['c'] + 1e-8)
+    # 攻角与速度的交互
+    df['alpha_x_U'] = df['alpha'] * df['U_infinity']
+    # 位移厚度与弦长的比值
+    df['delta_div_c'] = df['delta'] / (df['c'] + 1e-8)
+    
+    # 使用对数变换后的特征创建交叉特征
+    if 'f_log' in df.columns and 'delta_log' in df.columns:
+        df['f_log_x_delta_log'] = df['f_log'] * df['delta_log']
+        df['f_log_x_U'] = df['f_log'] * df['U_infinity']
+        df['delta_log_x_alpha'] = df['delta_log'] * df['alpha']
+    
+    # 丢弃目标列（如果存在）
+    if 'SSPL' in df.columns:
+        df = df.drop(columns=['SSPL'])
+    
+    # 确保所有列为数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能出现的 NaN（如除零）
+    df = df.fillna(0)
+    
+    # 标准化所有特征
+    scaler = PREPROCESS_STATE.get('scaler')
+    if scaler is not None:
+        # 检查 scaler 是否已拟合
+        if hasattr(scaler, 'mean_'):
+            # 已拟合，应用变换
+            df[df.columns] = scaler.transform(df[df.columns])
+        else:
+            # 未拟合，拟合并变换
+            df[df.columns] = scaler.fit_transform(df[df.columns])
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用 LightGBM Regressor，配合早停防止过拟合。
+    """
+    model = lgb.LGBMRegressor(
+        objective='regression',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbose=-1  # 控制日志输出
+    )
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回 RMSE, MAE, R² 等指标。
+    """
+    y_pred = model.predict(X_val)
+    rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
+    mae = float(mean_absolute_error(y_val, y_pred))
+    r2 = float(r2_score(y_val, y_pred))
+    return {
+        'val_rmse': rmse,
+        'val_mae': mae,
+        'val_r2': r2
+    }
+# ========== LLM 填充区（结束）==========
+
+# ========== 数据加载（系统负责）==========
+train = pd.read_csv('data/train.csv')
+val = pd.read_csv('data/validation.csv')
+test = pd.read_csv('data/test.csv')
+
+# 获取目标列和 id 列
+target_col = 'SSPL'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 检查目标列是否存在
+if target_col not in train.columns:
+    raise ValueError(f"目标列 '{target_col}' 不在训练数据中，可用列: {list(train.columns)}")
+
+# ========== 预处理（系统调用 LLM 填充的函数）==========
+train_clean = preprocess(train, mode='train')
+val_clean = preprocess(val, mode='test')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标（兼容 preprocess 是否保留目标列的情况）
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+# 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
+# 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    from sklearn.preprocessing import LabelEncoder
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程（系统调用 LLM 填充的函数）==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# ========== 清洗特征名（LGBM/XGBoost 不支持特殊 JSON 字符）==========
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+# 去重列名
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 模型训练（系统负责）==========
+model = build_model()
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+try:
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+except Exception:
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 验证评估（LLM 可覆盖，系统兜底）==========
+# 如果 LLM 定义了 evaluate_model()，使用 LLM 的评估逻辑；否则使用系统默认指标
+try:
+    if 'evaluate_model' in globals():
+        metrics = evaluate_model(model, X_val_fe, y_val)
+    else:
+        val_preds = model.predict(X_val_fe)
+        metrics = {
+            'val_rmse': float(root_mean_squared_error(y_val, val_preds)),
+            'val_mae': float(mean_absolute_error(y_val, val_preds)),
+            'val_r2': float(r2_score(y_val, val_preds))
+        }
+except Exception as e:
+    print(f"[EVAL_ERROR] {e}")
+    metrics = {}
+    # 尝试最基本的预测来兜底
+    try:
+        _pred = model.predict(X_val_fe)
+        if task_type == "binary_classification" and hasattr(model, 'predict_proba'):
+            _prob = model.predict_proba(X_val_fe)[:, 1]
+            metrics = {'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}
+        elif task_type == "multiclass_classification":
+            metrics = {'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}
+        elif task_type in ("regression", "time_series_forecasting"):
+            metrics = {'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}
+    except Exception as e2:
+        print(f"[EVAL_FALLBACK_ERROR] {e2}")
+        metrics = {}
+
+# ========== 测试预测（系统保证格式）==========
+# 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
+# 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
+test_preds = model.predict(X_test_fe)
+test_probs = test_preds
+
+# 【系统】目标变换逆变换（如 LLM 在 PREPROCESS_STATE 中声明了 target_transform）
+# 兼容多种常见键名: target_transform, target_log_transformer
+_test_tform = PREPROCESS_STATE.get('target_transform') or PREPROCESS_STATE.get('target_log_transformer')
+if _test_tform == 'log1p':
+    test_preds = np.expm1(test_preds)
+elif _test_tform == 'log':
+    test_preds = np.exp(test_preds)
+elif _test_tform == 'sqrt':
+    test_preds = np.square(test_preds)
+
+
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df['probability'] = test_probs
+result_df.to_csv('data/test_predictions.csv', index=False)
+
+# ========== 模型保存（系统保证可序列化）==========
+with open('data/best_model.pkl', 'wb') as f:
+    dill.dump(model, f)
+
+# ========== 输出指标（系统抓取）==========
+print('METRICS_JSON_START')
+print(json.dumps(metrics))
+print('METRICS_JSON_END')
+
+```
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

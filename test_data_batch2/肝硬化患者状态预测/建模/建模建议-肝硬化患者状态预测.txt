@@ -1,0 +1,1 @@
+建议采用LightGBM/XGBoost或TabNet处理表格数据。使用StratifiedKFold交叉验证，防止类别不均衡。重点构造N_Days与生化指标（Bilirubin、Albumin、Copper）的交互及比值特征，避免测试集泄露。输出每行三个类别的预测概率，经softmax归一化。调优仅最小化LogLoss，通过贝叶斯优化搜索超参数，优先保证概率校准而非单纯追求准确率。

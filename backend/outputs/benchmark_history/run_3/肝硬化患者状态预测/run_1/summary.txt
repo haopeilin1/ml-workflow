@@ -1,0 +1,61 @@
+============================================================
+  任务运行摘要: 肝硬化患者状态预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: multiclass_classification
+  目标列: Status
+  评估指标: Multi-class Log Loss
+  复杂度判定: complex (LLM直接判定为complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 72.50
+  总耗时: 0.0s
+
+【各阶段耗时】
+  意图识别: 2.6s
+  代码生成: 128.7s
+  沙箱执行: 75.3s
+  评估优化: 14.6s
+  产物生成: 155.3s
+  测试预测: 0.0s
+  总计: 561.7s
+
+【Token 消耗】
+  Plan/Coding 调用: 2 次, 24867 tokens
+  Evaluation 调用: 4 次, 9466 tokens
+  总计: 6 次, 34333 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 5795tokens | 2.5s
+    - qwen3.5-flash@openai: 1 calls, 5795 tokens, 2.5s
+  plan_coding : deepseek-v4-pro@openai | 2calls | 24867tokens | 138.4s
+    - deepseek-v4-pro@openai: 2 calls, 24867 tokens, 138.4s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9466tokens | 14.6s
+    - deepseek-v4-flash@openai: 4 calls, 9466 tokens, 14.6s
+  judge       : qwen3.5-flash@openai | 1calls | 1565tokens | 2.3s
+    - qwen3.5-flash@openai: 1 calls, 1565 tokens, 2.3s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【Multi-class Log Loss】为核心标准。测试集Log Loss为0.4440，远低于通常不可接受的阈值2.0，且处于优秀水平（<1.0），表明模型在概率校准和分类置信度上表现良好。虽然验证集Accuracy为0.8450，测试集Accuracy为0.8420，两者相对差距极小（约0.36%），显示出极佳的泛化一致性，无过拟合迹象。尽管未直接提供验证集Log Loss数值，但基于测试集Log Loss的优异表现及Accuracy的高度稳定，可判定模型质量达标。...
+
+【维度评分】
+  unknown: 70.0 (weight=0.3)
+  unknown: 80.0 (weight=0.25)
+  unknown: 75.0 (weight=0.2)
+  unknown: 80.0 (weight=0.15)
+  unknown: 65.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 17:26:37 UTC
+============================================================

@@ -1,0 +1,64 @@
+============================================================
+  任务运行摘要: 医疗保险费用预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: regression
+  目标列: charges
+  评估指标: RMSE
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 72.50
+  总耗时: 0.0s
+  验证集 RMSE: 5008.4898
+  测试集 RMSE: 5948.8192
+
+【各阶段耗时】
+  意图识别: 0.7s
+  代码生成: 19.4s
+  沙箱执行: 17.6s
+  评估优化: 16.5s
+  产物生成: 122.3s
+  测试预测: 0.0s
+  总计: 231.5s
+
+【Token 消耗】
+  Plan/Coding 调用: 6 次, 63688 tokens
+  Evaluation 调用: 4 次, 9553 tokens
+  总计: 10 次, 73241 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 3356tokens | 0.7s
+    - qwen3.5-flash@openai: 1 calls, 3356 tokens, 0.7s
+  plan_coding : deepseek-v4-flash@openai | 6calls | 63688tokens | 179.7s
+    - deepseek-v4-flash@openai: 4 calls, 45484 tokens, 68.9s
+    - deepseek-v4-pro@openai: 2 calls, 18204 tokens, 110.7s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9553tokens | 16.5s
+    - deepseek-v4-flash@openai: 4 calls, 9553 tokens, 16.5s
+  judge       : qwen3.5-flash@openai | 1calls | 1634tokens | 2.4s
+    - qwen3.5-flash@openai: 1 calls, 1634 tokens, 2.4s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：RMSE】为核心标准。模型在测试集上的 RMSE 为 5948.8192，验证集 RMSE 为 5008.4898。相对差距计算为 (5948.8192 - 5008.4898) / 5008.4898 ≈ 18.76%，处于可接受范围（<30%）内，表明模型具有良好的泛化能力，未出现严重过拟合。同时，测试集 R²达到 0.7782，说明模型对目标变量 charges 的方差解释度较高，回归效果良好。预测策略显示为“未知”，未发现使用通用回退模板的迹象，特征工程一致性得以保留。综合来看，该回归模型核心指标表现稳健，符合交付标准。...
+
+【维度评分】
+  unknown: 65.0 (weight=0.3)
+  unknown: 85.0 (weight=0.25)
+  unknown: 70.0 (weight=0.2)
+  unknown: 80.0 (weight=0.15)
+  unknown: 75.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 16:46:52 UTC
+============================================================

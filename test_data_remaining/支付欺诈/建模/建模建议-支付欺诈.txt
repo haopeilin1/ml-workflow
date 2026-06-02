@@ -1,0 +1,1 @@
+采用LightGBM/XGBoost梯度提升树模型，对类别特征与缺失值容忍度高。类别特征直接传入或One-Hot编码，数值特征无需强归一化。因欺诈样本极少（约1.4%），建议使用class_weight='balanced'处理不平衡，交叉验证采用StratifiedKFold。最终提交测试集预测标签（0/1）CSV文件。

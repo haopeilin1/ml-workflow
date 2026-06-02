@@ -1,0 +1,1 @@
+建议使用梯度提升树（LightGBM/XGBoost）或逻辑回归基线。57 维特征均为连续值，无需编码，可做标准化或分箱处理。因类别不平衡（spam 约占 39%），建议设置 class_weight 或 scale_pos_weight。评估指标仅采用 ROC-AUC，以综合衡量模型在不同阈值下的排序区分能力。

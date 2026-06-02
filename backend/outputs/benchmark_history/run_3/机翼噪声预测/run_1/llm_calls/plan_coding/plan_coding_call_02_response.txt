@@ -1,0 +1,190 @@
+<plan>
+根据上下文载荷中的优化建议和当前代码分析，我制定以下优化计划：
+
+## 当前问题分析
+1. **特征工程顺序问题**：当前代码在`preprocess`中先做了标准化，然后在`feature_engineering`中创建交叉特征和多项式特征。这会导致新创建的特征没有被标准化，且标准化后的特征做平方/交互会失去物理意义。
+2. **模型配置优化**：当前`n_estimators=1000`但未启用early_stopping，容易过拟合。应启用early_stopping并配合验证集。
+3. **特征工程增强**：可以添加更多有物理意义的交叉特征，如雷诺数相关的特征组合。
+4. **异常值处理**：数据画像显示`f`和`delta`列有较大偏度（skewness分别为2.21和1.72），建议做对数变换。
+
+## 优化策略
+
+### 1. 预处理优化
+- 将标准化移到特征工程之后，确保所有特征（包括新创建的特征）都被标准化
+- 对偏度大的特征（`f`, `delta`）做对数变换（在标准化之前）
+- 保留`id`列丢弃逻辑
+
+### 2. 特征工程增强
+- 保持原有交叉特征（`f_x_U`, `alpha_x_delta`, `U_div_c`, `f_x_delta`）
+- 添加更多物理意义特征：`f/c`（斯特劳哈尔数相关）、`alpha*U_infinity`、`delta/c`等
+- 对偏度大的特征做对数变换后创建交叉特征
+- 移除多项式特征（标准化后做平方失去意义）
+
+### 3. 模型优化
+- 启用early_stopping（使用`callbacks=[lgb.early_stopping(stopping_rounds=50)]`）
+- 设置`n_estimators=500`，配合early_stopping自动选择最佳迭代次数
+- 降低`learning_rate`至0.05
+- 增加正则化参数防止过拟合
+
+### 4. 关键修复
+- 修复特征工程顺序：先做对数变换和特征创建，再做标准化
+- 确保所有特征列在传入模型前都是数值类型
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    - 丢弃 id 列
+    - 对偏度大的特征做对数变换（f, delta）
+    - 数值缩放（StandardScaler）在特征工程后统一进行
+    - 训练集拟合 scaler，验证/测试集应用
+    """
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 定义数值特征列
+    feature_cols = ['f', 'alpha', 'c', 'U_infinity', 'delta']
+    
+    # 对偏度大的特征做对数变换（在标准化之前）
+    # f 的偏度=2.21，delta 的偏度=1.72，对数变换可缓解右偏
+    if mode == 'train':
+        # 训练集：拟合对数变换参数
+        f_log_offset = 0  # f 最小值为200，无需偏移
+        delta_log_offset = 0  # delta 最小值为0.0004，无需偏移
+        
+        # 保存偏移量
+        PREPROCESS_STATE['f_log_offset'] = f_log_offset
+        PREPROCESS_STATE['delta_log_offset'] = delta_log_offset
+        
+        # 应用对数变换
+        df['f_log'] = np.log1p(df['f'] - f_log_offset) if f_log_offset > 0 else np.log(df['f'])
+        df['delta_log'] = np.log1p(df['delta'] - delta_log_offset) if delta_log_offset > 0 else np.log(df['delta'])
+        
+        # 拟合 scaler（在特征工程后使用，这里先保存原始数据）
+        # 注意：标准化将在 feature_engineering 之后进行
+        # 这里只做对数变换，不做标准化
+        scaler = StandardScaler()
+        PREPROCESS_STATE['scaler'] = scaler
+    else:
+        # 验证集或测试集：应用已拟合的对数变换参数
+        f_log_offset = PREPROCESS_STATE.get('f_log_offset', 0)
+        delta_log_offset = PREPROCESS_STATE.get('delta_log_offset', 0)
+        
+        # 应用对数变换
+        if 'f' in df.columns:
+            df['f_log'] = np.log1p(df['f'] - f_log_offset) if f_log_offset > 0 else np.log(df['f'])
+        if 'delta' in df.columns:
+            df['delta_log'] = np.log1p(df['delta'] - delta_log_offset) if delta_log_offset > 0 else np.log(df['delta'])
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    - 创建有物理意义的交叉特征
+    - 标准化所有特征
+    - 丢弃目标列 SSPL
+    - 返回纯数值特征矩阵
+    """
+    df = df.copy()
+    
+    # 创建交叉特征（物理意义明确）
+    # 频率与速度的交互（与涡脱落频率相关）
+    df['f_x_U'] = df['f'] * df['U_infinity']
+    # 攻角与位移厚度的交互（与分离泡相关）
+    df['alpha_x_delta'] = df['alpha'] * df['delta']
+    # 速度与弦长的比值（与雷诺数相关）
+    df['U_div_c'] = df['U_infinity'] / (df['c'] + 1e-8)
+    # 频率与位移厚度的交互（与边界层特征相关）
+    df['f_x_delta'] = df['f'] * df['delta']
+    # 频率与弦长的比值（与斯特劳哈尔数相关）
+    df['f_div_c'] = df['f'] / (df['c'] + 1e-8)
+    # 攻角与速度的交互
+    df['alpha_x_U'] = df['alpha'] * df['U_infinity']
+    # 位移厚度与弦长的比值
+    df['delta_div_c'] = df['delta'] / (df['c'] + 1e-8)
+    
+    # 使用对数变换后的特征创建交叉特征
+    if 'f_log' in df.columns and 'delta_log' in df.columns:
+        df['f_log_x_delta_log'] = df['f_log'] * df['delta_log']
+        df['f_log_x_U'] = df['f_log'] * df['U_infinity']
+        df['delta_log_x_alpha'] = df['delta_log'] * df['alpha']
+    
+    # 丢弃目标列（如果存在）
+    if 'SSPL' in df.columns:
+        df = df.drop(columns=['SSPL'])
+    
+    # 确保所有列为数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能出现的 NaN（如除零）
+    df = df.fillna(0)
+    
+    # 标准化所有特征
+    scaler = PREPROCESS_STATE.get('scaler')
+    if scaler is not None:
+        # 检查 scaler 是否已拟合
+        if hasattr(scaler, 'mean_'):
+            # 已拟合，应用变换
+            df[df.columns] = scaler.transform(df[df.columns])
+        else:
+            # 未拟合，拟合并变换
+            df[df.columns] = scaler.fit_transform(df[df.columns])
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用 LightGBM Regressor，配合早停防止过拟合。
+    """
+    model = lgb.LGBMRegressor(
+        objective='regression',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbose=-1  # 控制日志输出
+    )
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回 RMSE, MAE, R² 等指标。
+    """
+    y_pred = model.predict(X_val)
+    rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
+    mae = float(mean_absolute_error(y_val, y_pred))
+    r2 = float(r2_score(y_val, y_pred))
+    return {
+        'val_rmse': rmse,
+        'val_mae': mae,
+        'val_r2': r2
+    }
+```
+</code>

@@ -1,0 +1,64 @@
+============================================================
+  任务运行摘要: 电商顾客退货预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: returned
+  评估指标: ROC-AUC
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ❌ 否
+
+【核心指标】
+  Best Score: 56.00
+  总耗时: 0.0s
+  验证集 AUC: 0.5815
+  测试集 AUC: 0.5823
+
+【各阶段耗时】
+  意图识别: 2.0s
+  代码生成: 24.4s
+  沙箱执行: 29.8s
+  评估优化: 21.1s
+  产物生成: 100.2s
+  测试预测: 0.0s
+  总计: 263.1s
+
+【Token 消耗】
+  Plan/Coding 调用: 5 次, 67964 tokens
+  Evaluation 调用: 4 次, 9574 tokens
+  总计: 9 次, 77538 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 5704tokens | 1.0s
+    - qwen3.5-flash@openai: 1 calls, 5704 tokens, 1.0s
+  plan_coding : deepseek-v4-flash@openai | 5calls | 67964tokens | 193.6s
+    - deepseek-v4-flash@openai: 4 calls, 55505 tokens, 99.8s
+    - deepseek-v4-pro@openai: 1 calls, 12459 tokens, 93.8s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9574tokens | 21.1s
+    - deepseek-v4-flash@openai: 4 calls, 9574 tokens, 21.2s
+  judge       : qwen3.5-flash@openai | 1calls | 1588tokens | 2.6s
+    - qwen3.5-flash@openai: 1 calls, 1588 tokens, 2.6s
+
+【产物生成】
+  完整性: simplified
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, report.html, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：ROC-AUC】为核心标准。模型在验证集上的 AUC 为 0.5815，在测试集上的 AUC 为 0.5823。虽然测试集与验证集的指标表现高度一致（相对差距极小，泛化一致性良好），但核心指标数值本身严重不足。对于二分类任务，AUC 值接近 0.5 表示模型预测能力等同于随机猜测。通常可接受的基线要求 AUC > 0.7（或至少显著高于 0.6）。当前 0.58 的 AUC 远低于合理基线，说明模型未能学习到有效的特征规律，无法提供有价值的预测结果。...
+
+【维度评分】
+  unknown: 20.0 (weight=0.3)
+  unknown: 90.0 (weight=0.25)
+  unknown: 60.0 (weight=0.2)
+  unknown: 70.0 (weight=0.15)
+  unknown: 50.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 11:56:02 UTC
+============================================================

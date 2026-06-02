@@ -1,0 +1,735 @@
+<plan>
+产物生成计划：回归任务产物生成
+
+1. 加载已存在的 data/best_model.pkl 模型（使用 dill 加载，因为训练阶段使用 dill 保存）
+2. 加载测试集 data/test.csv，使用与训练阶段相同的预处理和特征工程流程
+3. 对测试集进行预测，保存到 output/test_predictions.csv
+4. 提取特征重要性（从 LightGBM 模型属性获取），保存到 output/feature_importance.csv
+5. 生成特征重要性柱状图 output/feature_importance.png
+6. 生成预测值 vs 真实值散点图 output/report_fig.png（如果有真实值）
+7. 生成 HTML 报告 output/report.html
+8. 保存模型到 output/model.pkl
+9. 生成独立预测脚本 output/predict.py
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import dill
+import json
+import re
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, RobustScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMRegressor
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {
+    'dteday_time_features': None,
+    'target_log1p': True,
+    'cat_cols': [],
+    'num_cols': [],
+}
+
+# ========== 预处理函数（与训练阶段一致）==========
+def preprocess(df, mode='train'):
+    target_col = 'cnt'
+    df = df.copy()
+    
+    drop_cols = ['casual', 'registered', 'instant']
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    if 'dteday' in df.columns:
+        df['dteday_parsed'] = pd.to_datetime(df['dteday'], errors='coerce')
+        df['dteday_year'] = df['dteday_parsed'].dt.year
+        df['dteday_month'] = df['dteday_parsed'].dt.month
+        df['dteday_day'] = df['dteday_parsed'].dt.day
+        df['dteday_weekday'] = df['dteday_parsed'].dt.weekday
+        df['dteday_hour'] = df['dteday_parsed'].dt.hour
+        
+        duplicate_time_cols = ['dteday_month', 'dteday_weekday', 'dteday_hour']
+        df = df.drop(columns=[c for c in duplicate_time_cols if c in df.columns], errors='ignore')
+        df = df.drop(columns=['dteday', 'dteday_parsed'], errors='ignore')
+        
+        extracted_cols = ['dteday_year', 'dteday_day']
+        if mode == 'train':
+            PREPROCESS_STATE['dteday_time_features'] = [c for c in extracted_cols if c in df.columns]
+    
+    categorical_cols = ['season', 'weathersit', 'holiday', 'workingday', 'yr']
+    if 'hr' in df.columns:
+        categorical_cols.append('hr')
+    if 'weekday' in df.columns:
+        categorical_cols.append('weekday')
+    if 'mnth' in df.columns:
+        categorical_cols.append('mnth')
+    
+    categorical_cols = [c for c in categorical_cols if c in df.columns]
+    
+    for col in categorical_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+    
+    if mode == 'train':
+        PREPROCESS_STATE['cat_cols'] = categorical_cols
+    
+    if target_col in df.columns:
+        df[target_col] = pd.to_numeric(df[target_col], errors='coerce')
+        df[target_col] = np.log1p(df[target_col])
+        if mode == 'train':
+            PREPROCESS_STATE['target_log1p'] = True
+    
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    return df
+
+
+def feature_engineering(df):
+    target_col = 'cnt'
+    df = df.copy()
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    if 'hr' in df.columns and 'workingday' in df.columns:
+        workingday_num = pd.to_numeric(df['workingday'], errors='coerce').fillna(0).astype(int)
+        hr_num = pd.to_numeric(df['hr'], errors='coerce').fillna(0).astype(int)
+        df['hr_workingday_interact'] = hr_num * 10 + workingday_num
+    
+    if 'temp' in df.columns and 'hum' in df.columns:
+        temp_num = pd.to_numeric(df['temp'], errors='coerce')
+        hum_num = pd.to_numeric(df['hum'], errors='coerce')
+        df['temp_hum_interact'] = temp_num * hum_num
+    
+    if 'windspeed' in df.columns and 'weathersit' in df.columns:
+        windspeed_num = pd.to_numeric(df['windspeed'], errors='coerce')
+        weathersit_num = pd.to_numeric(df['weathersit'], errors='coerce')
+        df['windspeed_weathersit_interact'] = windspeed_num * weathersit_num
+    
+    if 'hr' in df.columns:
+        hr_num = pd.to_numeric(df['hr'], errors='coerce').fillna(0).astype(int)
+        df['is_rush_hour'] = hr_num.isin([7, 8, 9, 17, 18, 19]).astype(int)
+        df['is_daytime'] = ((hr_num >= 6) & (hr_num <= 18)).astype(int)
+    
+    if 'weekday' in df.columns:
+        weekday_num = pd.to_numeric(df['weekday'], errors='coerce').fillna(0).astype(int)
+        df['is_weekend'] = weekday_num.isin([5, 6]).astype(int)
+    
+    if target_col in df.columns:
+        cnt_values = df[target_col].copy()
+        df['cnt_lag1'] = cnt_values.shift(1)
+        df['cnt_lag2'] = cnt_values.shift(2)
+        df['cnt_rolling_mean_24h'] = cnt_values.shift(1).rolling(window=24, min_periods=1).mean()
+        df['cnt_rolling_std_24h'] = cnt_values.shift(1).rolling(window=24, min_periods=1).std()
+        df['cnt_lag1'] = df['cnt_lag1'].bfill().fillna(0)
+        df['cnt_lag2'] = df['cnt_lag2'].bfill().fillna(0)
+        df['cnt_rolling_mean_24h'] = df['cnt_rolling_mean_24h'].bfill().fillna(0)
+        df['cnt_rolling_std_24h'] = df['cnt_rolling_std_24h'].bfill().fillna(0)
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    for col in X.select_dtypes(include=['object']).columns:
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+    X = X.fillna(0)
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+        X[col] = X[col].astype(float)
+    
+    return X
+
+
+# ========== 主流程 ==========
+print("=" * 60)
+print("产物生成开始")
+print("=" * 60)
+
+# 1. 加载模型
+print("\n[1/7] 加载模型...")
+model = None
+model_loaded_from_pkl = False
+
+if os.path.exists('data/best_model.pkl'):
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = dill.load(f)
+        model_loaded_from_pkl = True
+        print("  ✓ 成功从 data/best_model.pkl 加载模型")
+    except Exception as e:
+        print(f"  ⚠ dill 加载失败: {e}，尝试 pickle...")
+        try:
+            with open('data/best_model.pkl', 'rb') as f:
+                model = pickle.load(f)
+            model_loaded_from_pkl = True
+            print("  ✓ 成功从 data/best_model.pkl 加载模型 (pickle)")
+        except Exception as e2:
+            print(f"  ⚠ pickle 加载也失败: {e2}，将重新训练模型")
+
+if not model_loaded_from_pkl:
+    print("  重新训练模型...")
+    train = pd.read_csv('data/train.csv')
+    target_col = 'cnt'
+    
+    train_clean = preprocess(train, mode='train')
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train_raw = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train_raw = train_clean
+    
+    X_train_fe = feature_engineering(X_train_raw)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train_raw.index)
+    X_train_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe.columns]
+    
+    cat_cols_original = PREPROCESS_STATE.get('cat_cols', [])
+    cat_cols_clean = [re.sub(r'[^\w]', '_', str(c)) for c in cat_cols_original]
+    
+    num_preprocessor = Pipeline([
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', RobustScaler())
+    ])
+    cat_preprocessor = Pipeline([
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+    
+    if cat_cols_clean:
+        preprocessor = ColumnTransformer([
+            ('cat', cat_preprocessor, cat_cols_clean),
+        ], remainder=num_preprocessor)
+    else:
+        preprocessor = num_preprocessor
+    
+    lgbm = LGBMRegressor(
+        objective='regression',
+        metric='rmse',
+        n_estimators=2000,
+        max_depth=7,
+        num_leaves=63,
+        learning_rate=0.03,
+        subsample=0.75,
+        colsample_bytree=0.75,
+        min_child_samples=15,
+        reg_alpha=0.5,
+        reg_lambda=0.5,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=-1
+    )
+    
+    model = Pipeline([
+        ('preprocess', preprocessor),
+        ('model', lgbm)
+    ])
+    model.fit(X_train_fe, y_train)
+    print("  ✓ 模型重新训练完成")
+
+# 2. 加载测试集并预处理
+print("\n[2/7] 加载并预处理测试集...")
+test = pd.read_csv('data/test.csv')
+test_clean = preprocess(test, mode='test')
+X_test_raw = test_clean.drop(columns=['cnt'], errors='ignore')
+if X_test_raw is test_clean:
+    X_test_raw = test_clean.copy()
+
+X_test_fe = feature_engineering(X_test_raw)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test_raw.index)
+X_test_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+print(f"  测试集特征形状: {X_test_fe.shape}")
+
+# 3. 测试集预测
+print("\n[3/7] 测试集预测...")
+test_preds_log = model.predict(X_test_fe)
+# 逆 log1p 变换
+test_preds = np.expm1(test_preds_log)
+print(f"  预测值范围: [{test_preds.min():.2f}, {test_preds.max():.2f}]")
+
+# 保存测试预测
+id_col = 'instant'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+test_result = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds
+})
+test_result.to_csv('output/test_predictions.csv', index=False)
+print("  ✓ 已保存 output/test_predictions.csv")
+
+# 4. 提取特征重要性
+print("\n[4/7] 提取特征重要性...")
+# 获取 Pipeline 中的模型和预处理器
+if hasattr(model, 'named_steps'):
+    lgbm_model = model.named_steps['model']
+    preprocessor_step = model.named_steps['preprocess']
+else:
+    lgbm_model = model
+    preprocessor_step = None
+
+# 获取 OneHotEncoder 后的特征名
+feature_names = list(X_test_fe.columns)
+if preprocessor_step is not None and hasattr(preprocessor_step, 'get_feature_names_out'):
+    try:
+        feature_names = list(preprocessor_step.get_feature_names_out(X_test_fe.columns))
+    except Exception:
+        pass
+
+# 获取特征重要性
+if hasattr(lgbm_model, 'feature_importances_'):
+    importances = lgbm_model.feature_importances_
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 对齐长度
+if len(importances) != len(feature_names):
+    min_len = min(len(importances), len(feature_names))
+    feature_names = feature_names[:min_len]
+    importances = importances[:min_len]
+
+# 创建特征重要性 DataFrame
+fi_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+fi_df = fi_df.sort_values('importance', ascending=False).reset_index(drop=True)
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print(f"  ✓ 已保存 output/feature_importance.csv ({len(fi_df)} 个特征)")
+
+# 5. 生成特征重要性图
+print("\n[5/7] 生成特征重要性图...")
+top_n = min(30, len(fi_df))
+fi_top = fi_df.head(top_n)
+
+plt.figure(figsize=(10, max(6, top_n * 0.3)))
+colors = plt.cm.viridis(np.linspace(0.3, 0.9, top_n))
+plt.barh(range(top_n), fi_top['importance'].values[::-1], color=colors[::-1])
+plt.yticks(range(top_n), fi_top['name'].values[::-1], fontsize=9)
+plt.xlabel('Importance', fontsize=12)
+plt.title(f'Top {top_n} Feature Importances (LightGBM)', fontsize=14)
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("  ✓ 已保存 output/feature_importance.png")
+
+# 6. 生成报告图表（预测值 vs 真实值散点图 - 如果有真实值）
+print("\n[6/7] 生成报告图表...")
+has_ground_truth = 'cnt' in test.columns
+
+if has_ground_truth:
+    y_test_true = test['cnt'].values
+    plt.figure(figsize=(8, 8))
+    plt.scatter(y_test_true, test_preds, alpha=0.5, s=10, c='steelblue', edgecolors='none')
+    
+    min_val = min(y_test_true.min(), test_preds.min())
+    max_val = max(y_test_true.max(), test_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='y = x')
+    
+    plt.xlabel('True Values', fontsize=12)
+    plt.ylabel('Predicted Values', fontsize=12)
+    plt.title('Predicted vs True Values (Test Set)', fontsize=14)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("  ✓ 已保存 output/report_fig.png")
+    
+    # 计算指标
+    test_rmse = float(root_mean_squared_error(y_test_true, test_preds))
+    test_mae = float(mean_absolute_error(y_test_true, test_preds))
+    test_r2 = float(r2_score(y_test_true, test_preds))
+    residuals = y_test_true - test_preds
+else:
+    test_rmse = None
+    test_mae = None
+    test_r2 = None
+    residuals = None
+    # 即使没有真实值也生成一个占位图
+    plt.figure(figsize=(8, 6))
+    plt.text(0.5, 0.5, 'No ground truth available\nfor test set', 
+             ha='center', va='center', fontsize=14, transform=plt.gca().transAxes)
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("  ⚠ 测试集无目标列，跳过散点图（已生成占位图）")
+
+# 7. 生成 HTML 报告
+print("\n[7/7] 生成 HTML 报告...")
+
+# 构建特征重要性表格 HTML
+fi_html_rows = ""
+for i, row in fi_df.head(20).iterrows():
+    fi_html_rows += f"<tr><td>{i+1}</td><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>\n"
+
+# 构建测试预测预览表格
+preview_n = min(10, len(test_result))
+preview_rows = ""
+for i in range(preview_n):
+    preview_rows += f"<tr><td>{i+1}</td><td>{test_result.iloc[i]['id']}</td><td>{test_result.iloc[i]['prediction']:.4f}</td></tr>\n"
+
+# 指标摘要
+metrics_summary = ""
+if has_ground_truth:
+    metrics_summary = f"""
+    <div class="metrics-box">
+        <h3>Test Set Metrics</h3>
+        <table>
+            <tr><th>Metric</th><th>Value</th></tr>
+            <tr><td>RMSE</td><td>{test_rmse:.4f}</td></tr>
+            <tr><td>MAE</td><td>{test_mae:.4f}</td></tr>
+            <tr><td>R²</td><td>{test_r2:.4f}</td></tr>
+        </table>
+    </div>
+    <div class="metrics-box">
+        <h3>Residual Statistics</h3>
+        <table>
+            <tr><th>Statistic</th><th>Value</th></tr>
+            <tr><td>Mean</td><td>{np.mean(residuals):.4f}</td></tr>
+            <tr><td>Std</td><td>{np.std(residuals):.4f}</td></tr>
+            <tr><td>Min</td><td>{np.min(residuals):.4f}</td></tr>
+            <tr><td>Max</td><td>{np.max(residuals):.4f}</td></tr>
+        </table>
+    </div>
+    """
+else:
+    metrics_summary = """
+    <div class="metrics-box">
+        <h3>Note</h3>
+        <p>Test set does not contain ground truth labels. Metrics cannot be computed.</p>
+    </div>
+    """
+
+html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Regression Model Report</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f7fa;
+            color: #333;
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #2c3e50;
+            margin-top: 30px;
+        }}
+        h3 {{
+            color: #34495e;
+        }}
+        .metrics-box {{
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: inline-block;
+            vertical-align: top;
+            margin-right: 20px;
+            min-width: 280px;
+        }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+        }}
+        th, td {{
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            text-align: left;
+        }}
+        th {{
+            background-color: #3498db;
+            color: white;
+        }}
+        tr:nth-child(even) {{
+            background-color: #f2f2f2;
+        }}
+        .image-container {{
+            text-align: center;
+            margin: 20px 0;
+        }}
+        .image-container img {{
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }}
+        .footer {{
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            color: #777;
+            font-size: 0.9em;
+        }}
+    </style>
+</head>
+<body>
+    <h1>🚲 Bike Sharing Demand - Regression Model Report</h1>
+    
+    <h2>1. Model Information</h2>
+    <div class="metrics-box">
+        <table>
+            <tr><th>Property</th><th>Value</th></tr>
+            <tr><td>Model Type</td><td>LightGBM Regressor (Pipeline)</td></tr>
+            <tr><td>Target Column</td><td>cnt (log1p transformed)</td></tr>
+            <tr><td>Task Type</td><td>Regression</td></tr>
+            <tr><td>Evaluation Metric</td><td>RMSE</td></tr>
+            <tr><td>Model Source</td><td>{'data/best_model.pkl' if model_loaded_from_pkl else 'Retrained'}</td></tr>
+        </table>
+    </div>
+    
+    <h2>2. Performance Metrics</h2>
+    {metrics_summary}
+    
+    <h2>3. Feature Importances (Top 20)</h2>
+    <table>
+        <tr><th>Rank</th><th>Feature Name</th><th>Importance</th></tr>
+        {fi_html_rows}
+    </table>
+    
+    <div class="image-container">
+        <h3>Feature Importance Chart</h3>
+        <img src="feature_importance.png" alt="Feature Importance">
+    </div>
+    
+    <div class="image-container">
+        <h3>Predicted vs True Values</h3>
+        <img src="report_fig.png" alt="Predictions vs True">
+    </div>
+    
+    <h2>4. Test Set Predictions (Preview - First 10 rows)</h2>
+    <table>
+        <tr><th>#</th><th>ID</th><th>Prediction</th></tr>
+        {preview_rows}
+    </table>
+    <p><em>Full predictions saved to output/test_predictions.csv ({len(test_result)} rows)</em></p>
+    
+    <div class="footer">
+        <p>Report generated automatically. Model: LightGBM Regressor with RobustScaler + OneHotEncoder preprocessing.</p>
+    </div>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("  ✓ 已保存 output/report.html")
+
+# 8. 保存模型到 output/
+print("\n保存模型到 output/model.pkl...")
+with open('output/model.pkl', 'wb') as f:
+    dill.dump(model, f)
+print("  ✓ 已保存 output/model.pkl")
+
+# 9. 生成独立预测脚本
+print("\n生成独立预测脚本 output/predict.py...")
+predict_script = '''#!/usr/bin/env python3
+"""
+独立预测脚本
+用法: python predict.py <input_csv> <output_csv>
+示例: python predict.py data/test.csv output/my_predictions.csv
+"""
+import sys
+import pandas as pd
+import numpy as np
+import dill
+import re
+import warnings
+warnings.filterwarnings('ignore')
+
+# ========== 预处理函数（与训练阶段一致）==========
+def preprocess(df, mode='test'):
+    target_col = 'cnt'
+    df = df.copy()
+    
+    drop_cols = ['casual', 'registered', 'instant']
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    if 'dteday' in df.columns:
+        df['dteday_parsed'] = pd.to_datetime(df['dteday'], errors='coerce')
+        df['dteday_year'] = df['dteday_parsed'].dt.year
+        df['dteday_month'] = df['dteday_parsed'].dt.month
+        df['dteday_day'] = df['dteday_parsed'].dt.day
+        df['dteday_weekday'] = df['dteday_parsed'].dt.weekday
+        df['dteday_hour'] = df['dteday_parsed'].dt.hour
+        
+        duplicate_time_cols = ['dteday_month', 'dteday_weekday', 'dteday_hour']
+        df = df.drop(columns=[c for c in duplicate_time_cols if c in df.columns], errors='ignore')
+        df = df.drop(columns=['dteday', 'dteday_parsed'], errors='ignore')
+    
+    categorical_cols = ['season', 'weathersit', 'holiday', 'workingday', 'yr']
+    if 'hr' in df.columns:
+        categorical_cols.append('hr')
+    if 'weekday' in df.columns:
+        categorical_cols.append('weekday')
+    if 'mnth' in df.columns:
+        categorical_cols.append('mnth')
+    
+    categorical_cols = [c for c in categorical_cols if c in df.columns]
+    
+    for col in categorical_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+    
+    if target_col in df.columns:
+        df[target_col] = pd.to_numeric(df[target_col], errors='coerce')
+        df[target_col] = np.log1p(df[target_col])
+    
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    return df
+
+
+def feature_engineering(df):
+    target_col = 'cnt'
+    df = df.copy()
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    
+    if 'hr' in df.columns and 'workingday' in df.columns:
+        workingday_num = pd.to_numeric(df['workingday'], errors='coerce').fillna(0).astype(int)
+        hr_num = pd.to_numeric(df['hr'], errors='coerce').fillna(0).astype(int)
+        df['hr_workingday_interact'] = hr_num * 10 + workingday_num
+    
+    if 'temp' in df.columns and 'hum' in df.columns:
+        temp_num = pd.to_numeric(df['temp'], errors='coerce')
+        hum_num = pd.to_numeric(df['hum'], errors='coerce')
+        df['temp_hum_interact'] = temp_num * hum_num
+    
+    if 'windspeed' in df.columns and 'weathersit' in df.columns:
+        windspeed_num = pd.to_numeric(df['windspeed'], errors='coerce')
+        weathersit_num = pd.to_numeric(df['weathersit'], errors='coerce')
+        df['windspeed_weathersit_interact'] = windspeed_num * weathersit_num
+    
+    if 'hr' in df.columns:
+        hr_num = pd.to_numeric(df['hr'], errors='coerce').fillna(0).astype(int)
+        df['is_rush_hour'] = hr_num.isin([7, 8, 9, 17, 18, 19]).astype(int)
+        df['is_daytime'] = ((hr_num >= 6) & (hr_num <= 18)).astype(int)
+    
+    if 'weekday' in df.columns:
+        weekday_num = pd.to_numeric(df['weekday'], errors='coerce').fillna(0).astype(int)
+        df['is_weekend'] = weekday_num.isin([5, 6]).astype(int)
+    
+    if target_col in df.columns:
+        cnt_values = df[target_col].copy()
+        df['cnt_lag1'] = cnt_values.shift(1)
+        df['cnt_lag2'] = cnt_values.shift(2)
+        df['cnt_rolling_mean_24h'] = cnt_values.shift(1).rolling(window=24, min_periods=1).mean()
+        df['cnt_rolling_std_24h'] = cnt_values.shift(1).rolling(window=24, min_periods=1).std()
+        df['cnt_lag1'] = df['cnt_lag1'].bfill().fillna(0)
+        df['cnt_lag2'] = df['cnt_lag2'].bfill().fillna(0)
+        df['cnt_rolling_mean_24h'] = df['cnt_rolling_mean_24h'].bfill().fillna(0)
+        df['cnt_rolling_std_24h'] = df['cnt_rolling_std_24h'].bfill().fillna(0)
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    for col in X.select_dtypes(include=['object']).columns:
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+    X = X.fillna(0)
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+        X[col] = X[col].astype(float)
+    
+    return X
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python predict.py <input_csv> <output_csv>")
+        print("Example: python predict.py data/test.csv output/my_predictions.csv")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2]
+    
+    # 加载模型
+    print(f"Loading model from output/model.pkl...")
+    with open('output/model.pkl', 'rb') as f:
+        model = dill.load(f)
+    
+    # 加载数据
+    print(f"Loading data from {input_path}...")
+    df = pd.read_csv(input_path)
+    
+    # 预处理
+    print("Preprocessing...")
+    df_clean = preprocess(df, mode='test')
+    X = feature_engineering(df_clean)
+    X.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X.columns]
+    
+    # 预测
+    print("Predicting...")
+    preds_log = model.predict(X)
+    preds = np.expm1(preds_log)
+    
+    # 保存结果
+    id_col = 'instant'
+    if id_col not in df.columns:
+        id_col = df.columns[0]
+    
+    result = pd.DataFrame({
+        'id': df[id_col] if id_col in df.columns else range(len(preds)),
+        'prediction': preds
+    })
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    print(f"Total predictions: {len(result)}")
+    print(f"Prediction range: [{preds.min():.2f}, {preds.max():.2f}]")
+
+
+if __name__ == '__main__':
+    main()
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("  ✓ 已保存 output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    "status": "success",
+    "model_loaded_from_pkl": model_loaded_from_pkl,
+    "test_samples": len(test_result),
+    "test_predictions_range": [float(test_preds.min()), float(test_preds.max())],
+    "feature_count": len(fi_df),
+    "top_5_features": fi_df.head(5)['name'].tolist(),
+    "output_files": [
+        "output/model.pkl",
+        "output/feature_importance.csv",
+        "output/feature_importance.png",
+        "output/report_fig.png",
+        "output/report.html",
+        "output/test_predictions.csv",
+        "output/predict.py"
+    ]
+}
+
+if has_ground_truth:
+    summary["test_rmse"] = test_rmse
+    summary["test_mae"] = test_mae
+    summary["test_r2"] = test_r2
+
+print("\n" + "=" * 60)
+print("产物生成完成！")
+print("=" * 60)
+print(json.dumps(summary, indent=2))
+```
+</code>

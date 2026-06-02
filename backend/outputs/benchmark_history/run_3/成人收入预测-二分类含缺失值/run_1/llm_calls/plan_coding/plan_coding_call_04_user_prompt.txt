@@ -1,0 +1,393 @@
+【当前运行状态 Run State】: DEBUG
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.BINARY_CLASSIFICATION
+- 目标列: income
+- 评估指标: AUC
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于1994年美国人口普查数据，预测个人年收入是否超过5万美元。数据包含年龄、工作类别、教育程度、婚姻状况、职业、种族、性别、资本收益等特征。存在缺失值和大量类别特征，为二分类任务，评估指标采用AUC。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- 类别特征列 ['workclass', 'education', 'marital_status', 'occupation', 'relationship', 'race', 'sex', 'native_country'] 必须纳入 Pipeline 的 ColumnTransformer 中，使用 OneHotEncoder(handle_unknown='ignore') 或 OrdinalEncoder 编码，严禁直接传入模型。
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 列 ['native_country'] 名称看起来像数值但类型被识别为 categorical/object，必须在 preprocess() 中用 `pd.to_numeric(df[col], errors='coerce')` 强制转换，然后再填充缺失值。严禁对 string 列调用 .median()。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 income。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['income'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "train.csv",
+  "rowCount": 26048,
+  "columnCount": 16,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 26048,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "min": 0.0,
+      "max": 26047.0,
+      "mean": 13023.5,
+      "std": 7519.554242107706,
+      "median": 13023.5,
+      "skewness": 0.0,
+      "isMonotonic": true
+    },
+    {
+      "name": "age",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 72,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        27.0,
+        45.0,
+        29.0,
+        30.0,
+        29.0
+      ],
+      "min": 17.0,
+      "max": 90.0,
+      "mean": 38.59098587223587,
+      "std": 13.659950492438126,
+      "median": 37.0,
+      "skewness": 0.5577819536419097
+    },
+    {
+      "name": "workclass",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 8,
+      "missingCount": 1459,
+      "missingRate": 5.6,
+      "sampleValues": [
+        "Private",
+        "State-gov",
+        "Private",
+        "Private",
+        "Self-emp-not-inc"
+      ],
+      "mostCommon": "Private",
+      "mostCommonFreq": 18203,
+      "cardinality": "low"
+    },
+    {
+      "name": "fnlwgt",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 18417,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        160178.0,
+        50567.0,
+        185908.0,
+        190040.0,
+        189346.0
+      ],
+      "min": 12285.0,
+      "max": 1484705.0,
+      "mean": 189429.28366861178,
+      "std": 105239.7688450475,
+      "median": 178114.5,
+      "skewness": 1.449449337929679
+    },
+    {
+      "name": "education",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 16,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Some-college",
+        "HS-grad",
+        "Bachelors",
+        "Bachelors",
+        "Some-college"
+      ],
+      "mostCommon": "HS-grad",
+      "mostCommonFreq": 8410,
+      "cardinality": "medium"
+    },
+    {
+      "name": "education_num",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 16,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        10.0,
+        9.0,
+        13.0,
+        13.0,
+        10.0
+      ],
+      "min": 1.0,
+      "max": 16.0,
+      "mean": 10.06833538083538,
+      "std": 2.574377253782477,
+      "median": 10.0,
+      "skewness": -0.31945137815435726
+    },
+    {
+      "name": "marital_status",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 7,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Divorced",
+        "Married-civ-spouse",
+        "Married-civ-spouse",
+        "Never-married",
+        "Divorced"
+      ],
+      "mostCommon": "Married-civ-spouse",
+      "mostCommonFreq": 12000,
+      "cardinality": "low"
+    },
+    {
+      "name": "occupation",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 14,
+      "missingCount": 1463,
+      "missingRate": 5.62,
+      "sampleValues": [
+        "Adm-clerical",
+        "Exec-managerial",
+        "Exec-managerial",
+        "Machine-op-inspct",
+        "Craft-repair"
+      ],
+      "mostCommon": "Prof-specialty",
+      "mostCommonFreq": 3317,
+      "cardinality": "medium"
+    },
+    {
+      "name": "relationship",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 6,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Not-in-family",
+        "Wife",
+        "Husband",
+        "Not-in-family",
+        "Not-in-family"
+      ],
+      "mostCommon": "Husband",
+      "mostCommonFreq": 10566,
+      "cardinality": "low"
+    },
+    {
+      "name": "race",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 5,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "White",
+        "White",
+        "Black",
+        "White",
+        "White"
+      ],
+      "mostCommon": "White",
+      "mostCommonFreq": 22297,
+      "cardinality": "low"
+    },
+    {
+      "name": "sex",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Female",
+        "Female",
+        "Male",
+        "Female",
+        "Male"
+      ],
+      "mostCommon": "Male",
+      "mostCommonFreq": 17473,
+      "cardinality": "low"
+    },
+    {
+      "name": "capital_gain",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 117,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2202.0
+      ],
+      "min": 0.0,
+      "max": 99999.0,
+      "mean": 1059.3704315110565,
+      "std": 7292.059672711447,
+      "median": 0.0,
+      "skewness": 12.11049177445951
+    },
+    {
+      "name": "capital_loss",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 88,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 4356.0,
+      "mean": 85.699785012285,
+      "std": 399.77674089222074,
+      "median": 0.0,
+      "skewness": 4.6513410042665395
+    },
+    {
+      "name": "hours_per_week",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 93,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        38.0,
+        40.0,
+        55.0,
+        40.0,
+        50.0
+      ],
+      "min": 1.0,
+      "max": 99.0,
+      "mean": 40.40291001228501,
+      "std": 12.3440375237615,
+      "median": 40.0,
+      "skewness": 0.23570950832075083
+    },
+    {
+      "name": "native_country",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 41,
+      "missingCount": 462,
+      "missingRate": 1.77,
+      "sampleValues": [
+        "United-States",
+        "United-States",
+        "United-States",
+        "United-States",
+        "United-States"
+      ],
+      "mostCommon": "United-States",
+      "mostCommonFreq": 23363,
+      "cardinality": "medium"
+    },
+    {
+      "name": "income",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "<=50K",
+        "<=50K",
+        ">50K",
+        "<=50K",
+        "<=50K"
+      ],
+      "mostCommon": "<=50K",
+      "mostCommonFreq": 19775,
+      "cardinality": "low"
+    }
+  ],
+  "timeSeriesSignal": {
+    "coherent": true,
+    "column": "id",
+    "intervalStd": 0.0,
+    "intervalMean": 1.0,
+    "reason": "列 'id' 单调递增，相邻间隔稳定（mean=1.00, std=0.00）"
+  },
+  "classBalance": {
+    "targetColumn": "workclass",
+    "nClasses": 8,
+    "maxClassRatio": 0.6988,
+    "minClassRatio": 0.0002,
+    "imbalanceRatio": 4550.75,
+    "isSeverelyImbalanced": true
+  }
+}
+
+【上下文载荷 Context Payload】:
+[历史错误摘要] 第 1 次执行错误:
+
+第 2 次执行错误:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_8aieocq1\script.py", line 1, in <module>
+    X_result = pd.DataFrame(X_processed, columns=feature_names)
+               ^^
+NameError: name 'pd' is not defined. Did you mean: 'id'?
+
+
+第 3 次执行错误:
+Traceback (most recent call last):
+  File "C:\Users\86147\AppData\Local\Temp\sandbox_8aieocq1\script.py", line 1, in <module>
+    X_result = pd.DataFrame(X_processed, columns=feature_names)
+               ^^
+NameError: name 'pd' is not defined. Did you mean: 'id'?
+
+
+【历史代码 Previous Code】:
+```python
+X_result = pd.DataFrame(X_processed, columns=feature_names)
+```
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

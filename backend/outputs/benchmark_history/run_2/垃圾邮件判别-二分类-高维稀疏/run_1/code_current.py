@@ -1,0 +1,342 @@
+import pandas as pd
+import numpy as np
+import dill
+import json
+import re
+import warnings
+from sklearn.metrics import accuracy_score, roc_auc_score, root_mean_squared_error, mean_absolute_error, r2_score, f1_score
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态（用于保存预处理参数）==========
+PREPROCESS_STATE = {}
+
+# ========== LLM 填充区（开始）==========
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score
+import lightgbm as lgb
+
+# 全局状态：用于存储 preprocess 阶段拟合的参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    '''
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    '''
+    global PREPROCESS_STATE
+    
+    df = df.copy()
+    
+    # 1. 丢弃 'id' 列（如果存在）
+    df = df.drop(columns=['id'], errors='ignore')
+    
+    # 2. 确保所有特征列（f0-f56）为数值类型
+    # 根据数据画像，所有特征列都是数值类型，但为安全起见做显式转换
+    feature_cols = [c for c in df.columns if c.startswith('f') and c != 'spam']
+    for col in feature_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 3. 处理可能的缺失值（数据画像显示无缺失，但做防御性处理）
+    # 数值列用中位数填充
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    # 排除目标列
+    num_cols = [c for c in num_cols if c != 'spam']
+    
+    if mode == 'train':
+        # 计算并保存中位数
+        medians = {}
+        for col in num_cols:
+            medians[col] = df[col].median()
+        PREPROCESS_STATE['medians'] = medians
+    else:
+        medians = PREPROCESS_STATE.get('medians', {})
+    
+    for col in num_cols:
+        if col in medians:
+            df[col] = df[col].fillna(medians[col])
+    
+    # 4. 清洗特征名：替换特殊字符为下划线（防止 LightGBM 报 JSON 字符错误）
+    df.columns = [str(c).replace(' ', '_').replace('(', '_').replace(')', '_').replace('/', '_').replace('\\', '_').replace('<', '_').replace('>', '_').replace(',', '_').replace('.', '_').replace(':', '_').replace(';', '_').replace('{', '_').replace('}', '_').replace('[', '_').replace(']', '_').replace('"', '_').replace("'", '_') for c in df.columns]
+    
+    return df
+
+
+def feature_engineering(df):
+    '''
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    
+    对 f0-f56 特征应用 log1p 变换以压缩右偏分布。
+    '''
+    target_col = 'spam'
+    
+    # 分离特征和目标
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    # 识别需要 log1p 变换的特征列（f0-f56）
+    feature_cols = [c for c in X.columns if c.startswith('f')]
+    
+    # 对特征列应用 log1p 变换
+    # 使用 FunctionTransformer 确保 pickle 兼容性
+    def log1p_transform(X_df):
+        X_df = X_df.copy()
+        for col in feature_cols:
+            if col in X_df.columns:
+                # 确保非负值（log1p 要求 x >= -1，这里数据都是非负的）
+                X_df[col] = np.log1p(X_df[col].clip(lower=0))
+        return X_df
+    
+    log_transformer = FunctionTransformer(log1p_transform)
+    X_transformed = log_transformer.fit_transform(X)
+    
+    # 确保返回 DataFrame（保持列名）
+    if not isinstance(X_transformed, pd.DataFrame):
+        X_transformed = pd.DataFrame(X_transformed, columns=X.columns, index=X.index)
+    
+    return X_transformed
+
+
+def build_model():
+    '''
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    
+    使用 LightGBM 分类器，Pipeline 中包含：
+    1. StandardScaler 仅对 f54, f55, f56 进行标准化
+    2. LightGBM 分类器（带早停支持）
+    '''
+    
+    # 识别需要标准化的特征列（f54, f55, f56）
+    # 注意：列名可能在 preprocess 中被清洗过，使用前缀匹配
+    scale_cols = ['f54', 'f55', 'f56']
+    
+    # 构建 ColumnTransformer：只对 f54/f55/f56 做 StandardScaler，其余特征 passthrough
+    preprocessor = ColumnTransformer([
+        ('scaler', StandardScaler(), scale_cols)
+    ], remainder='passthrough')
+    
+    # LightGBM 分类器
+    # 参数设置：
+    # - 目标为 binary，评估指标为 auc
+    # - 保守的超参数防止过拟合（max_depth=6, num_leaves=31, min_child_samples=20）
+    # - 正则化参数 reg_alpha=0.1, reg_lambda=0.1
+    # - subsample=0.8, colsample_bytree=0.8 增加随机性
+    # - 不使用 class_weight 或 scale_pos_weight（数据集基本平衡）
+    lgb_model = lgb.LGBMClassifier(
+        objective='binary',
+        metric='auc',
+        learning_rate=0.05,
+        num_leaves=31,
+        max_depth=6,
+        min_child_samples=20,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        n_estimators=500,
+        random_state=42,
+        verbose=-1  # 静默模式
+    )
+    
+    # 构建完整 Pipeline
+    pipeline = Pipeline([
+        ('preprocess', preprocessor),
+        ('model', lgb_model)
+    ])
+    
+    return pipeline
+
+
+def evaluate_model(model, X_val, y_val):
+    '''
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    计算 ROC-AUC、混淆矩阵、Precision、Recall、F1-Score。
+    '''
+    # 预测概率
+    val_probs = model.predict_proba(X_val)[:, 1]
+    
+    # ROC-AUC
+    val_auc = roc_auc_score(y_val, val_probs)
+    
+    # 使用默认阈值 0.5 进行硬分类
+    val_preds = (val_probs >= 0.5).astype(int)
+    
+    # 混淆矩阵
+    tn, fp, fn, tp = confusion_matrix(y_val, val_preds).ravel()
+    
+    # Precision, Recall, F1
+    val_precision = precision_score(y_val, val_preds)
+    val_recall = recall_score(y_val, val_preds)
+    val_f1 = f1_score(y_val, val_preds)
+    
+    return {
+        'val_auc': float(val_auc),
+        'val_f1': float(val_f1),
+        'val_precision': float(val_precision),
+        'val_recall': float(val_recall),
+        'val_confusion_matrix_tn': int(tn),
+        'val_confusion_matrix_fp': int(fp),
+        'val_confusion_matrix_fn': int(fn),
+        'val_confusion_matrix_tp': int(tp)
+    }
+# ========== LLM 填充区（结束）==========
+
+# ========== 数据加载（系统负责）==========
+train = pd.read_csv('data/train.csv')
+val = pd.read_csv('data/validation.csv')
+test = pd.read_csv('data/test.csv')
+
+# 获取目标列和 id 列
+target_col = 'spam'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 检查目标列是否存在
+if target_col not in train.columns:
+    raise ValueError(f"目标列 '{target_col}' 不在训练数据中，可用列: {list(train.columns)}")
+
+# ========== 预处理（系统调用 LLM 填充的函数）==========
+train_clean = preprocess(train, mode='train')
+val_clean = preprocess(val, mode='test')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标（兼容 preprocess 是否保留目标列的情况）
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+# 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
+# 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    from sklearn.preprocessing import LabelEncoder
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程（系统调用 LLM 填充的函数）==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# ========== 清洗特征名（LGBM/XGBoost 不支持特殊 JSON 字符）==========
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+# 去重列名
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 模型训练（系统负责）==========
+model = build_model()
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+try:
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+except Exception:
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 验证评估（LLM 可覆盖，系统兜底）==========
+# 如果 LLM 定义了 evaluate_model()，使用 LLM 的评估逻辑；否则使用系统默认指标
+try:
+    if 'evaluate_model' in globals():
+        metrics = evaluate_model(model, X_val_fe, y_val)
+    else:
+        if hasattr(model, 'predict_proba'):
+            val_probs = model.predict_proba(X_val_fe)[:, 1]
+        else:
+            val_probs = model.predict(X_val_fe).astype(float)
+        val_preds = (val_probs >= 0.5).astype(int)
+        metrics = {
+            'val_auc': float(roc_auc_score(y_val, val_probs)),
+            'val_accuracy': float(accuracy_score(y_val, val_preds))
+        }
+except Exception as e:
+    print(f"[EVAL_ERROR] {e}")
+    metrics = {}
+    # 尝试最基本的预测来兜底
+    try:
+        _pred = model.predict(X_val_fe)
+        if task_type == "binary_classification" and hasattr(model, 'predict_proba'):
+            _prob = model.predict_proba(X_val_fe)[:, 1]
+            metrics = {'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}
+        elif task_type == "multiclass_classification":
+            metrics = {'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}
+        elif task_type in ("regression", "time_series_forecasting"):
+            metrics = {'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}
+    except Exception as e2:
+        print(f"[EVAL_FALLBACK_ERROR] {e2}")
+        metrics = {}
+
+# ========== 测试预测（系统保证格式）==========
+# 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
+# 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df['probability'] = test_probs
+result_df.to_csv('data/test_predictions.csv', index=False)
+
+# ========== 模型保存（系统保证可序列化）==========
+with open('data/best_model.pkl', 'wb') as f:
+    dill.dump(model, f)
+
+# ========== 输出指标（系统抓取）==========
+print('METRICS_JSON_START')
+print(json.dumps(metrics))
+print('METRICS_JSON_END')

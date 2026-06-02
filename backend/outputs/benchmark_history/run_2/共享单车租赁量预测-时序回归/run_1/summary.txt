@@ -1,0 +1,63 @@
+============================================================
+  任务运行摘要: 共享单车租赁量预测-时序回归 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: regression
+  目标列: cnt
+  评估指标: RMSE
+  复杂度判定: complex (时序任务强制complex)
+  时序任务: 是
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ❌ 否
+
+【核心指标】
+  Best Score: 39.50
+  总耗时: 0.0s
+  验证集 RMSE: 340.2404
+  测试集 RMSE: 328.0437
+
+【各阶段耗时】
+  意图识别: 1.1s
+  代码生成: 67.1s
+  沙箱执行: 12.4s
+  评估优化: 21.0s
+  产物生成: 161.4s
+  测试预测: 0.0s
+  总计: 415.9s
+
+【Token 消耗】
+  Plan/Coding 调用: 2 次, 22224 tokens
+  Evaluation 调用: 4 次, 9681 tokens
+  总计: 6 次, 31905 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 5450tokens | 1.1s
+    - qwen3.5-flash@openai: 1 calls, 5450 tokens, 1.1s
+  plan_coding : deepseek-v4-pro@openai | 2calls | 22224tokens | 153.2s
+    - deepseek-v4-pro@openai: 2 calls, 22224 tokens, 153.2s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9681tokens | 21.0s
+    - deepseek-v4-flash@openai: 4 calls, 9681 tokens, 21.0s
+  judge       : qwen3.5-flash@openai | 1calls | 1577tokens | 2.4s
+    - qwen3.5-flash@openai: 1 calls, 1577 tokens, 2.4s
+
+【产物生成】
+  完整性: simplified
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：RMSE】为核心标准。虽然测试集 RMSE (328.04) 略优于验证集 RMSE (340.24)，相对差距在可接受范围内，但模型在测试集上的 R² 为 -1.2136。R² 为负值表明模型的预测效果甚至不如直接预测目标列均值（基准线），说明模型完全未能捕捉到数据的分布规律或存在严重的过拟合/数据泄露问题导致泛化失败。对于回归任务，R² < 0 是绝对不可接受的交付标准，意味着模型在实际应用中毫无价值。...
+
+【维度评分】
+  unknown: 5.0 (weight=0.3)
+  unknown: 50.0 (weight=0.25)
+  unknown: 60.0 (weight=0.2)
+  unknown: 70.0 (weight=0.15)
+  unknown: 30.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 11:43:13 UTC
+============================================================

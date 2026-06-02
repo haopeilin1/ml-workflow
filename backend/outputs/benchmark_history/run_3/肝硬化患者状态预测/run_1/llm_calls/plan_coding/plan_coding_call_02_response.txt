@@ -1,0 +1,635 @@
+<plan>
+产物生成计划：
+1. 加载已存在的 data/best_model.pkl 模型
+2. 对测试集 data/test.csv 进行预处理和特征工程（与训练时一致）
+3. 生成多分类任务所需的所有产物文件
+4. 关键修复：确保特征工程后的数据不包含字符串列（报错原因是 X_test_fe 中仍有原始字符串列）
+5. 生成特征重要性（从 LGBM 模型属性获取）、混淆矩阵热力图、HTML 报告等
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import re
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
+from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix, log_loss
+from lightgbm import LGBMClassifier
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {}
+
+# ========== 预处理函数（与训练时一致）==========
+def preprocess(df, mode='train'):
+    target_col = 'Status'
+    
+    df = df.drop(columns=['id'], errors='ignore')
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    target_col = re.sub(r'[^\w]', '_', target_col)
+    
+    if mode == 'train':
+        if target_col in df.columns:
+            status_mapping = {'C': 0, 'CL': 1, 'D': 2}
+            PREPROCESS_STATE['status_mapping'] = status_mapping
+            PREPROCESS_STATE['status_reverse_mapping'] = {v: k for k, v in status_mapping.items()}
+            df[target_col] = df[target_col].map(status_mapping)
+            if df[target_col].isna().any():
+                unknown = df[df[target_col].isna()][target_col].unique()
+                raise ValueError(f"Unknown categories in target column: {unknown}")
+    
+    feature_cols = [c for c in df.columns if c != target_col]
+    
+    categorical_cols = ['Drug', 'Sex', 'Ascites', 'Hepatomegaly', 'Spiders', 'Edema']
+    categorical_cols = [c for c in categorical_cols if c in feature_cols]
+    
+    high_missing_num_cols = ['Cholesterol', 'Copper', 'Alk_Phos', 'SGOT', 'Tryglicerides']
+    high_missing_num_cols = [c for c in high_missing_num_cols if c in feature_cols]
+    
+    skewed_cols = ['N_Days', 'Bilirubin', 'Cholesterol', 'Copper', 'Alk_Phos', 'Tryglicerides']
+    skewed_cols = [c for c in skewed_cols if c in feature_cols]
+    
+    low_missing_num_cols = ['Platelets', 'Prothrombin']
+    low_missing_num_cols = [c for c in low_missing_num_cols if c in feature_cols]
+    
+    other_num_cols = [c for c in feature_cols 
+                      if c not in categorical_cols 
+                      and c not in high_missing_num_cols 
+                      and c not in low_missing_num_cols
+                      and c not in skewed_cols]
+    all_num_cols = [c for c in feature_cols if c not in categorical_cols]
+    
+    for col in categorical_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna('Missing')
+            df[col] = df[col].astype(str)
+    
+    for col in all_num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    if mode == 'train':
+        PREPROCESS_STATE['skewed_cols'] = skewed_cols
+        PREPROCESS_STATE['log1p_min_values'] = {}
+        for col in skewed_cols:
+            if col in df.columns:
+                min_val = df[col].min()
+                PREPROCESS_STATE['log1p_min_values'][col] = min_val
+                if min_val < 0:
+                    shift = abs(min_val) + 1
+                    PREPROCESS_STATE['log1p_shift'] = PREPROCESS_STATE.get('log1p_shift', {})
+                    PREPROCESS_STATE['log1p_shift'][col] = shift
+                    df[col] = np.log1p(df[col] + shift)
+                else:
+                    df[col] = np.log1p(df[col])
+    else:
+        for col in skewed_cols:
+            if col in df.columns:
+                shift = PREPROCESS_STATE.get('log1p_shift', {}).get(col, 0)
+                df[col] = np.log1p(df[col] + shift)
+    
+    if mode == 'train':
+        PREPROCESS_STATE['low_missing_medians'] = {}
+        for col in low_missing_num_cols:
+            if col in df.columns:
+                median_val = df[col].median()
+                PREPROCESS_STATE['low_missing_medians'][col] = median_val
+                df[col] = df[col].fillna(median_val)
+    else:
+        for col in low_missing_num_cols:
+            if col in df.columns:
+                df[col] = df[col].fillna(PREPROCESS_STATE['low_missing_medians'].get(col, 0))
+    
+    if mode == 'train':
+        knn_cols = [c for c in all_num_cols if c in df.columns]
+        if len(knn_cols) > 0:
+            knn_imputer = KNNImputer(n_neighbors=5, weights='uniform')
+            df_knn = df[knn_cols].copy()
+            df_knn_imputed = knn_imputer.fit_transform(df_knn)
+            PREPROCESS_STATE['knn_imputer'] = knn_imputer
+            PREPROCESS_STATE['knn_cols'] = knn_cols
+            df[knn_cols] = df_knn_imputed
+    else:
+        knn_imputer = PREPROCESS_STATE.get('knn_imputer')
+        knn_cols = PREPROCESS_STATE.get('knn_cols', [])
+        if knn_imputer is not None and len(knn_cols) > 0:
+            df_knn = df[knn_cols].copy()
+            df_knn_imputed = knn_imputer.transform(df_knn)
+            df[knn_cols] = df_knn_imputed
+    
+    if mode == 'train':
+        PREPROCESS_STATE['other_num_medians'] = {}
+        for col in other_num_cols:
+            if col in df.columns and df[col].isna().any():
+                median_val = df[col].median()
+                PREPROCESS_STATE['other_num_medians'][col] = median_val
+                df[col] = df[col].fillna(median_val)
+    else:
+        for col, median_val in PREPROCESS_STATE.get('other_num_medians', {}).items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    return df
+
+
+def feature_engineering(df):
+    target_col = 'Status'
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    categorical_cols = ['Drug', 'Sex', 'Ascites', 'Hepatomegaly', 'Spiders', 'Edema']
+    categorical_cols = [c for c in categorical_cols if c in X.columns]
+    
+    num_cols = [c for c in X.columns if c not in categorical_cols]
+    
+    if 'Bilirubin' in X.columns and 'Albumin' in X.columns:
+        X['Bilirubin_Albumin_ratio'] = X['Bilirubin'] / (X['Albumin'] + 1e-6)
+    
+    if 'Stage' in X.columns and 'N_Days' in X.columns:
+        X['Stage_N_Days_interact'] = X['Stage'] * X['N_Days']
+    
+    num_cols = [c for c in X.columns if c not in categorical_cols]
+    
+    if 'feature_engineering_preprocessor' not in PREPROCESS_STATE:
+        cat_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='constant', fill_value='Missing')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        
+        num_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        preprocessor = ColumnTransformer([
+            ('cat', cat_pipeline, categorical_cols),
+            ('num', num_pipeline, num_cols)
+        ], remainder='drop')
+        
+        X_processed = preprocessor.fit_transform(X)
+        
+        PREPROCESS_STATE['feature_engineering_preprocessor'] = preprocessor
+        
+        if len(categorical_cols) > 0:
+            ohe = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            cat_feature_names = list(ohe.get_feature_names_out(categorical_cols))
+        else:
+            cat_feature_names = []
+        
+        all_feature_names = cat_feature_names + num_cols
+        PREPROCESS_STATE['feature_engineering_columns'] = all_feature_names
+    else:
+        preprocessor = PREPROCESS_STATE['feature_engineering_preprocessor']
+        X_processed = preprocessor.transform(X)
+        all_feature_names = PREPROCESS_STATE['feature_engineering_columns']
+    
+    X_processed = pd.DataFrame(X_processed, columns=all_feature_names, index=X.index)
+    X_processed.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_processed.columns]
+    
+    for col in X_processed.columns:
+        X_processed[col] = pd.to_numeric(X_processed[col], errors='coerce')
+    X_processed = X_processed.fillna(0)
+    
+    return X_processed
+
+
+# ========== 主流程 ==========
+os.makedirs('output', exist_ok=True)
+
+# 1. 加载训练数据（用于拟合预处理参数）
+train = pd.read_csv('data/train.csv')
+target_col = 'Status'
+
+# 2. 预处理训练集（fit 模式，填充 PREPROCESS_STATE）
+train_clean = preprocess(train, mode='train')
+
+# 3. 分离特征和目标
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train_raw = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train_raw = train_clean
+
+# 4. 特征工程（fit 模式，填充 feature_engineering_preprocessor）
+X_train_fe = feature_engineering(X_train_raw)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train_raw.index)
+
+# 清洗列名
+X_train_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe.columns]
+if X_train_fe.columns.duplicated().any():
+    X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+
+# 5. 加载或训练模型
+model = None
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Successfully loaded model from data/best_model.pkl")
+except Exception as e:
+    print(f"Failed to load best_model.pkl: {e}, retraining...")
+    model = LGBMClassifier(
+        objective='multiclass',
+        num_class=3,
+        metric='multi_logloss',
+        boosting_type='gbdt',
+        num_leaves=63,
+        max_depth=8,
+        learning_rate=0.02,
+        n_estimators=1000,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        class_weight='balanced',
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1
+    )
+    model.fit(X_train_fe, y_train)
+
+# 6. 保存模型到 output/model.pkl
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# 7. 特征重要性
+feature_names = X_train_fe.columns.tolist()
+importances = model.feature_importances_
+
+# 确保长度一致
+if len(importances) != len(feature_names):
+    feature_names = [f"feature_{i}" for i in range(len(importances))]
+
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# 8. 特征重要性图（只显示 top 20）
+top_n = min(20, len(importance_df))
+top_features = importance_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(top_n), top_features['importance'].values[::-1], color='steelblue')
+plt.yticks(range(top_n), top_features['name'].values[::-1])
+plt.xlabel('Importance')
+plt.title('Top Feature Importances')
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100)
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# 9. 测试集预测
+test = pd.read_csv('data/test.csv')
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+test_clean = preprocess(test, mode='test')
+X_test_raw = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test_raw is test_clean:
+    X_test_raw = test_clean.copy()
+
+X_test_fe = feature_engineering(X_test_raw)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test_raw.index)
+
+X_test_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# 确保测试集列与训练集一致
+missing_cols = set(X_train_fe.columns) - set(X_test_fe.columns)
+for col in missing_cols:
+    X_test_fe[col] = 0
+X_test_fe = X_test_fe[X_train_fe.columns]
+
+test_preds_encoded = model.predict(X_test_fe)
+test_probs_all = model.predict_proba(X_test_fe)
+
+# 反编码预测标签
+status_reverse_mapping = PREPROCESS_STATE.get('status_reverse_mapping', {0: 'C', 1: 'CL', 2: 'D'})
+test_preds = np.array([status_reverse_mapping.get(p, str(p)) for p in test_preds_encoded])
+
+# 构建测试预测结果
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+for i in range(test_probs_all.shape[1]):
+    class_label = status_reverse_mapping.get(i, f'class_{i}')
+    result_df[f'proba_{class_label}'] = test_probs_all[:, i]
+
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# 10. 混淆矩阵热力图（使用训练集预测来展示模型性能）
+train_preds_encoded = model.predict(X_train_fe)
+cm = confusion_matrix(y_train, train_preds_encoded)
+class_names = [status_reverse_mapping.get(i, str(i)) for i in sorted(set(y_train))]
+
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+            xticklabels=class_names, yticklabels=class_names)
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix (Training Set)')
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100)
+plt.close()
+print("Confusion matrix saved to output/report_fig.png")
+
+# 11. 计算指标
+train_accuracy = accuracy_score(y_train, train_preds_encoded)
+train_f1_macro = f1_score(y_train, train_preds_encoded, average='macro')
+train_log_loss = log_loss(y_train, model.predict_proba(X_train_fe))
+
+# 分类报告
+report_dict = classification_report(y_train, train_preds_encoded, 
+                                     target_names=class_names, output_dict=True)
+
+metrics_summary = {
+    'accuracy': round(train_accuracy, 4),
+    'f1_macro': round(train_f1_macro, 4),
+    'log_loss': round(train_log_loss, 4),
+    'num_classes': len(class_names),
+    'classes': class_names
+}
+
+# 12. 生成 HTML 报告
+top_importance_html = importance_df.head(20).to_html(index=False, classes='table table-striped')
+
+# 测试集预测预览
+test_preview = result_df.head(10).to_html(index=False, classes='table table-striped')
+
+# 分类报告表格
+report_rows = []
+for cls_name in class_names:
+    if cls_name in report_dict:
+        r = report_dict[cls_name]
+        report_rows.append({
+            'Class': cls_name,
+            'Precision': round(r['precision'], 4),
+            'Recall': round(r['recall'], 4),
+            'F1-Score': round(r['f1-score'], 4),
+            'Support': int(r['support'])
+        })
+report_df = pd.DataFrame(report_rows)
+report_html = report_df.to_html(index=False, classes='table table-striped')
+
+html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Multiclass Classification</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; background-color: #f9f9f9; }}
+        h1 {{ color: #333; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        .table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+        .table th, .table td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        .table th {{ background-color: #4CAF50; color: white; }}
+        .table tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metrics {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .metric-item {{ display: inline-block; margin: 10px 20px; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #4CAF50; }}
+        .metric-label {{ font-size: 14px; color: #666; }}
+    </style>
+</head>
+<body>
+    <h1>Multiclass Classification Model Report</h1>
+    
+    <div class="metrics">
+        <h2>Model Metrics</h2>
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['accuracy']}</div>
+            <div class="metric-label">Accuracy</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['f1_macro']}</div>
+            <div class="metric-label">F1 Macro</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['log_loss']}</div>
+            <div class="metric-label">Log Loss</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['num_classes']}</div>
+            <div class="metric-label">Number of Classes</div>
+        </div>
+    </div>
+    
+    <h2>Classification Report (Training Set)</h2>
+    {report_html}
+    
+    <h2>Confusion Matrix</h2>
+    <img src="report_fig.png" alt="Confusion Matrix" style="max-width: 600px;">
+    
+    <h2>Feature Importance (Top 20)</h2>
+    {top_importance_html}
+    <img src="feature_importance.png" alt="Feature Importance" style="max-width: 600px;">
+    
+    <h2>Test Predictions Preview (First 10 rows)</h2>
+    {test_preview}
+    
+    <p><em>Report generated automatically. Full test predictions saved to test_predictions.csv</em></p>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# 13. 生成独立预测脚本
+predict_script = '''
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.pipeline import Pipeline
+
+# 预处理状态（需与训练时一致）
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='test'):
+    target_col = 'Status'
+    df = df.drop(columns=['id'], errors='ignore')
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    
+    feature_cols = [c for c in df.columns if c != target_col]
+    
+    categorical_cols = ['Drug', 'Sex', 'Ascites', 'Hepatomegaly', 'Spiders', 'Edema']
+    categorical_cols = [c for c in categorical_cols if c in feature_cols]
+    
+    skewed_cols = ['N_Days', 'Bilirubin', 'Cholesterol', 'Copper', 'Alk_Phos', 'Tryglicerides']
+    skewed_cols = [c for c in skewed_cols if c in feature_cols]
+    
+    low_missing_num_cols = ['Platelets', 'Prothrombin']
+    low_missing_num_cols = [c for c in low_missing_num_cols if c in feature_cols]
+    
+    all_num_cols = [c for c in feature_cols if c not in categorical_cols]
+    
+    for col in categorical_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna('Missing')
+            df[col] = df[col].astype(str)
+    
+    for col in all_num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    for col in skewed_cols:
+        if col in df.columns:
+            shift = PREPROCESS_STATE.get('log1p_shift', {}).get(col, 0)
+            df[col] = np.log1p(df[col] + shift)
+    
+    for col in low_missing_num_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(PREPROCESS_STATE.get('low_missing_medians', {}).get(col, 0))
+    
+    knn_imputer = PREPROCESS_STATE.get('knn_imputer')
+    knn_cols = PREPROCESS_STATE.get('knn_cols', [])
+    if knn_imputer is not None and len(knn_cols) > 0:
+        df_knn = df[[c for c in knn_cols if c in df.columns]].copy()
+        if df_knn.shape[1] > 0:
+            df_knn_imputed = knn_imputer.transform(df_knn)
+            df[[c for c in knn_cols if c in df.columns]] = df_knn_imputed
+    
+    for col, median_val in PREPROCESS_STATE.get('other_num_medians', {}).items():
+        if col in df.columns:
+            df[col] = df[col].fillna(median_val)
+    
+    return df
+
+def feature_engineering(df):
+    target_col = 'Status'
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    categorical_cols = ['Drug', 'Sex', 'Ascites', 'Hepatomegaly', 'Spiders', 'Edema']
+    categorical_cols = [c for c in categorical_cols if c in X.columns]
+    num_cols = [c for c in X.columns if c not in categorical_cols]
+    
+    if 'Bilirubin' in X.columns and 'Albumin' in X.columns:
+        X['Bilirubin_Albumin_ratio'] = X['Bilirubin'] / (X['Albumin'] + 1e-6)
+    if 'Stage' in X.columns and 'N_Days' in X.columns:
+        X['Stage_N_Days_interact'] = X['Stage'] * X['N_Days']
+    
+    num_cols = [c for c in X.columns if c not in categorical_cols]
+    
+    preprocessor = PREPROCESS_STATE['feature_engineering_preprocessor']
+    X_processed = preprocessor.transform(X)
+    all_feature_names = PREPROCESS_STATE['feature_engineering_columns']
+    
+    X_processed = pd.DataFrame(X_processed, columns=all_feature_names, index=X.index)
+    X_processed.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X_processed.columns]
+    for col in X_processed.columns:
+        X_processed[col] = pd.to_numeric(X_processed[col], errors='coerce')
+    X_processed = X_processed.fillna(0)
+    
+    return X_processed
+
+def predict(new_data_path, output_path=None):
+    """对新数据进行预测"""
+    # 加载模型
+    with open('output/model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载预处理状态
+    with open('output/preprocess_state.pkl', 'rb') as f:
+        global PREPROCESS_STATE
+        PREPROCESS_STATE = pickle.load(f)
+    
+    # 读取数据
+    df = pd.read_csv(new_data_path)
+    id_col = 'id' if 'id' in df.columns else df.columns[0]
+    ids = df[id_col].copy() if id_col in df.columns else pd.Series(range(len(df)))
+    
+    # 预处理和特征工程
+    df_clean = preprocess(df, mode='test')
+    X = feature_engineering(df_clean)
+    
+    # 预测
+    preds_encoded = model.predict(X)
+    probs = model.predict_proba(X)
+    
+    status_reverse = PREPROCESS_STATE.get('status_reverse_mapping', {0: 'C', 1: 'CL', 2: 'D'})
+    preds = [status_reverse.get(p, str(p)) for p in preds_encoded]
+    
+    result = pd.DataFrame({'id': ids, 'prediction': preds})
+    for i in range(probs.shape[1]):
+        result[f'proba_{status_reverse.get(i, f"class_{i}")}'] = probs[:, i]
+    
+    if output_path:
+        result.to_csv(output_path, index=False)
+        print(f"Predictions saved to {output_path}")
+    
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1:
+        input_file = sys.argv[1]
+        output_file = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+        predict(input_file, output_file)
+    else:
+        print("Usage: python predict.py <input_csv> [output_csv]")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# 14. 保存预处理状态（供 predict.py 使用）
+with open('output/preprocess_state.pkl', 'wb') as f:
+    pickle.dump(PREPROCESS_STATE, f)
+print("Preprocess state saved to output/preprocess_state.pkl")
+
+# 15. 输出摘要
+summary = {
+    'status': 'success',
+    'model_loaded_from': 'data/best_model.pkl',
+    'metrics': metrics_summary,
+    'num_features': len(feature_names),
+    'test_samples': len(test),
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/report_fig.png',
+        'output/test_predictions.csv',
+        'output/predict.py',
+        'output/preprocess_state.pkl'
+    ]
+}
+print(json.dumps(summary))
+```
+</code>

@@ -1,0 +1,452 @@
+【当前运行状态 Run State】: INIT
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.BINARY_CLASSIFICATION
+- 目标列: Churn
+- 评估指标: AUC-ROC
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于客户人口统计、服务订阅、账户及付费行为等20维特征，构建二分类模型预测电信客户流失概率（Churn：Yes/No）。评估指标仅采用AUC-ROC，要求模型具备良好排序能力以优先识别高风险客户。提交结果需为CSV格式，包含表头及每条样本的流失概率（0~1）。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- 类别特征列 ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines', 'InternetService', 'OnlineSecurity', 'OnlineBackup', 'DeviceProtection', 'TechSupport', 'StreamingTV', 'StreamingMovies', 'Contract', 'PaperlessBilling', 'PaymentMethod'] 必须纳入 Pipeline 的 ColumnTransformer 中，使用 OneHotEncoder(handle_unknown='ignore') 或 OrdinalEncoder 编码，严禁直接传入模型。
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 列 ['StreamingTV', 'StreamingMovies'] 名称看起来像数值但类型被识别为 categorical/object，必须在 preprocess() 中用 `pd.to_numeric(df[col], errors='coerce')` 强制转换，然后再填充缺失值。严禁对 string 列调用 .median()。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 Churn。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['Churn'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "train_set.csv",
+  "rowCount": 475355,
+  "columnCount": 21,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 475355,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        6165.0,
+        565551.0,
+        85537.0,
+        137025.0,
+        436494.0
+      ],
+      "min": 0.0,
+      "max": 594192.0,
+      "mean": 297260.93915705103,
+      "std": 171520.4677765968,
+      "median": 297231.0,
+      "skewness": -0.0002511706201592213,
+      "isMonotonic": false
+    },
+    {
+      "name": "gender",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Male",
+        "Female",
+        "Female",
+        "Female",
+        "Female"
+      ],
+      "mostCommon": "Female",
+      "mostCommonFreq": 238927,
+      "cardinality": "low"
+    },
+    {
+      "name": "SeniorCitizen",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.11396324851952751,
+      "std": 0.31776695694857887,
+      "median": 0.0,
+      "skewness": 2.4296948896029944
+    },
+    {
+      "name": "Partner",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "No",
+        "No",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 247799,
+      "cardinality": "low"
+    },
+    {
+      "name": "Dependents",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No",
+        "No",
+        "Yes",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 331445,
+      "cardinality": "low"
+    },
+    {
+      "name": "tenure",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 72,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        60.0,
+        47.0,
+        11.0,
+        35.0,
+        56.0
+      ],
+      "min": 1.0,
+      "max": 72.0,
+      "mean": 36.57484616760106,
+      "std": 25.05206365485892,
+      "median": 35.0,
+      "skewness": 0.06304178342003915
+    },
+    {
+      "name": "PhoneService",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "Yes",
+        "Yes",
+        "Yes"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 446290,
+      "cardinality": "low"
+    },
+    {
+      "name": "MultipleLines",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "No",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 226832,
+      "cardinality": "low"
+    },
+    {
+      "name": "InternetService",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Fiber optic",
+        "DSL",
+        "DSL",
+        "DSL",
+        "Fiber optic"
+      ],
+      "mostCommon": "Fiber optic",
+      "mostCommonFreq": 218053,
+      "cardinality": "low"
+    },
+    {
+      "name": "OnlineSecurity",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No",
+        "No",
+        "No",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 231550,
+      "cardinality": "low"
+    },
+    {
+      "name": "OnlineBackup",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "No",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 200138,
+      "cardinality": "low"
+    },
+    {
+      "name": "DeviceProtection",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "No",
+        "No",
+        "No",
+        "Yes"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 197863,
+      "cardinality": "low"
+    },
+    {
+      "name": "TechSupport",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No",
+        "No",
+        "Yes",
+        "Yes",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 230738,
+      "cardinality": "low"
+    },
+    {
+      "name": "StreamingTV",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "No",
+        "No",
+        "Yes"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 192476,
+      "cardinality": "low"
+    },
+    {
+      "name": "StreamingMovies",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "Yes",
+        "Yes",
+        "No",
+        "Yes"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 193397,
+      "cardinality": "low"
+    },
+    {
+      "name": "Contract",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Month-to-month",
+        "One year",
+        "Month-to-month",
+        "One year",
+        "Month-to-month"
+      ],
+      "mostCommon": "Month-to-month",
+      "mostCommonFreq": 239065,
+      "cardinality": "low"
+    },
+    {
+      "name": "PaperlessBilling",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Yes",
+        "No",
+        "No",
+        "No",
+        "Yes"
+      ],
+      "mostCommon": "Yes",
+      "mostCommonFreq": 292581,
+      "cardinality": "low"
+    },
+    {
+      "name": "PaymentMethod",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "Electronic check",
+        "Electronic check",
+        "Bank transfer (automatic)",
+        "Bank transfer (automatic)",
+        "Electronic check"
+      ],
+      "mostCommon": "Electronic check",
+      "mostCommonFreq": 172165,
+      "cardinality": "low"
+    },
+    {
+      "name": "MonthlyCharges",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 1911,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        104.9,
+        74.4,
+        59.45,
+        62.25,
+        94.5
+      ],
+      "min": 18.25,
+      "max": 118.75,
+      "mean": 65.8920245542805,
+      "std": 31.078943907590787,
+      "median": 74.15,
+      "skewness": -0.28965894802999803
+    },
+    {
+      "name": "TotalCharges",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 29941,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        6273.4,
+        3847.75,
+        669.45,
+        2460.55,
+        5149.45
+      ],
+      "min": 18.8,
+      "max": 8684.8,
+      "mean": 2495.6277961607643,
+      "std": 2355.0145390247762,
+      "median": 1434.65,
+      "skewness": 0.9092887243432712
+    },
+    {
+      "name": "Churn",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "No",
+        "No",
+        "No",
+        "No",
+        "No"
+      ],
+      "mostCommon": "No",
+      "mostCommonFreq": 368301,
+      "cardinality": "low"
+    }
+  ],
+  "classBalance": {
+    "targetColumn": "OnlineSecurity",
+    "nClasses": 3,
+    "maxClassRatio": 0.4871,
+    "minClassRatio": 0.2366,
+    "imbalanceRatio": 2.06,
+    "isSeverelyImbalanced": false
+  }
+}
+
+【上下文载荷 Context Payload】:
+无
+
+【历史代码 Previous Code】:
+无（当前为首次生成）
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

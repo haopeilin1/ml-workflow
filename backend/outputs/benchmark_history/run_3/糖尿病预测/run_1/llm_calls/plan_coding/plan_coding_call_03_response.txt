@@ -1,0 +1,156 @@
+<plan>
+经过分析，当前处于 OPTIMIZE 状态，上下文载荷建议：
+1. 设置 n_estimators=300，learning_rate=0.05，启用 early_stopping_rounds=50
+2. 增加 max_depth 至 6-8
+3. 尝试使用 class_weight='balanced' 替代手动 scale_pos_weight
+
+分析当前代码：
+- 当前 n_estimators=500，learning_rate=0.05，max_depth=6，scale_pos_weight=1.96
+- 数据量仅 491 条，属于小样本，过拟合风险高
+- 特征工程已创建较多交互特征（BMI_Glucose_interaction, Age_Pregnancies_interaction, Glucose_per_BMI, Insulin_per_Glucose, BMI_squared, Glucose_squared, Age_squared, Insulin_log, DiabetesPedigreeFunction_log），共 8+9=17 维特征，对于 491 条数据来说特征维度偏多
+
+优化策略：
+1. 采纳建议：n_estimators=300（减少迭代次数，防止过拟合），learning_rate=0.05（保持），启用 early_stopping（通过 callbacks）
+2. 采纳建议：max_depth=6（当前已是6，保持）
+3. 采纳建议：使用 class_weight='balanced' 替代手动 scale_pos_weight（更灵活，自动计算）
+4. 特征工程优化：减少不必要的交互特征，避免特征维度过高导致过拟合。保留最重要的特征交互（BMI*Glucose 和 Age*Pregnancies），去掉比率特征（可能引入噪声），保留对数变换（处理偏态分布）
+5. 增加正则化：reg_alpha=0.5, reg_lambda=0.5（加强L1/L2正则化）
+6. 减少 num_leaves 至 15（小样本数据，防止过拟合）
+7. 增加 min_child_samples 至 30（防止叶子节点过小）
+
+关键修复：在 build_model 中，model.fit 需要传入 callbacks=[lgb.early_stopping(stopping_rounds=50)]，但注意系统代码中 model.fit 的调用方式。由于系统代码中 model.fit 会尝试传入 eval_set，我们需要确保 build_model 返回的模型支持 eval_set 和 early_stopping。使用 LGBMClassifier 时，在 fit 中传入 eval_set，系统代码已处理。
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    - 丢弃id列
+    - 将医学指标中的0值视为缺失值（Glucose, BloodPressure, SkinThickness, Insulin, BMI）
+    - 用中位数填充缺失值
+    """
+    df = df.copy()
+    
+    # 丢弃id列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 医学指标中0值不合理的列（这些列的正常值应该>0）
+    zero_invalid_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+    
+    if mode == 'train':
+        # 在训练集上拟合参数
+        # 将0值替换为NaN
+        for col in zero_invalid_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(0, np.nan)
+        
+        # 计算各列的中位数（用于填充）
+        median_values = {}
+        for col in df.columns:
+            if col != 'Outcome' and df[col].dtype in ['int64', 'float64']:
+                median_values[col] = df[col].median()
+        
+        # 保存状态
+        PREPROCESS_STATE['median_values'] = median_values
+        PREPROCESS_STATE['zero_invalid_cols'] = zero_invalid_cols
+        
+        # 用中位数填充NaN
+        for col, median_val in median_values.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    else:  # mode == 'test'
+        # 应用训练集拟合的参数
+        median_values = PREPROCESS_STATE.get('median_values', {})
+        zero_invalid_cols = PREPROCESS_STATE.get('zero_invalid_cols', [])
+        
+        # 将0值替换为NaN
+        for col in zero_invalid_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(0, np.nan)
+        
+        # 用训练集的中位数填充
+        for col, median_val in median_values.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    - 创建关键交互特征和对数变换特征
+    - 丢弃目标列Outcome
+    - 返回纯数值特征矩阵
+    """
+    df = df.copy()
+    
+    # 分离目标列（如果存在）
+    target_col = 'Outcome'
+    y = None
+    if target_col in df.columns:
+        y = df[target_col]
+        df = df.drop(columns=[target_col])
+    
+    # 确保所有特征都是数值型
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # 创建关键交互特征（仅保留最有意义的）
+    # BMI与Glucose的交互（高BMI+高血糖=高风险）
+    if 'BMI' in numeric_cols and 'Glucose' in numeric_cols:
+        df['BMI_Glucose_interaction'] = df['BMI'] * df['Glucose']
+    
+    # Age与Pregnancies的交互（高龄+多次怀孕=高风险）
+    if 'Age' in numeric_cols and 'Pregnancies' in numeric_cols:
+        df['Age_Pregnancies_interaction'] = df['Age'] * df['Pregnancies']
+    
+    # 创建对数变换特征（处理偏态分布，仅对偏态严重的列）
+    skewed_cols = ['Insulin', 'DiabetesPedigreeFunction']
+    for col in skewed_cols:
+        if col in numeric_cols:
+            df[f'{col}_log'] = np.log1p(df[col])
+    
+    # 如果之前分离了目标列，重新加回去（用于后续训练）
+    if y is not None:
+        df[target_col] = y
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用LightGBM，设置正则化参数防止过拟合。
+    小样本数据（491条），严格控制模型复杂度。
+    """
+    model = LGBMClassifier(
+        objective='binary',
+        class_weight='balanced',  # 自动处理类别不平衡
+        num_leaves=15,            # 小样本数据，减少叶子节点数
+        max_depth=6,              # 限制树深度
+        learning_rate=0.05,       # 学习率
+        n_estimators=300,         # 减少迭代次数，配合early stopping
+        subsample=0.7,            # 行采样，防止过拟合
+        colsample_bytree=0.7,     # 列采样，防止过拟合
+        min_child_samples=30,     # 叶子节点最小样本数
+        reg_alpha=0.5,            # L1正则化
+        reg_lambda=0.5,           # L2正则化
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

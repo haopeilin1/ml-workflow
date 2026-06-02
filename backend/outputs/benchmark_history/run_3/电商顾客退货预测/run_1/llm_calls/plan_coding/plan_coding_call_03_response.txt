@@ -1,0 +1,178 @@
+<plan>
+根据错误日志分析，问题出在 `feature_engineering` 函数中。错误有两轮：
+
+1. **第一轮错误**：`encoder.get_feature_names_out([col])` 中传入的 `[col]` 长度是1，但编码器有4个类别特征，期望长度4。这是参数传递错误。
+2. **第二轮错误**：`encoder` 变量未定义，说明 `preprocess` 函数中定义的编码器没有正确传递到 `feature_engineering` 函数中。
+
+**修复策略**：
+1. 将类别编码逻辑统一放在 `preprocess` 函数中，使用 `ColumnTransformer` 进行编码和数值缩放，并将拟合好的预处理器保存到 `PREPROCESS_STATE`。
+2. `feature_engineering` 函数只负责特征创建和选择，不再做编码。
+3. 根据数据画像，`product_price`, `discount_percent`, `product_rating`, `past_return_rate`, `delivery_delay_days`, `session_length_minutes`, `order_id` 这些列 uniqueCount ≈ rowCount，是ID类特征，必须丢弃。
+4. 类别特征列 `device_type`, `product_category`, `shipping_method`, `payment_method` 必须编码。
+5. 使用 LightGBM 模型，设置合理的正则化参数防止过拟合。
+
+**具体实现**：
+- `preprocess`：丢弃ID列，对类别列用 OneHotEncoder，对数值列用 StandardScaler，保存预处理器。
+- `feature_engineering`：从预处理后的数据中分离特征和目标列，可创建一些交叉特征（如类别与数值的交互），但注意所有操作必须基于数值列。
+- `build_model`：使用 LGBMClassifier，设置 `scale_pos_weight` 处理类别不平衡，使用早停回调。
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+TARGET_COL = 'returned'
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃ID类列（uniqueCount ≈ rowCount）
+    id_cols = ['product_price', 'discount_percent', 'product_rating', 
+               'past_return_rate', 'delivery_delay_days', 'session_length_minutes', 'order_id']
+    df = df.drop(columns=[c for c in id_cols if c in df.columns], errors='ignore')
+    
+    # 分离特征和目标
+    if TARGET_COL in df.columns:
+        y = df[TARGET_COL]
+        X = df.drop(columns=[TARGET_COL])
+    else:
+        y = None
+        X = df
+    
+    # 识别类别列和数值列
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    if mode == 'train':
+        # 构建预处理器
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 拟合预处理器
+        X_transformed = preprocessor.fit_transform(X)
+        
+        # 保存预处理器和列信息
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 获取特征名
+        try:
+            cat_feature_names = preprocessor.named_transformers_['cat'].named_steps['encoder'].get_feature_names_out(cat_cols)
+        except:
+            cat_feature_names = [f'cat_{i}' for i in range(X_transformed.shape[1] - len(num_cols))]
+        feature_names = list(cat_feature_names) + num_cols
+        
+        # 构建DataFrame
+        X_processed = pd.DataFrame(X_transformed, columns=feature_names, index=df.index)
+        
+    else:  # mode == 'test'
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        X_transformed = preprocessor.transform(X)
+        
+        # 获取特征名
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        num_cols = PREPROCESS_STATE['num_cols']
+        try:
+            cat_feature_names = preprocessor.named_transformers_['cat'].named_steps['encoder'].get_feature_names_out(cat_cols)
+        except:
+            cat_feature_names = [f'cat_{i}' for i in range(X_transformed.shape[1] - len(num_cols))]
+        feature_names = list(cat_feature_names) + num_cols
+        
+        X_processed = pd.DataFrame(X_transformed, columns=feature_names, index=df.index)
+    
+    # 重新添加目标列
+    if y is not None:
+        X_processed[TARGET_COL] = y.values
+    
+    return X_processed
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 分离特征和目标
+    if TARGET_COL in df.columns:
+        X = df.drop(columns=[TARGET_COL])
+        y = df[TARGET_COL]
+    else:
+        X = df
+        y = None
+    
+    # 确保所有列都是数值类型
+    # 创建一些交叉特征（仅对数值列操作）
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # 创建有意义的交叉特征
+    if 'past_purchase_count' in num_cols and 'num_product_views' in num_cols:
+        X['purchase_view_ratio'] = X['past_purchase_count'] / (X['num_product_views'] + 1)
+    
+    if 'customer_age' in num_cols and 'past_purchase_count' in num_cols:
+        X['age_purchase_interaction'] = X['customer_age'] * X['past_purchase_count']
+    
+    if 'used_coupon' in num_cols:
+        X['used_coupon'] = X['used_coupon'].astype(float)
+    
+    # 确保所有列都是数值类型
+    X = X.select_dtypes(include=[np.number])
+    
+    # 处理无穷值和NaN
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（假设正样本比例约47.5%）
+    scale_pos_weight = (1 - 0.47459375) / 0.47459375  # ≈ 1.107
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbose=-1
+    )
+    
+    return model
+```
+</code>

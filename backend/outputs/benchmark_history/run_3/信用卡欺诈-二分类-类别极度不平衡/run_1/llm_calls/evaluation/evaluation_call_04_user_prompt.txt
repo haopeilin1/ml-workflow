@@ -1,0 +1,63 @@
+【任务目标 Task Target】: binary_classification - target=IsFraud
+【核心评估指标 Core Metric】: ROC-AUC
+【重要】评估时请优先以该指标为核心标准。
+
+
+【本次运行沙箱输出 Metrics】:
+```json
+{
+  "metric_name": "",
+  "val_auc": 0.5376909591785626,
+  "overfit_severe": false
+}
+```
+
+【沙箱完整输出】:
+```
+METRICS_JSON_START
+{"val_roc_auc": 0.5376909591785626, "val_ap": 0.0018943859597199742, "val_f1": 0.0029282576866764276, "val_recall": 0.07142857142857142, "val_precision": 0.0014947683109118087, "val_best_threshold": 0.03, "val_tn": 7318, "val_fp": 668, "val_fn": 13, "val_tp": 1}
+METRICS_JSON_END
+
+```
+
+【历史评估记录 Evaluation History】（严禁重复历史已失败的优化方向）：
+  第1轮: score=32.5, decision=AUTO_OPTIMIZE
+    方法: LightGBM+scale_pos_weight处理不平衡，但验证AUC仅0.31，模型完全失效。
+    建议: 当前模型预测全为负类（recall=0），scale_pos_weight=554.56可能过大导致过惩罚。建议：1) 降低scale_pos_weight至50-200范围；2) 添加类别特征编码（
+  第2轮: score=18.5, decision=AUTO_OPTIMIZE
+    方法: 本轮使用LightGBM+scale_pos_weight=554.56处理不平衡，但验证AUC仅0.36，recall=0，模型完全失效。
+    建议: 当前scale_pos_weight过大导致模型预测全为负类。建议：1) 将scale_pos_weight降低至50-200范围；2) 尝试使用SMOTE过采样或class_weight='bala
+  第3轮: score=35.5, decision=AUTO_OPTIMIZE
+    方法: LightGBM+scale_pos_weight=554.56，验证AUC仅0.36，recall=0，模型完全失效。
+    建议: scale_pos_weight过大导致模型预测全为负类。建议：1) 将scale_pos_weight降低至50-200范围；2) 尝试使用SMOTE过采样或class_weight='balanc
+
+
+【本轮关键代码片段】（仅用于 method_summary 描述技术选型，严禁基于代码片段做技术判断）：
+```python
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, FunctionTransformer
+from sklearn.pipeline import Pipeline
+    对数值特征进行标准化（StandardScaler），在训练集上 fit，在测试集上 transform。
+        scaler = StandardScaler()
+    使用 LightGBM + scale_pos_weight 处理极度类别不平衡。
+    # 构建预处理 Pipeline（标准化）
+    preprocessor = Pipeline([
+        ('scaler', StandardScaler()),
+    # 使用 scale_pos_weight 处理类别不平衡
+    #   - scale_pos_weight=554.56（负类数/正类数，约19964/36）
+    model = lgb.LGBMClassifier(
+        scale_pos_weight=554.56,
+    # 完整 Pipeline：预处理 + 模型
+    pipeline = Pipeline([
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+```
+
+
+【内部优化轮数 Optimize Round】: 3 / 3
+【注意】已达到最大优化轮数上限，必须强制 YIELD_TO_USER。
+
+请根据以上信息，严格按照 JSON 格式输出评估结论、方法总结和优化建议。
+必须包含：dimension_scores 数组、score、decision、method_summary。

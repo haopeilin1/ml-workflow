@@ -1,0 +1,59 @@
+【任务目标 Task Target】: multiclass_classification - target=Sleep Disorder
+【核心评估指标 Core Metric】: Macro F1 Score
+【重要】评估时请优先以该指标为核心标准。
+
+
+【本次运行沙箱输出 Metrics】:
+```json
+{
+  "metric_name": "",
+  "val_accuracy": 0.625,
+  "overfit_severe": false
+}
+```
+
+【沙箱完整输出】:
+```
+METRICS_JSON_START
+{"val_accuracy": 0.625, "val_f1_macro": 0.3737373737373737}
+METRICS_JSON_END
+
+```
+
+
+
+【本轮关键代码片段】（仅用于 method_summary 描述技术选型，严禁基于代码片段做技术判断）：
+```python
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+    使用 ColumnTransformer 对类别特征编码、数值特征标准化。
+    # Gender: 二值，用 OrdinalEncoder
+    # Occupation, BMI Category: 低基数（4个），用 OneHotEncoder
+    # 构建 ColumnTransformer
+    # Gender: OrdinalEncoder (0/1)
+            ('gender', Pipeline([
+                ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+    # Occupation, BMI Category: OneHotEncoder
+            ('cat', Pipeline([
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    # 数值特征: StandardScaler（Age, Systolic BP, Diastolic BP）
+            ('num', Pipeline([
+                ('scaler', StandardScaler())
+    preprocessor = ColumnTransformer(transformers, remainder='drop')
+    model = LGBMClassifier(
+        class_weight='balanced',  # 自动根据训练集类别频率计算权重
+        # 注意：early_stopping_rounds 已废弃，在 fit 时通过 callbacks 传入
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+```
+
+
+【内部优化轮数 Optimize Round】: 0 / 3
+
+
+请根据以上信息，严格按照 JSON 格式输出评估结论、方法总结和优化建议。
+必须包含：dimension_scores 数组、score、decision、method_summary。

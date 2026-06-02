@@ -1,0 +1,181 @@
+<plan>
+## 规划思路
+
+### 1. 数据预处理 (preprocess)
+- **丢弃id列**：id列有491个唯一值，是典型的主键，必须丢弃
+- **处理异常值**：Glucose、BloodPressure、SkinThickness、Insulin、BMI等指标存在0值，这在医学上不合理，应视为缺失值处理
+- **缺失值填充**：将0值替换为NaN后，用中位数填充（医学指标常用中位数）
+- **所有特征均为数值型**，无需类别编码
+- **状态管理**：在train模式下拟合填充参数，test模式下应用
+
+### 2. 特征工程 (feature_engineering)
+- **保留所有原始特征**：8个特征维度不高，全部保留
+- **创建交互特征**：BMI与Glucose的交互、Age与Pregnancies的交互等
+- **创建多项式特征**：BMI^2、Glucose^2等
+- **创建比率特征**：Glucose/BMI、Insulin/Glucose等
+- **丢弃目标列Outcome**（仅在train/validation时存在）
+
+### 3. 模型构建 (build_model)
+- **选择LightGBM**：对数值型特征效果好，训练快，支持缺失值
+- **设置正则化参数**：限制max_depth=6，subsample=0.8，min_child_samples=20
+- **处理类别不平衡**：通过scale_pos_weight参数（负样本/正样本比例≈1.96）
+- **使用早停**：通过callbacks实现
+
+### 4. 评估指标
+- 系统默认使用AUC，无需自定义evaluate_model
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    - 丢弃id列
+    - 将医学指标中的0值视为缺失值（Glucose, BloodPressure, SkinThickness, Insulin, BMI）
+    - 用中位数填充缺失值
+    """
+    df = df.copy()
+    
+    # 丢弃id列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 医学指标中0值不合理的列（这些列的正常值应该>0）
+    zero_invalid_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+    
+    if mode == 'train':
+        # 在训练集上拟合参数
+        # 将0值替换为NaN
+        for col in zero_invalid_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(0, np.nan)
+        
+        # 计算各列的中位数（用于填充）
+        median_values = {}
+        for col in df.columns:
+            if col != 'Outcome' and df[col].dtype in ['int64', 'float64']:
+                median_values[col] = df[col].median()
+        
+        # 保存状态
+        PREPROCESS_STATE['median_values'] = median_values
+        PREPROCESS_STATE['zero_invalid_cols'] = zero_invalid_cols
+        
+        # 用中位数填充NaN
+        for col, median_val in median_values.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    else:  # mode == 'test'
+        # 应用训练集拟合的参数
+        median_values = PREPROCESS_STATE.get('median_values', {})
+        zero_invalid_cols = PREPROCESS_STATE.get('zero_invalid_cols', [])
+        
+        # 将0值替换为NaN
+        for col in zero_invalid_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(0, np.nan)
+        
+        # 用训练集的中位数填充
+        for col, median_val in median_values.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(median_val)
+    
+    return df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    - 创建交互特征、多项式特征、比率特征
+    - 丢弃目标列Outcome
+    - 返回纯数值特征矩阵
+    """
+    df = df.copy()
+    
+    # 分离目标列（如果存在）
+    target_col = 'Outcome'
+    y = None
+    if target_col in df.columns:
+        y = df[target_col]
+        df = df.drop(columns=[target_col])
+    
+    # 确保所有特征都是数值型
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # 创建交互特征
+    # BMI与Glucose的交互
+    if 'BMI' in numeric_cols and 'Glucose' in numeric_cols:
+        df['BMI_Glucose_interaction'] = df['BMI'] * df['Glucose']
+    
+    # Age与Pregnancies的交互
+    if 'Age' in numeric_cols and 'Pregnancies' in numeric_cols:
+        df['Age_Pregnancies_interaction'] = df['Age'] * df['Pregnancies']
+    
+    # 创建比率特征
+    if 'Glucose' in numeric_cols and 'BMI' in numeric_cols and (df['BMI'] > 0).all():
+        df['Glucose_per_BMI'] = df['Glucose'] / (df['BMI'] + 1e-6)
+    
+    if 'Insulin' in numeric_cols and 'Glucose' in numeric_cols and (df['Glucose'] > 0).all():
+        df['Insulin_per_Glucose'] = df['Insulin'] / (df['Glucose'] + 1e-6)
+    
+    # 创建多项式特征
+    if 'BMI' in numeric_cols:
+        df['BMI_squared'] = df['BMI'] ** 2
+    
+    if 'Glucose' in numeric_cols:
+        df['Glucose_squared'] = df['Glucose'] ** 2
+    
+    if 'Age' in numeric_cols:
+        df['Age_squared'] = df['Age'] ** 2
+    
+    # 创建对数变换特征（处理偏态分布）
+    skewed_cols = ['Insulin', 'DiabetesPedigreeFunction']
+    for col in skewed_cols:
+        if col in numeric_cols:
+            df[f'{col}_log'] = np.log1p(df[col])
+    
+    # 如果之前分离了目标列，重新加回去（用于后续训练）
+    if y is not None:
+        df[target_col] = y
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    使用LightGBM，设置正则化参数防止过拟合。
+    """
+    # 计算类别权重（负样本/正样本比例）
+    # 从数据画像可知：正样本比例≈0.338，负样本比例≈0.662
+    # scale_pos_weight = 负样本数/正样本数 ≈ 0.662/0.338 ≈ 1.96
+    scale_pos_weight = 1.96
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=20,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+```
+</code>

@@ -1,0 +1,64 @@
+============================================================
+  任务运行摘要: 吸烟状况 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: smoking
+  评估指标: ROC-AUC
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 82.50
+  总耗时: 0.0s
+  验证集 AUC: 0.8769
+  测试集 AUC: 0.8929
+
+【各阶段耗时】
+  意图识别: 2.0s
+  代码生成: 15.7s
+  沙箱执行: 18.3s
+  评估优化: 17.0s
+  产物生成: 65.4s
+  测试预测: 0.0s
+  总计: 178.0s
+
+【Token 消耗】
+  Plan/Coding 调用: 5 次, 64615 tokens
+  Evaluation 调用: 4 次, 9395 tokens
+  总计: 9 次, 74010 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 7114tokens | 1.9s
+    - qwen3.5-flash@openai: 1 calls, 7114 tokens, 1.9s
+  plan_coding : deepseek-v4-flash@openai | 5calls | 64615tokens | 127.3s
+    - deepseek-v4-flash@openai: 4 calls, 55236 tokens, 67.8s
+    - deepseek-v4-pro@openai: 1 calls, 9379 tokens, 59.6s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9395tokens | 17.0s
+    - deepseek-v4-flash@openai: 4 calls, 9395 tokens, 17.0s
+  judge       : qwen3.5-flash@openai | 1calls | 1581tokens | 2.0s
+    - qwen3.5-flash@openai: 1 calls, 1581 tokens, 2.0s
+
+【产物生成】
+  完整性: simplified
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：ROC-AUC】为核心标准。模型在验证集上的 AUC 为 0.8769，表现良好；在完全不可见的测试集上，AUC 进一步提升至 0.8929，远超二分类任务通常可接受的基线（AUC > 0.7）。测试集与验证集的相对差距极小（(0.8929-0.8769)/0.8769 ≈ -1.8%），表明模型具有极强的泛化能力且未出现过拟合现象。同时，Accuracy 指标也稳定在 0.80 左右，与 AUC 趋势一致。预测策略未知但无证据显示使用了通用回退模板，整体交付质量优秀。...
+
+【维度评分】
+  unknown: 82.0 (weight=0.3)
+  unknown: 85.0 (weight=0.25)
+  unknown: 85.0 (weight=0.2)
+  unknown: 80.0 (weight=0.15)
+  unknown: 80.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 16:50:02 UTC
+============================================================

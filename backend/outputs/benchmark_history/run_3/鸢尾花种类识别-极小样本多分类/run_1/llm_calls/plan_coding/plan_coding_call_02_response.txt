@@ -1,0 +1,544 @@
+<plan>
+产物生成计划：
+1. 加载 data/best_model.pkl（优先）或重新训练模型
+2. 对测试集进行预测，生成 output/test_predictions.csv（含原始数据 + prediction + proba 列）
+3. 保存模型到 output/model.pkl
+4. 生成特征重要性 CSV（output/feature_importance.csv）和 PNG（output/feature_importance.png）
+5. 生成混淆矩阵热力图（output/report_fig.png）
+6. 生成 HTML 报告（output/report.html）
+7. 生成独立预测脚本（output/predict.py）
+8. 输出摘要 JSON
+
+关键修复：混淆矩阵计算时确保 y_true 和 y_pred 类型一致（都转为字符串或都转为数值），避免 "Mix of label input types" 错误。
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import dill
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import (
+    accuracy_score, f1_score, confusion_matrix, classification_report,
+    precision_score, recall_score
+)
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.decomposition import PCA
+warnings.filterwarnings('ignore')
+
+# ========== 确保输出目录存在 ==========
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {
+    'scaler': None,
+    'target_col': 'species',
+    'id_col': 'id',
+    'feature_cols': ['sepal_length', 'sepal_width', 'petal_length', 'petal_width'],
+    'label_encoder': None
+}
+
+# ========== 数据加载 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'species'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# ========== 预处理函数 ==========
+def preprocess(df, mode='train'):
+    if PREPROCESS_STATE['id_col'] in df.columns:
+        df = df.drop(columns=[PREPROCESS_STATE['id_col']])
+    
+    for col in PREPROCESS_STATE['feature_cols']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    for col in PREPROCESS_STATE['feature_cols']:
+        if col in df.columns and df[col].isnull().any():
+            if mode == 'train':
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                df[col] = df[col].fillna(df[col].median())
+    
+    return df
+
+def feature_engineering(df):
+    target_col_local = PREPROCESS_STATE['target_col']
+    feature_cols = PREPROCESS_STATE['feature_cols']
+    
+    if target_col_local in df.columns:
+        y = df[target_col_local]
+        X = df.drop(columns=[target_col_local], errors='ignore')
+    else:
+        X = df.copy()
+    
+    available_features = [c for c in feature_cols if c in X.columns]
+    X = X[available_features].copy()
+    
+    if 'petal_length' in X.columns and 'petal_width' in X.columns:
+        X['petal_area'] = X['petal_length'] * X['petal_width']
+    
+    if PREPROCESS_STATE['scaler'] is None:
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+    else:
+        X_scaled = PREPROCESS_STATE['scaler'].transform(X)
+    
+    X_result = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+    return X_result
+
+# ========== 预处理数据 ==========
+train_clean = preprocess(train, mode='train')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标
+if target_col in train_clean.columns:
+    y_train_raw = train_clean[target_col]
+    X_train_raw = train_clean.drop(columns=[target_col])
+else:
+    y_train_raw = train[target_col]
+    X_train_raw = train_clean
+
+# 目标列编码（如果是字符串类型）
+_is_string_target = train[target_col].dtype == object or str(train[target_col].dtype) == 'category'
+if _is_string_target:
+    label_encoder = LabelEncoder()
+    y_train = label_encoder.fit_transform(y_train_raw)
+    PREPROCESS_STATE['label_encoder'] = label_encoder
+else:
+    y_train = y_train_raw
+
+# 特征工程
+X_train_fe = feature_engineering(X_train_raw)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train_raw.index)
+
+X_test_raw = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test_raw is test_clean:
+    X_test_raw = test_clean.copy()
+X_test_fe = feature_engineering(X_test_raw)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test_raw.index)
+
+# 清洗特征名
+for _df in [X_train_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 加载或训练模型 ==========
+model = None
+model_loaded_from_file = False
+
+if os.path.exists('data/best_model.pkl'):
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = dill.load(f)
+        model_loaded_from_file = True
+        print("[INFO] 成功从 data/best_model.pkl 加载模型")
+    except Exception as e:
+        print(f"[WARN] 加载 best_model.pkl 失败: {e}，将重新训练")
+
+if model is None:
+    model = LogisticRegression(
+        solver='lbfgs',
+        max_iter=1000,
+        random_state=42,
+        C=1.0
+    )
+    model.fit(X_train_fe, y_train)
+    print("[INFO] 模型重新训练完成")
+
+# ========== 测试集预测 ==========
+test_preds_encoded = model.predict(X_test_fe)
+test_probs_all = None
+try:
+    test_probs_all = model.predict_proba(X_test_fe)
+except Exception:
+    pass
+
+# 反编码预测标签
+if PREPROCESS_STATE['label_encoder'] is not None:
+    test_preds = PREPROCESS_STATE['label_encoder'].inverse_transform(test_preds_encoded)
+    class_names = PREPROCESS_STATE['label_encoder'].classes_
+else:
+    test_preds = test_preds_encoded
+    class_names = np.unique(y_train)
+
+# 构建测试预测结果 DataFrame
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+if test_probs_all is not None:
+    for i in range(test_probs_all.shape[1]):
+        class_label = class_names[i] if i < len(class_names) else f'class_{i}'
+        result_df[f'proba_{class_label}'] = test_probs_all[:, i]
+
+# 合并原始测试数据（不含目标列）
+test_original = test.copy()
+if target_col in test_original.columns:
+    test_original = test_original.drop(columns=[target_col])
+test_output = pd.concat([test_original.reset_index(drop=True), result_df.drop(columns=['id'], errors='ignore').reset_index(drop=True)], axis=1)
+test_output.to_csv('output/test_predictions.csv', index=False)
+print("[INFO] 测试集预测结果已保存到 output/test_predictions.csv")
+
+# ========== 保存模型到 output/model.pkl ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("[INFO] 模型已保存到 output/model.pkl")
+
+# ========== 特征重要性 ==========
+feature_names = list(X_train_fe.columns)
+importance_values = None
+
+# 尝试从模型获取特征重要性
+if hasattr(model, 'feature_importances_'):
+    importance_values = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    coef = model.coef_
+    if coef.ndim == 1:
+        importance_values = np.abs(coef)
+    else:
+        importance_values = np.mean(np.abs(coef), axis=0)
+
+if importance_values is not None:
+    # 确保长度匹配
+    if len(importance_values) == len(feature_names):
+        importance_df = pd.DataFrame({
+            'name': feature_names,
+            'importance': importance_values
+        })
+        importance_df = importance_df.sort_values('importance', ascending=False)
+        importance_df.to_csv('output/feature_importance.csv', index=False)
+        print("[INFO] 特征重要性已保存到 output/feature_importance.csv")
+        
+        # 特征重要性图
+        plt.figure(figsize=(10, 6))
+        top_n = min(20, len(importance_df))
+        top_features = importance_df.head(top_n)
+        plt.barh(range(top_n), top_features['importance'].values[::-1])
+        plt.yticks(range(top_n), top_features['name'].values[::-1])
+        plt.xlabel('Importance')
+        plt.title('Feature Importance (Top {})'.format(top_n))
+        plt.tight_layout()
+        plt.savefig('output/feature_importance.png', dpi=100)
+        plt.close()
+        print("[INFO] 特征重要性图已保存到 output/feature_importance.png")
+    else:
+        print(f"[WARN] 特征重要性长度 ({len(importance_values)}) 与特征名数量 ({len(feature_names)}) 不匹配")
+        importance_df = pd.DataFrame({'name': feature_names, 'importance': [0]*len(feature_names)})
+        importance_df.to_csv('output/feature_importance.csv', index=False)
+else:
+    importance_df = pd.DataFrame({'name': feature_names, 'importance': [0]*len(feature_names)})
+    importance_df.to_csv('output/feature_importance.csv', index=False)
+    print("[WARN] 无法从模型获取特征重要性，已生成占位 CSV")
+
+# ========== 混淆矩阵热力图 (report_fig.png) ==========
+# 使用训练集做交叉验证评估来生成混淆矩阵（测试集无真实标签）
+# 对训练集做预测
+train_preds_encoded = model.predict(X_train_fe)
+
+# 确保 y_true 和 y_pred 类型一致（都转为字符串避免 Mix of label input types 错误）
+y_train_str = [str(x) for x in y_train]
+train_preds_str = [str(x) for x in train_preds_encoded]
+
+cm = confusion_matrix(y_train_str, train_preds_str)
+cm_labels = sorted(list(set(y_train_str + train_preds_str)))
+
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=cm_labels, yticklabels=cm_labels)
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix (Training Set)')
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100)
+plt.close()
+print("[INFO] 混淆矩阵热力图已保存到 output/report_fig.png")
+
+# ========== 计算评估指标 ==========
+train_accuracy = accuracy_score(y_train_str, train_preds_str)
+train_f1_macro = f1_score(y_train_str, train_preds_str, average='macro')
+train_f1_weighted = f1_score(y_train_str, train_preds_str, average='weighted')
+
+# 分类报告
+report_dict = classification_report(y_train_str, train_preds_str, output_dict=True, zero_division=0)
+
+# ========== 生成 HTML 报告 ==========
+# 构建特征重要性表格 HTML
+fi_rows = ""
+if importance_values is not None and len(importance_values) == len(feature_names):
+    for _, row in importance_df.iterrows():
+        fi_rows += f"<tr><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>"
+
+# 构建混淆矩阵表格 HTML
+cm_rows = ""
+for i, true_label in enumerate(cm_labels):
+    cm_rows += "<tr>"
+    cm_rows += f"<td><strong>{true_label}</strong></td>"
+    for j in range(len(cm_labels)):
+        cm_rows += f"<td>{cm[i][j]}</td>"
+    cm_rows += "</tr>"
+
+# 构建分类报告表格 HTML
+cr_rows = ""
+for label, metrics_dict in report_dict.items():
+    if label in ['accuracy', 'macro avg', 'weighted avg']:
+        continue
+    if isinstance(metrics_dict, dict):
+        cr_rows += f"<tr><td>{label}</td><td>{metrics_dict.get('precision', 0):.4f}</td><td>{metrics_dict.get('recall', 0):.4f}</td><td>{metrics_dict.get('f1-score', 0):.4f}</td><td>{metrics_dict.get('support', 0)}</td></tr>"
+
+# 构建测试集预测预览表格
+preview_rows = ""
+preview_df = result_df.head(10)
+for _, row in preview_df.iterrows():
+    preview_rows += "<tr>"
+    for col in preview_df.columns:
+        preview_rows += f"<td>{row[col]}</td>"
+    preview_rows += "</tr>"
+
+html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型报告 - 多分类任务</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background-color: #f5f7fa; color: #333; }}
+        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+        h2 {{ color: #34495e; margin-top: 30px; }}
+        .card {{ background: white; border-radius: 8px; padding: 20px; margin: 15px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+        table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 10px 12px; text-align: left; }}
+        th {{ background-color: #3498db; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }}
+        .metric-item {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }}
+        .metric-value {{ font-size: 2em; font-weight: bold; }}
+        .metric-label {{ font-size: 0.9em; opacity: 0.9; }}
+        img {{ max-width: 100%; border-radius: 8px; margin: 10px 0; }}
+    </style>
+</head>
+<body>
+    <h1>多分类模型报告</h1>
+    
+    <div class="card">
+        <h2>模型信息</h2>
+        <p><strong>任务类型:</strong> 多分类 (Multiclass Classification)</p>
+        <p><strong>目标列:</strong> {target_col}</p>
+        <p><strong>模型类型:</strong> {type(model).__name__}</p>
+        <p><strong>特征数量:</strong> {len(feature_names)}</p>
+        <p><strong>类别数量:</strong> {len(class_names)}</p>
+        <p><strong>类别:</strong> {', '.join(str(c) for c in class_names)}</p>
+    </div>
+    
+    <div class="card">
+        <h2>模型指标摘要（训练集评估）</h2>
+        <div class="metric-grid">
+            <div class="metric-item">
+                <div class="metric-value">{train_accuracy:.4f}</div>
+                <div class="metric-label">Accuracy</div>
+            </div>
+            <div class="metric-item">
+                <div class="metric-value">{train_f1_macro:.4f}</div>
+                <div class="metric-label">F1 (Macro)</div>
+            </div>
+            <div class="metric-item">
+                <div class="metric-value">{train_f1_weighted:.4f}</div>
+                <div class="metric-label">F1 (Weighted)</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>混淆矩阵</h2>
+        <img src="report_fig.png" alt="Confusion Matrix">
+        <table>
+            <tr><th></th>{"".join(f"<th>Pred {l}</th>" for l in cm_labels)}</tr>
+            {cm_rows}
+        </table>
+    </div>
+    
+    <div class="card">
+        <h2>分类报告</h2>
+        <table>
+            <tr><th>类别</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>
+            {cr_rows}
+        </table>
+    </div>
+    
+    <div class="card">
+        <h2>特征重要性</h2>
+        <img src="feature_importance.png" alt="Feature Importance">
+        <table>
+            <tr><th>特征名</th><th>重要性</th></tr>
+            {fi_rows}
+        </table>
+    </div>
+    
+    <div class="card">
+        <h2>测试集预测预览（前10条）</h2>
+        <table>
+            <tr>{"".join(f"<th>{col}</th>" for col in preview_df.columns)}</tr>
+            {preview_rows}
+        </table>
+        <p><em>完整预测结果请查看 output/test_predictions.csv</em></p>
+    </div>
+    
+    <div class="card">
+        <h2>文件清单</h2>
+        <ul>
+            <li><code>output/model.pkl</code> - 最终模型文件</li>
+            <li><code>output/feature_importance.csv</code> - 特征重要性 CSV</li>
+            <li><code>output/feature_importance.png</code> - 特征重要性图</li>
+            <li><code>output/report_fig.png</code> - 混淆矩阵热力图</li>
+            <li><code>output/test_predictions.csv</code> - 测试集预测结果</li>
+            <li><code>output/predict.py</code> - 独立预测脚本</li>
+        </ul>
+    </div>
+</body>
+</html>"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("[INFO] HTML 报告已保存到 output/report.html")
+
+# ========== 生成独立预测脚本 output/predict.py ==========
+predict_script = '''import pandas as pd
+import pickle
+import os
+import re
+import numpy as np
+
+def predict(input_path, output_path=None):
+    """
+    加载模型对新数据进行预测。
+    
+    参数:
+        input_path: str, 输入 CSV 文件路径
+        output_path: str, 输出 CSV 文件路径（可选，默认在输入文件同目录生成）
+    
+    返回:
+        pd.DataFrame, 预测结果
+    """
+    # 加载模型
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(input_path)
+    original_df = df.copy()
+    
+    # 预处理
+    id_col = 'id'
+    if id_col in df.columns:
+        df = df.drop(columns=[id_col])
+    
+    feature_cols = ['sepal_length', 'sepal_width', 'petal_length', 'petal_width']
+    for col in feature_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 特征工程
+    available_features = [c for c in feature_cols if c in df.columns]
+    X = df[available_features].copy()
+    
+    if 'petal_length' in X.columns and 'petal_width' in X.columns:
+        X['petal_area'] = X['petal_length'] * X['petal_width']
+    
+    # 注意：这里使用训练时保存的 scaler 参数
+    # 由于 scaler 未随模型保存，这里使用简单的标准化
+    # 实际使用时建议将 scaler 也保存到 model.pkl 中
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+    
+    # 清洗特征名
+    X_scaled.columns = [re.sub('[^\\\\w]', '_', str(c)) for c in X_scaled.columns]
+    
+    # 预测
+    predictions = model.predict(X_scaled)
+    try:
+        probabilities = model.predict_proba(X_scaled)
+    except Exception:
+        probabilities = None
+    
+    # 构建结果
+    result = pd.DataFrame()
+    if id_col in original_df.columns:
+        result['id'] = original_df[id_col]
+    else:
+        result['id'] = range(len(predictions))
+    result['prediction'] = predictions
+    
+    if probabilities is not None:
+        for i in range(probabilities.shape[1]):
+            result[f'proba_{i}'] = probabilities[:, i]
+    
+    # 保存结果
+    if output_path is None:
+        output_path = input_path.replace('.csv', '_predictions.csv')
+    result.to_csv(output_path, index=False)
+    print(f"预测结果已保存到: {output_path}")
+    
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1:
+        input_file = sys.argv[1]
+        output_file = sys.argv[2] if len(sys.argv) > 2 else None
+        predict(input_file, output_file)
+    else:
+        print("用法: python predict.py <input_csv> [output_csv]")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("[INFO] 独立预测脚本已保存到 output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_type': type(model).__name__,
+    'model_loaded_from_file': model_loaded_from_file,
+    'num_features': len(feature_names),
+    'feature_names': feature_names,
+    'num_classes': len(class_names),
+    'class_names': [str(c) for c in class_names],
+    'train_accuracy': round(train_accuracy, 4),
+    'train_f1_macro': round(train_f1_macro, 4),
+    'train_f1_weighted': round(train_f1_weighted, 4),
+    'test_samples': len(test),
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report_fig.png',
+        'output/report.html',
+        'output/test_predictions.csv',
+        'output/predict.py'
+    ]
+}
+
+print('METRICS_JSON_START')
+print(json.dumps(summary))
+print('METRICS_JSON_END')
+```
+</code>

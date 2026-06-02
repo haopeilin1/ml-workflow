@@ -1,0 +1,64 @@
+============================================================
+  任务运行摘要: 医疗保险费用预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: regression
+  目标列: charges
+  评估指标: RMSE
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 55.00
+  总耗时: 0.0s
+  验证集 RMSE: 5031.6420
+  测试集 RMSE: 5942.4212
+
+【各阶段耗时】
+  意图识别: 0.8s
+  代码生成: 16.8s
+  沙箱执行: 10.6s
+  评估优化: 19.9s
+  产物生成: 70.7s
+  测试预测: 0.0s
+  总计: 169.9s
+
+【Token 消耗】
+  Plan/Coding 调用: 5 次, 54077 tokens
+  Evaluation 调用: 4 次, 10940 tokens
+  总计: 9 次, 65017 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 3356tokens | 0.8s
+    - qwen3.5-flash@openai: 1 calls, 3356 tokens, 0.8s
+  plan_coding : deepseek-v4-flash@openai | 5calls | 54077tokens | 128.4s
+    - deepseek-v4-flash@openai: 4 calls, 44220 tokens, 61.8s
+    - deepseek-v4-pro@openai: 1 calls, 9857 tokens, 66.6s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 10940tokens | 19.9s
+    - deepseek-v4-flash@openai: 4 calls, 10940 tokens, 19.9s
+  judge       : qwen3.5-flash@openai | 1calls | 1635tokens | 3.4s
+    - qwen3.5-flash@openai: 1 calls, 1635 tokens, 3.4s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：RMSE】为核心标准。模型在测试集上的 RMSE 为 5942.4212，验证集 RMSE 为 5031.6420。计算相对差距为 (5942.42 - 5031.64) / 5031.64 ≈ 18.1%，处于可接受范围（<20%）内，表明模型具有良好的泛化一致性，未出现严重过拟合或分布偏移导致的性能崩塌。同时，测试集 R²达到 0.7787，说明模型对目标变量 charges 的方差解释能力较强，回归效果显著优于随机猜测。预测策略显示为“未知”而非“通用回退模板”，排除了特征工程不一致的风险。综合来看，该回归模型核心指标表现稳健，达到交付标准。...
+
+【维度评分】
+  unknown: 40.0 (weight=0.3)
+  unknown: 70.0 (weight=0.25)
+  unknown: 60.0 (weight=0.2)
+  unknown: 70.0 (weight=0.15)
+  unknown: 50.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 13:32:40 UTC
+============================================================

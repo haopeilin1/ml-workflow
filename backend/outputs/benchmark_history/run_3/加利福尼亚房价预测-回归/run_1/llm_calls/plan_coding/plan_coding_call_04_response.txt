@@ -1,0 +1,218 @@
+<plan>
+根据上下文载荷的建议，需要将模型从LightGBM切换到XGBoost回归模型，并设置相应的超参数。同时需要检查数据中是否存在异常值或长尾分布，考虑对目标列做log变换。
+
+分析当前代码和问题：
+
+1. **模型切换**：从LGBMRegressor切换到XGBRegressor，按照建议设置n_estimators=500, learning_rate=0.05, max_depth=6, subsample=0.8, colsample_bytree=0.8，配合early_stopping_rounds=50。
+
+2. **目标列log变换**：median_house_value存在长尾分布（skewness=0.97），对目标列做log1p变换可以改善模型性能。需要在preprocess中处理，并在预测后做逆变换。
+
+3. **异常值处理**：检查数值特征，total_rooms、total_bedrooms、population、households等存在明显的长尾分布（skewness > 3），已在feature_engineering中做了log变换，但还可以考虑在preprocess中做clip处理。
+
+4. **XGBoost的early stopping**：XGBRegressor的fit方法支持early_stopping_rounds参数，需要在build_model中设置eval_metric='rmse'，并在fit时传入eval_set和early_stopping_rounds。
+
+5. **保持其他策略不变**：preprocess中的ColumnTransformer、feature_engineering中的比率特征和对数变换等策略都保留。
+
+具体修改：
+- preprocess：对目标列median_house_value做log1p变换（训练时拟合，测试时应用），保存变换状态到PREPROCESS_STATE
+- build_model：使用XGBRegressor，设置建议的超参数
+- 在系统代码中，需要确保预测后做逆变换（expm1），但系统已有target_transform逻辑，只需在PREPROCESS_STATE中设置target_transform='log1p'
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.base import BaseEstimator, TransformerMixin
+from xgboost import XGBRegressor
+
+# 全局状态变量，用于存储预处理阶段拟合的参数
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    global PREPROCESS_STATE
+    
+    # 复制数据，避免修改原始数据
+    df = df.copy()
+    
+    # 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 分离特征和目标列
+    target_col = 'median_house_value'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        df_features = df.drop(columns=[target_col])
+    else:
+        y = None
+        df_features = df.copy()
+    
+    # 定义数值列和类别列
+    cat_cols = ['ocean_proximity']
+    num_cols = [col for col in df_features.columns if col not in cat_cols]
+    
+    if mode == 'train':
+        # 对目标列做 log1p 变换（处理长尾分布）
+        if y is not None:
+            y_log = np.log1p(y)
+            PREPROCESS_STATE['target_transform'] = 'log1p'
+        else:
+            y_log = None
+        
+        # 构建预处理 Pipeline
+        preprocessor = ColumnTransformer([
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols),
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols)
+        ], remainder='passthrough')
+        
+        # 拟合预处理器
+        preprocessor.fit(df_features)
+        
+        # 保存到全局状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['num_cols'] = num_cols
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        
+        # 转换数据
+        transformed = preprocessor.transform(df_features)
+        
+        # 获取特征列名
+        cat_encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = cat_encoder.get_feature_names_out(cat_cols).tolist()
+        feature_names = num_cols + cat_feature_names
+        
+        # 转换为 DataFrame
+        df_transformed = pd.DataFrame(transformed, columns=feature_names, index=df_features.index)
+        
+        # 重新添加变换后的目标列
+        if y_log is not None:
+            df_transformed[target_col] = y_log.values
+        
+    else:  # mode == 'test'
+        # 从全局状态读取预处理器
+        preprocessor = PREPROCESS_STATE.get('preprocessor')
+        if preprocessor is None:
+            raise ValueError("PREPROCESS_STATE 中没有预处理器，请先运行 mode='train'")
+        
+        # 应用已拟合的预处理器
+        transformed = preprocessor.transform(df_features)
+        
+        # 获取特征列名
+        cat_encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+        cat_feature_names = cat_encoder.get_feature_names_out(PREPROCESS_STATE['cat_cols']).tolist()
+        feature_names = PREPROCESS_STATE['num_cols'] + cat_feature_names
+        
+        # 转换为 DataFrame
+        df_transformed = pd.DataFrame(transformed, columns=feature_names, index=df_features.index)
+        
+        # 如果目标列存在，也做 log1p 变换（使用训练集的变换，但这里只是保留原始值，后续系统会处理）
+        if y is not None:
+            df_transformed[target_col] = y.values
+    
+    return df_transformed
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 复制数据
+    df = df.copy()
+    
+    # 分离目标列
+    target_col = 'median_house_value'
+    if target_col in df.columns:
+        y = df[target_col]
+        df = df.drop(columns=[target_col])
+    else:
+        y = None
+    
+    # 确保所有列都是数值类型
+    # 注意：类别特征已经在 preprocess 中编码为数值，这里不需要额外处理
+    
+    # 创建比率特征
+    # 房间数/家庭数（平均每户房间数）
+    if 'total_rooms' in df.columns and 'households' in df.columns:
+        df['rooms_per_household'] = df['total_rooms'] / (df['households'] + 1e-5)
+    
+    # 卧室数/房间数（卧室占比）
+    if 'total_bedrooms' in df.columns and 'total_rooms' in df.columns:
+        df['bedrooms_per_room'] = df['total_bedrooms'] / (df['total_rooms'] + 1e-5)
+    
+    # 人口/家庭数（平均每户人口）
+    if 'population' in df.columns and 'households' in df.columns:
+        df['population_per_household'] = df['population'] / (df['households'] + 1e-5)
+    
+    # 卧室数/人口（人均卧室数）
+    if 'total_bedrooms' in df.columns and 'population' in df.columns:
+        df['bedrooms_per_population'] = df['total_bedrooms'] / (df['population'] + 1e-5)
+    
+    # 对数变换（对偏态分布的特征）
+    skewed_features = ['total_rooms', 'total_bedrooms', 'population', 'households', 'median_income']
+    for feat in skewed_features:
+        if feat in df.columns:
+            df[f'{feat}_log'] = np.log1p(df[feat])
+    
+    # 交互特征：收入与房龄
+    if 'median_income' in df.columns and 'housing_median_age' in df.columns:
+        df['income_age_interaction'] = df['median_income'] * df['housing_median_age']
+    
+    # 经纬度组合特征（地理位置聚类）
+    if 'latitude' in df.columns and 'longitude' in df.columns:
+        df['lat_lon_combined'] = df['latitude'] * df['longitude']
+    
+    # 确保所有列都是数值类型（int/float）
+    # 理论上经过 preprocess 后所有列都是数值，但做一次安全检查
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # 如果还有 object 列，强制转换为数值（可能包含 NaN）
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能出现的 NaN（除法导致的）
+    df = df.fillna(0)
+    
+    # 返回特征矩阵
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = XGBRegressor(
+        objective='reg:squarederror',
+        eval_metric='rmse',
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0
+    )
+    
+    return model
+```
+</code>

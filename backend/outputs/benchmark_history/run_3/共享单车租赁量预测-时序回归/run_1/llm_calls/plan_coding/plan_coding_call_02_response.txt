@@ -1,0 +1,739 @@
+<plan>
+产物生成计划：
+1. 加载已存在的 data/best_model.pkl 模型（使用 pickle 而非 dill，避免依赖问题）
+2. 对测试集 data/test.csv 进行预测（需要先做预处理和特征工程）
+3. 生成回归任务的所有产物：
+   - output/model.pkl：完整 Pipeline 模型
+   - output/feature_importance.csv：特征重要性（从 LGBM 模型属性获取）
+   - output/feature_importance.png：特征重要性柱状图
+   - output/report.html：包含 RMSE/MAE/R2 指标、特征重要性表格、预测预览
+   - output/report_fig.png：预测值 vs 真实值散点图（测试集无真实值则跳过）
+   - output/test_predictions.csv：测试集预测结果
+   - output/predict.py：独立预测脚本
+4. 修复 Unicode 编码问题：避免在 print 中使用特殊 Unicode 字符（如 ✓、⚠），改用纯 ASCII 字符
+5. 最后输出 JSON 摘要
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, RobustScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMRegressor
+import lightgbm as lgb
+
+warnings.filterwarnings('ignore')
+
+# ========== 创建输出目录 ==========
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {
+    'dteday_time_features': None,
+    'target_log1p': True,
+    'cat_cols': [],
+    'num_cols': [],
+}
+
+# ========== 预处理函数（与训练阶段一致）==========
+def preprocess(df, mode='train'):
+    target_col = 'cnt'
+    df = df.copy()
+    
+    drop_cols = ['casual', 'registered', 'instant']
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    if 'dteday' in df.columns:
+        df['dteday_parsed'] = pd.to_datetime(df['dteday'], errors='coerce')
+        df['dteday_year'] = df['dteday_parsed'].dt.year
+        df['dteday_month'] = df['dteday_parsed'].dt.month
+        df['dteday_day'] = df['dteday_parsed'].dt.day
+        df['dteday_weekday'] = df['dteday_parsed'].dt.weekday
+        df['dteday_hour'] = df['dteday_parsed'].dt.hour
+        
+        duplicate_time_cols = ['dteday_month', 'dteday_weekday', 'dteday_hour']
+        df = df.drop(columns=[c for c in duplicate_time_cols if c in df.columns], errors='ignore')
+        df = df.drop(columns=['dteday', 'dteday_parsed'], errors='ignore')
+        
+        extracted_cols = ['dteday_year', 'dteday_day']
+        if mode == 'train':
+            PREPROCESS_STATE['dteday_time_features'] = [c for c in extracted_cols if c in df.columns]
+    
+    categorical_cols = ['season', 'weathersit', 'holiday', 'workingday', 'yr']
+    if 'hr' in df.columns:
+        categorical_cols.append('hr')
+    if 'weekday' in df.columns:
+        categorical_cols.append('weekday')
+    if 'mnth' in df.columns:
+        categorical_cols.append('mnth')
+    
+    categorical_cols = [c for c in categorical_cols if c in df.columns]
+    
+    for col in categorical_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+    
+    if mode == 'train':
+        PREPROCESS_STATE['cat_cols'] = categorical_cols
+    
+    if target_col in df.columns:
+        df[target_col] = pd.to_numeric(df[target_col], errors='coerce')
+        df[target_col] = np.log1p(df[target_col])
+        if mode == 'train':
+            PREPROCESS_STATE['target_log1p'] = True
+    
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    return df
+
+
+def feature_engineering(df):
+    target_col = 'cnt'
+    df = df.copy()
+    
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    if 'hr' in df.columns and 'workingday' in df.columns:
+        workingday_num = pd.to_numeric(df['workingday'], errors='coerce').fillna(0).astype(int)
+        hr_num = pd.to_numeric(df['hr'], errors='coerce').fillna(0).astype(int)
+        df['hr_workingday_interact'] = hr_num * 10 + workingday_num
+    
+    if 'temp' in df.columns and 'hum' in df.columns:
+        temp_num = pd.to_numeric(df['temp'], errors='coerce')
+        hum_num = pd.to_numeric(df['hum'], errors='coerce')
+        df['temp_hum_interact'] = temp_num * hum_num
+    
+    if 'windspeed' in df.columns and 'weathersit' in df.columns:
+        windspeed_num = pd.to_numeric(df['windspeed'], errors='coerce')
+        weathersit_num = pd.to_numeric(df['weathersit'], errors='coerce')
+        df['windspeed_weathersit_interact'] = windspeed_num * weathersit_num
+    
+    if 'hr' in df.columns:
+        hr_num = pd.to_numeric(df['hr'], errors='coerce').fillna(0).astype(int)
+        df['is_rush_hour'] = hr_num.isin([7, 8, 9, 17, 18, 19]).astype(int)
+        df['is_daytime'] = ((hr_num >= 6) & (hr_num <= 18)).astype(int)
+    
+    if 'weekday' in df.columns:
+        weekday_num = pd.to_numeric(df['weekday'], errors='coerce').fillna(0).astype(int)
+        df['is_weekend'] = weekday_num.isin([5, 6]).astype(int)
+    
+    if target_col in df.columns:
+        cnt_values = df[target_col].copy()
+        df['cnt_lag1'] = cnt_values.shift(1)
+        df['cnt_lag2'] = cnt_values.shift(2)
+        df['cnt_rolling_mean_24h'] = cnt_values.shift(1).rolling(window=24, min_periods=1).mean()
+        df['cnt_rolling_std_24h'] = cnt_values.shift(1).rolling(window=24, min_periods=1).std()
+        df['cnt_lag1'] = df['cnt_lag1'].bfill().fillna(0)
+        df['cnt_lag2'] = df['cnt_lag2'].bfill().fillna(0)
+        df['cnt_rolling_mean_24h'] = df['cnt_rolling_mean_24h'].bfill().fillna(0)
+        df['cnt_rolling_std_24h'] = df['cnt_rolling_std_24h'].bfill().fillna(0)
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    for col in X.select_dtypes(include=['object']).columns:
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    X = X.fillna(0)
+    
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+        X[col] = X[col].astype(float)
+    
+    return X
+
+
+# ========== 加载数据 ==========
+print("[INFO] Loading data...")
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'cnt'
+id_col = 'instant'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# ========== 加载或训练模型 ==========
+model = None
+model_loaded_from_file = False
+
+if os.path.exists('data/best_model.pkl'):
+    print("[INFO] Attempting to load model from data/best_model.pkl...")
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        model_loaded_from_file = True
+        print("[INFO] Model loaded successfully from data/best_model.pkl")
+    except Exception as e:
+        print(f"[WARN] pickle load failed: {e}")
+        try:
+            import dill
+            with open('data/best_model.pkl', 'rb') as f:
+                model = dill.load(f)
+            model_loaded_from_file = True
+            print("[INFO] Model loaded successfully via dill")
+        except Exception as e2:
+            print(f"[WARN] dill load also failed: {e2}")
+            model_loaded_from_file = False
+
+if not model_loaded_from_file:
+    print("[INFO] Model not found or failed to load, training from scratch...")
+    # 预处理训练数据
+    train_clean = preprocess(train, mode='train')
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train_raw = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train_raw = train_clean
+    
+    X_train_fe = feature_engineering(X_train_raw)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train_raw.index)
+    
+    # 清洗特征名
+    X_train_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe.columns]
+    if X_train_fe.columns.duplicated().any():
+        X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+    
+    # 构建模型
+    cat_cols_original = PREPROCESS_STATE.get('cat_cols', [])
+    cat_cols_clean = [re.sub(r'[^\w]', '_', str(c)) for c in cat_cols_original]
+    
+    num_preprocessor = Pipeline([
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', RobustScaler())
+    ])
+    
+    cat_preprocessor = Pipeline([
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+    
+    if cat_cols_clean:
+        preprocessor = ColumnTransformer([
+            ('cat', cat_preprocessor, cat_cols_clean),
+        ], remainder=num_preprocessor)
+    else:
+        preprocessor = num_preprocessor
+    
+    lgbm_model = LGBMRegressor(
+        objective='regression',
+        metric='rmse',
+        n_estimators=2000,
+        max_depth=7,
+        num_leaves=63,
+        learning_rate=0.03,
+        subsample=0.75,
+        colsample_bytree=0.75,
+        min_child_samples=15,
+        reg_alpha=0.5,
+        reg_lambda=0.5,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=-1
+    )
+    
+    model = Pipeline([
+        ('preprocess', preprocessor),
+        ('model', lgbm_model)
+    ])
+    
+    model.fit(X_train_fe, y_train)
+    print("[INFO] Model trained successfully")
+
+# ========== 保存模型到 output/ ==========
+print("[INFO] Saving model to output/model.pkl...")
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("[INFO] Model saved to output/model.pkl")
+
+# ========== 预处理测试集 ==========
+print("[INFO] Preprocessing test data...")
+test_clean = preprocess(test, mode='test')
+X_test_raw = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test_raw is test_clean:
+    X_test_raw = test_clean.copy()
+
+X_test_fe = feature_engineering(X_test_raw)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test_raw.index)
+
+X_test_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# ========== 测试集预测 ==========
+print("[INFO] Making predictions on test set...")
+test_preds_log = model.predict(X_test_fe)
+test_preds = np.expm1(test_preds_log)  # 逆 log1p 变换
+
+# ========== 保存测试集预测 ==========
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("[INFO] Test predictions saved to output/test_predictions.csv")
+
+# ========== 特征重要性 ==========
+print("[INFO] Extracting feature importance...")
+# 获取 Pipeline 中的 LGBM 模型
+if hasattr(model, 'named_steps'):
+    lgbm_model = model.named_steps.get('model', model)
+else:
+    lgbm_model = model
+
+# 获取特征名（经过 ColumnTransformer 后的特征名）
+try:
+    # 尝试获取 ColumnTransformer 输出的特征名
+    preprocessor_step = model.named_steps.get('preprocess', None)
+    if preprocessor_step is not None and hasattr(preprocessor_step, 'get_feature_names_out'):
+        feature_names = preprocessor_step.get_feature_names_out()
+    else:
+        feature_names = X_test_fe.columns.tolist()
+except Exception:
+    feature_names = X_test_fe.columns.tolist()
+
+# 获取 LGBM 特征重要性
+if hasattr(lgbm_model, 'feature_importances_'):
+    importances = lgbm_model.feature_importances_
+elif hasattr(lgbm_model, 'named_steps') and hasattr(lgbm_model.named_steps.get('model', None), 'feature_importances_'):
+    importances = lgbm_model.named_steps['model'].feature_importances_
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    # 如果长度不匹配，使用 X_test_fe 的列名
+    feature_names = X_test_fe.columns.tolist()
+    if len(importances) != len(feature_names):
+        min_len = min(len(importances), len(feature_names))
+        feature_names = feature_names[:min_len]
+        importances = importances[:min_len]
+
+# 创建特征重要性 DataFrame
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("[INFO] Feature importance saved to output/feature_importance.csv")
+
+# ========== 特征重要性图 ==========
+print("[INFO] Generating feature importance plot...")
+top_n = min(30, len(importance_df))
+top_features = importance_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(top_features)), top_features['importance'].values, color='steelblue')
+plt.yticks(range(len(top_features)), top_features['name'].values)
+plt.xlabel('Importance')
+plt.title('Feature Importance (Top {})'.format(top_n))
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("[INFO] Feature importance plot saved to output/feature_importance.png")
+
+# ========== 计算训练集指标（用于报告）==========
+print("[INFO] Computing metrics for report...")
+train_clean_full = preprocess(train, mode='test')
+if target_col in train_clean_full.columns:
+    y_train_true_log = train_clean_full[target_col]
+    X_train_raw_full = train_clean_full.drop(columns=[target_col])
+else:
+    y_train_true_log = np.log1p(train[target_col])
+    X_train_raw_full = train_clean_full
+
+X_train_fe_full = feature_engineering(X_train_raw_full)
+if isinstance(X_train_fe_full, np.ndarray):
+    X_train_fe_full = pd.DataFrame(X_train_fe_full, index=X_train_raw_full.index)
+X_train_fe_full.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe_full.columns]
+if X_train_fe_full.columns.duplicated().any():
+    X_train_fe_full.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe_full.columns)]
+
+train_preds_log = model.predict(X_train_fe_full)
+train_preds = np.expm1(train_preds_log)
+y_train_true = np.expm1(y_train_true_log)
+
+train_rmse = float(root_mean_squared_error(y_train_true, train_preds))
+train_mae = float(mean_absolute_error(y_train_true, train_preds))
+train_r2 = float(r2_score(y_train_true, train_preds))
+
+metrics = {
+    'train_rmse': train_rmse,
+    'train_mae': train_mae,
+    'train_r2': train_r2,
+}
+
+# ========== 生成 report_fig.png（预测值 vs 真实值散点图）==========
+print("[INFO] Generating prediction vs actual scatter plot...")
+plt.figure(figsize=(8, 8))
+plt.scatter(y_train_true, train_preds, alpha=0.3, s=10, color='steelblue')
+max_val = max(y_train_true.max(), train_preds.max())
+min_val = min(y_train_true.min(), train_preds.min())
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='y=x')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.title('Predicted vs Actual (Train Set)')
+plt.legend()
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("[INFO] Report figure saved to output/report_fig.png")
+
+# ========== 生成 HTML 报告 ==========
+print("[INFO] Generating HTML report...")
+# 特征重要性表格 HTML
+importance_html = importance_df.head(20).to_html(index=False, classes='table table-striped', border=0)
+
+# 测试集预测预览
+test_preview_df = result_df.head(20).copy()
+test_preview_html = test_preview_df.to_html(index=False, classes='table table-striped', border=0)
+
+html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Regression</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f9f9f9;
+            color: #333;
+        }}
+        h1, h2, h3 {{
+            color: #2c3e50;
+        }}
+        .container {{
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        .metrics {{
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-bottom: 30px;
+        }}
+        .metric-card {{
+            background: #ecf0f1;
+            padding: 20px;
+            border-radius: 8px;
+            flex: 1;
+            min-width: 150px;
+            text-align: center;
+        }}
+        .metric-card h3 {{
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            color: #7f8c8d;
+        }}
+        .metric-card .value {{
+            font-size: 28px;
+            font-weight: bold;
+            color: #2c3e50;
+        }}
+        .table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }}
+        .table th {{
+            background-color: #34495e;
+            color: white;
+            padding: 10px;
+            text-align: left;
+        }}
+        .table td {{
+            padding: 8px 10px;
+            border-bottom: 1px solid #ddd;
+        }}
+        .table-striped tr:nth-child(even) {{
+            background-color: #f2f2f2;
+        }}
+        .section {{
+            margin-top: 40px;
+        }}
+        img {{
+            max-width: 100%;
+            height: auto;
+            margin: 20px 0;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Regression Model Report</h1>
+        <p>Task Type: Regression | Target: cnt | Model: LightGBM</p>
+        
+        <h2>Model Performance (Train Set)</h2>
+        <div class="metrics">
+            <div class="metric-card">
+                <h3>RMSE</h3>
+                <div class="value">{train_rmse:.4f}</div>
+            </div>
+            <div class="metric-card">
+                <h3>MAE</h3>
+                <div class="value">{train_mae:.4f}</div>
+            </div>
+            <div class="metric-card">
+                <h3>R2 Score</h3>
+                <div class="value">{train_r2:.4f}</div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Residual Statistics</h2>
+            <p>Residuals = Actual - Predicted (on train set)</p>
+            <div class="metrics">
+                <div class="metric-card">
+                    <h3>Mean Residual</h3>
+                    <div class="value">{np.mean(y_train_true - train_preds):.4f}</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Std Residual</h3>
+                    <div class="value">{np.std(y_train_true - train_preds):.4f}</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Max Absolute Error</h3>
+                    <div class="value">{np.max(np.abs(y_train_true - train_preds)):.4f}</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Predicted vs Actual</h2>
+            <img src="report_fig.png" alt="Predicted vs Actual Scatter Plot">
+        </div>
+        
+        <div class="section">
+            <h2>Feature Importance (Top 20)</h2>
+            <img src="feature_importance.png" alt="Feature Importance">
+            {importance_html}
+        </div>
+        
+        <div class="section">
+            <h2>Test Set Predictions (Preview - First 20 Rows)</h2>
+            {test_preview_html}
+        </div>
+        
+        <div class="section">
+            <h2>Files Generated</h2>
+            <ul>
+                <li><code>output/model.pkl</code> - Trained model pipeline</li>
+                <li><code>output/feature_importance.csv</code> - Feature importance scores</li>
+                <li><code>output/feature_importance.png</code> - Feature importance plot</li>
+                <li><code>output/report.html</code> - This report</li>
+                <li><code>output/report_fig.png</code> - Predicted vs actual plot</li>
+                <li><code>output/test_predictions.csv</code> - Test set predictions</li>
+                <li><code>output/predict.py</code> - Standalone prediction script</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("[INFO] HTML report saved to output/report.html")
+
+# ========== 生成独立预测脚本 ==========
+print("[INFO] Generating standalone prediction script...")
+predict_script = '''#!/usr/bin/env python3
+"""
+Standalone prediction script for bike sharing demand prediction.
+Usage: python predict.py <input_csv> <output_csv>
+"""
+
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import sys
+import os
+
+def preprocess(df):
+    """Preprocess input data (same as training)."""
+    df = df.copy()
+    
+    drop_cols = ['casual', 'registered', 'instant']
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    if 'dteday' in df.columns:
+        df['dteday_parsed'] = pd.to_datetime(df['dteday'], errors='coerce')
+        df['dteday_year'] = df['dteday_parsed'].dt.year
+        df['dteday_month'] = df['dteday_parsed'].dt.month
+        df['dteday_day'] = df['dteday_parsed'].dt.day
+        df['dteday_weekday'] = df['dteday_parsed'].dt.weekday
+        df['dteday_hour'] = df['dteday_parsed'].dt.hour
+        
+        duplicate_time_cols = ['dteday_month', 'dteday_weekday', 'dteday_hour']
+        df = df.drop(columns=[c for c in duplicate_time_cols if c in df.columns], errors='ignore')
+        df = df.drop(columns=['dteday', 'dteday_parsed'], errors='ignore')
+    
+    categorical_cols = ['season', 'weathersit', 'holiday', 'workingday', 'yr']
+    if 'hr' in df.columns:
+        categorical_cols.append('hr')
+    if 'weekday' in df.columns:
+        categorical_cols.append('weekday')
+    if 'mnth' in df.columns:
+        categorical_cols.append('mnth')
+    
+    categorical_cols = [c for c in categorical_cols if c in df.columns]
+    
+    for col in categorical_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+    
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    
+    return df
+
+
+def feature_engineering(df):
+    """Feature engineering (same as training)."""
+    target_col = 'cnt'
+    df = df.copy()
+    
+    df.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in df.columns]
+    
+    if 'hr' in df.columns and 'workingday' in df.columns:
+        workingday_num = pd.to_numeric(df['workingday'], errors='coerce').fillna(0).astype(int)
+        hr_num = pd.to_numeric(df['hr'], errors='coerce').fillna(0).astype(int)
+        df['hr_workingday_interact'] = hr_num * 10 + workingday_num
+    
+    if 'temp' in df.columns and 'hum' in df.columns:
+        temp_num = pd.to_numeric(df['temp'], errors='coerce')
+        hum_num = pd.to_numeric(df['hum'], errors='coerce')
+        df['temp_hum_interact'] = temp_num * hum_num
+    
+    if 'windspeed' in df.columns and 'weathersit' in df.columns:
+        windspeed_num = pd.to_numeric(df['windspeed'], errors='coerce')
+        weathersit_num = pd.to_numeric(df['weathersit'], errors='coerce')
+        df['windspeed_weathersit_interact'] = windspeed_num * weathersit_num
+    
+    if 'hr' in df.columns:
+        hr_num = pd.to_numeric(df['hr'], errors='coerce').fillna(0).astype(int)
+        df['is_rush_hour'] = hr_num.isin([7, 8, 9, 17, 18, 19]).astype(int)
+        df['is_daytime'] = ((hr_num >= 6) & (hr_num <= 18)).astype(int)
+    
+    if 'weekday' in df.columns:
+        weekday_num = pd.to_numeric(df['weekday'], errors='coerce').fillna(0).astype(int)
+        df['is_weekend'] = weekday_num.isin([5, 6]).astype(int)
+    
+    X = df.drop(columns=[target_col], errors='ignore')
+    
+    for col in X.select_dtypes(include=['object']).columns:
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    X = X.fillna(0)
+    
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+        X[col] = X[col].astype(float)
+    
+    return X
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv> [output_csv]")
+        print("  input_csv: Path to input CSV file with same columns as training data")
+        print("  output_csv: Path to save predictions (default: predictions.csv)")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+    
+    # Load model
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    if not os.path.exists(model_path):
+        print(f"Error: Model file not found at {model_path}")
+        sys.exit(1)
+    
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # Load data
+    df = pd.read_csv(input_path)
+    print(f"Loaded {len(df)} rows from {input_path}")
+    
+    # Preprocess
+    df_clean = preprocess(df)
+    X = feature_engineering(df_clean)
+    
+    # Clean column names
+    X.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X.columns]
+    
+    # Predict
+    preds_log = model.predict(X)
+    preds = np.expm1(preds_log)
+    
+    # Save
+    result = pd.DataFrame({'prediction': preds})
+    if 'instant' in df.columns:
+        result.insert(0, 'id', df['instant'])
+    else:
+        result.insert(0, 'id', range(len(preds)))
+    
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    print(f"Prediction summary: min={preds.min():.2f}, max={preds.max():.2f}, mean={preds.mean():.2f}")
+
+
+if __name__ == '__main__':
+    main()
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("[INFO] Standalone prediction script saved to output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_loaded_from_file': model_loaded_from_file,
+    'train_rmse': train_rmse,
+    'train_mae': train_mae,
+    'train_r2': train_r2,
+    'test_predictions_count': len(test_preds),
+    'test_predictions_mean': float(np.mean(test_preds)),
+    'test_predictions_min': float(np.min(test_preds)),
+    'test_predictions_max': float(np.max(test_preds)),
+    'feature_count': len(importance_df),
+    'top_5_features': importance_df.head(5)['name'].tolist(),
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/report_fig.png',
+        'output/test_predictions.csv',
+        'output/predict.py',
+    ]
+}
+
+print('METRICS_JSON_START')
+print(json.dumps(summary))
+print('METRICS_JSON_END')
+```
+</code>

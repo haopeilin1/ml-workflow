@@ -1,0 +1,3 @@
+METRICS_JSON_START
+{"val_roc_auc": 0.36051035741118387, "val_ap": 0.001400739600981011, "val_f1": 0.0, "val_recall": 0.0, "val_precision": 0.0, "val_best_threshold": 0.5, "val_tn": 7841, "val_fp": 145, "val_fn": 14, "val_tp": 0}
+METRICS_JSON_END

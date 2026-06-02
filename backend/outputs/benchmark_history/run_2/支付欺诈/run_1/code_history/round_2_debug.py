@@ -1,0 +1,1 @@
+df[weekend_time_name] = df[weekend_col] * df[localtime_col]

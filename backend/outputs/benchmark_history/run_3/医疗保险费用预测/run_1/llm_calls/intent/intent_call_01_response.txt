@@ -1,0 +1,7 @@
+{
+  "target_column": "charges",
+  "task_type": "regression",
+  "eval_metric": "RMSE",
+  "complexity": "simple",
+  "is_time_series": false
+}

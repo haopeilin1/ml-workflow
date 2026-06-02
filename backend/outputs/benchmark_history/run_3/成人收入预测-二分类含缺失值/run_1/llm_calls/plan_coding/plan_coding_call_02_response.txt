@@ -1,0 +1,168 @@
+<plan>
+**Bug 分析：**
+错误发生在 `feature_engineering` 函数中，具体在第 119 行：
+```python
+X_result = pd.DataFrame(X_processed, columns=feature_names)
+```
+报错信息：`ValueError: Shape of passed values is (20838, 64), indices imply (20838, 65)`
+
+这说明 `X_processed` 的列数是 64，但 `feature_names` 的长度是 65，两者不匹配。
+
+**根因分析：**
+1. 在 `preprocess` 中，`native_country` 列被强制转换为数值（`pd.to_numeric`），转换后该列变成了数值类型（float64）。
+2. 在 `feature_engineering` 中，`numeric_cols` 包含了 `native_country`（因为它是数值类型），`categorical_cols` 不包含它。
+3. 但 `feature_names` 的构建逻辑是：先添加所有 `numeric_cols`，再添加 OneHotEncoder 的类别特征名。由于 `native_country` 在 preprocess 中已被转为数值，它出现在 `numeric_cols` 中，但 OneHotEncoder 的 `get_feature_names_out` 返回的类别特征名中不包含它（因为它不在 `categorical_cols` 中）。
+4. 然而，`native_country` 在 preprocess 中被 `pd.to_numeric` 转换后，所有值都变成了 NaN（因为原始值是字符串，无法转换），所以实际上它被 SimpleImputer 填充了中位数，但列数计算正确。
+
+**更可能的原因：**
+`native_country` 在 preprocess 中被 `pd.to_numeric` 转换后，所有值都变成了 NaN（因为原始值是 'United-States' 等字符串），然后被 SimpleImputer 填充。但问题在于：
+- `native_country` 原本是类别列，有 41 个唯一值
+- 在 preprocess 中，它被填充了众数字符串，然后 `pd.to_numeric` 将其全部转为 NaN
+- 在 feature_engineering 中，它被识别为数值列（因为 dtype 是 float64），所以被 SimpleImputer 填充中位数（0.0）
+- 但 `feature_names` 中，`native_country` 被列在 `numeric_cols` 中，而 OneHotEncoder 的 `get_feature_names_out` 返回的类别特征名数量是 41（原始类别数），但实际 OneHotEncoder 处理的类别列数量可能不同
+
+**实际上，更简单的问题：**
+`native_country` 在 preprocess 中被 `pd.to_numeric` 转换后全部变成 NaN，然后被 SimpleImputer 填充。但 `feature_names` 的构建方式有问题：
+- `numeric_cols` 包含 `native_country`（因为它是数值类型）
+- `categorical_cols` 包含 `workclass`, `education`, `marital_status`, `occupation`, `relationship`, `race`, `sex`（7 列）
+- OneHotEncoder 对这 7 列编码，产生的列数 = 各列唯一值数之和
+- 但 `feature_names` 中先添加了所有 `numeric_cols`（包括 `native_country`），再添加 OneHotEncoder 的特征名
+
+**修复方案：**
+1. **修复 `preprocess` 中的 `native_country` 处理**：不应该用 `pd.to_numeric` 强制转换，因为它是真正的类别特征。应该保留为字符串，用众数填充缺失值，然后让 OneHotEncoder 处理。
+2. **修复 `feature_names` 的构建**：使用 `ColumnTransformer` 的 `get_feature_names_out()` 方法自动获取特征名，避免手动拼接出错。
+
+**具体修改：**
+1. 在 `preprocess` 中，`native_country` 保持为字符串类别列，只填充缺失值，不做 `pd.to_numeric` 转换。
+2. 在 `feature_engineering` 中，使用 `preprocessor.get_feature_names_out()` 获取特征名，而不是手动拼接。
+
+**其他优化：**
+- 添加 `education_num` 与 `education` 的冗余检查（`education_num` 是 `education` 的数值编码，可以保留或丢弃，这里保留）
+- 确保所有类别列都被正确编码
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃 id 列（唯一值过多，会导致过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 类别列缺失值填充（使用众数）
+    cat_cols_with_missing = ['workclass', 'occupation', 'native_country']
+    for col in cat_cols_with_missing:
+        if col in df.columns:
+            if mode == 'train':
+                mode_val = df[col].mode()[0] if not df[col].mode().empty else 'Unknown'
+                PREPROCESS_STATE[f'{col}_mode'] = mode_val
+            else:
+                mode_val = PREPROCESS_STATE.get(f'{col}_mode', 'Unknown')
+            df[col] = df[col].fillna(mode_val)
+    
+    # 处理目标列 income（仅在训练/验证集，测试集没有）
+    if 'income' in df.columns:
+        if mode == 'train':
+            # 训练时拟合 LabelEncoder
+            le = LabelEncoder()
+            df['income'] = le.fit_transform(df['income'])
+            PREPROCESS_STATE['income_encoder'] = le
+        else:
+            le = PREPROCESS_STATE.get('income_encoder')
+            if le is not None:
+                df['income'] = le.transform(df['income'])
+    
+    return df
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 分离特征和目标
+    if 'income' in df.columns:
+        X = df.drop(columns=['income'])
+    else:
+        X = df.copy()
+    
+    # 识别数值列和类别列
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    # 构建预处理 Pipeline
+    preprocessor = ColumnTransformer([
+        ('num', Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ]), numeric_cols),
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ]), categorical_cols)
+    ], remainder='passthrough')
+    
+    # 拟合并转换
+    X_processed = preprocessor.fit_transform(X)
+    
+    # 使用 ColumnTransformer 的 get_feature_names_out 获取特征名
+    feature_names = preprocessor.get_feature_names_out()
+    
+    # 转换为 DataFrame
+    X_result = pd.DataFrame(X_processed, columns=feature_names)
+    
+    return X_result
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = LGBMClassifier(
+        objective='binary',
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        min_child_samples=20,
+        random_state=42,
+        verbosity=-1
+    )
+    return model
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    """
+    from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
+    
+    y_pred_proba = model.predict_proba(X_val)[:, 1]
+    y_pred = model.predict(X_val)
+    
+    return {
+        'val_auc': float(roc_auc_score(y_val, y_pred_proba)),
+        'val_f1': float(f1_score(y_val, y_pred)),
+        'val_precision': float(precision_score(y_val, y_pred)),
+        'val_recall': float(recall_score(y_val, y_pred))
+    }
+```
+</code>

@@ -1,0 +1,630 @@
+<plan>
+产物生成计划：回归任务产物生成
+
+1. 加载已存在的 data/best_model.pkl 模型（优先），如果加载失败则回退到重新训练
+2. 对测试集 data/test.csv 进行预测，生成 output/test_predictions.csv（包含原始测试集 + prediction 列）
+3. 保存模型到 output/model.pkl
+4. 从模型属性提取特征重要性，生成 output/feature_importance.csv 和 output/feature_importance.png
+5. 生成 output/report_fig.png（预测值 vs 真实值散点图，叠加 y=x 对角线）—— 注意：测试集没有目标列，所以 report_fig.png 无法基于测试集生成。需要检查是否有验证集或使用训练集残差来生成。
+6. 生成 output/report.html（包含模型指标摘要、特征重要性表格、测试集预测预览、残差统计、RMSE/MAE/R2 指标）
+7. 生成 output/predict.py 独立预测脚本
+8. 输出摘要 JSON
+
+关键注意事项：
+- 测试集 data/test.csv 没有目标列 cnt，因此 report_fig.png 的预测值 vs 真实值散点图无法基于测试集生成。需要从训练集或验证集获取残差信息来生成该图。
+- 特征重要性必须排除目标列，只包含输入特征。
+- 使用相对路径，所有产物输出到 output/ 目录。
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import os
+import json
+import warnings
+import re
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
+
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局状态 ==========
+PREPROCESS_STATE = {
+    'target_log1p': True,
+    'scaler': None,
+    'train_len': None,
+    'lag_values': {},
+}
+
+# ========== 预处理函数（与最佳代码一致）==========
+def preprocess(df, mode='train'):
+    global PREPROCESS_STATE
+    target_col = 'cnt'
+    
+    drop_cols = ['instant', 'casual', 'registered']
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    if 'dteday' in df.columns:
+        df['dteday'] = pd.to_datetime(df['dteday'], errors='coerce')
+        df['year'] = df['dteday'].dt.year
+        df['month'] = df['dteday'].dt.month
+        df['day'] = df['dteday'].dt.day
+        df['dayofweek'] = df['dteday'].dt.dayofweek
+        df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
+        df = df.drop(columns=['dteday'])
+    
+    if mode == 'train' and target_col in df.columns:
+        df[target_col] = df[target_col].clip(lower=0)
+        df[target_col] = np.log1p(df[target_col])
+        PREPROCESS_STATE['target_log1p'] = True
+    
+    if mode == 'train':
+        PREPROCESS_STATE['train_len'] = len(df)
+    
+    return df
+
+
+def feature_engineering(df):
+    global PREPROCESS_STATE
+    target_col = 'cnt'
+    
+    y = None
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    if 'hr' in X.columns:
+        X['hr_sin'] = np.sin(X['hr'] * 2 * np.pi / 24)
+        X['hr_cos'] = np.cos(X['hr'] * 2 * np.pi / 24)
+    
+    if 'temp' in X.columns and 'hum' in X.columns:
+        X['temp_hum'] = X['temp'] * X['hum']
+    if 'weathersit' in X.columns and 'windspeed' in X.columns:
+        X['weathersit_windspeed'] = X['weathersit'] * X['windspeed']
+    
+    if y is not None:
+        X['cnt_lag1'] = y.shift(1).fillna(0)
+        X['cnt_lag2'] = y.shift(2).fillna(0)
+        PREPROCESS_STATE['lag_values'] = {
+            'lag1': y.iloc[-1] if len(y) > 0 else 0,
+            'lag2': y.iloc[-2] if len(y) > 1 else 0,
+        }
+    else:
+        lag_vals = PREPROCESS_STATE.get('lag_values', {'lag1': 0, 'lag2': 0})
+        X['cnt_lag1'] = lag_vals.get('lag1', 0)
+        X['cnt_lag2'] = lag_vals.get('lag2', 0)
+    
+    num_cols = ['temp', 'atemp', 'hum', 'windspeed']
+    num_cols_present = [c for c in num_cols if c in X.columns]
+    
+    if num_cols_present:
+        if PREPROCESS_STATE.get('scaler') is None:
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            if 'windspeed' in X.columns:
+                upper = X['windspeed'].quantile(0.99)
+                X['windspeed'] = X['windspeed'].clip(upper=upper)
+            X[num_cols_present] = scaler.fit_transform(X[num_cols_present])
+            PREPROCESS_STATE['scaler'] = scaler
+        else:
+            scaler = PREPROCESS_STATE['scaler']
+            if 'windspeed' in X.columns:
+                upper = X['windspeed'].quantile(0.99)
+                X['windspeed'] = X['windspeed'].clip(upper=upper)
+            X[num_cols_present] = scaler.transform(X[num_cols_present])
+    
+    X = X.fillna(0)
+    
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    return X
+
+
+# ========== 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'cnt'
+id_col = 'instant'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# ========== 尝试加载已有模型 ==========
+model = None
+feature_names = None
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("成功加载 data/best_model.pkl")
+except Exception as e:
+    print(f"加载模型失败: {e}，将重新训练")
+
+# ========== 如果模型加载失败，重新训练 ==========
+if model is None:
+    from lightgbm import LGBMRegressor
+    
+    # 预处理
+    train_clean = preprocess(train, mode='train')
+    
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train_raw = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train_raw = train_clean
+    
+    # 特征工程
+    X_train_fe = feature_engineering(X_train_raw)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train_raw.index)
+    
+    # 清洗特征名
+    X_train_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe.columns]
+    if X_train_fe.columns.duplicated().any():
+        X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+    
+    feature_names = list(X_train_fe.columns)
+    
+    # 训练模型
+    model = LGBMRegressor(
+        objective='regression',
+        metric='rmse',
+        learning_rate=0.05,
+        num_leaves=31,
+        max_depth=-1,
+        min_child_samples=20,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_estimators=500,
+        random_state=42,
+        verbose=-1,
+        n_jobs=-1,
+    )
+    model.fit(X_train_fe, y_train)
+    print("模型重新训练完成")
+else:
+    # 从已加载的模型推断特征名
+    # 需要重新跑一遍预处理和特征工程来获取特征名
+    train_clean = preprocess(train, mode='train')
+    if target_col in train_clean.columns:
+        X_train_raw = train_clean.drop(columns=[target_col])
+    else:
+        X_train_raw = train_clean
+    X_train_fe = feature_engineering(X_train_raw)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train_raw.index)
+    X_train_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe.columns]
+    if X_train_fe.columns.duplicated().any():
+        X_train_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_train_fe.columns)]
+    feature_names = list(X_train_fe.columns)
+
+# ========== 保存模型到 output/model.pkl ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("模型已保存到 output/model.pkl")
+
+# ========== 特征重要性提取 ==========
+# 尝试从模型获取特征重要性
+importance_dict = {}
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+    # 确保特征名和重要性长度匹配
+    if len(importances) == len(feature_names):
+        importance_dict = dict(zip(feature_names, importances))
+    else:
+        # 长度不匹配时，尝试用 feature_name_ 属性
+        if hasattr(model, 'feature_name_'):
+            importance_dict = dict(zip(model.feature_name_, importances))
+        else:
+            # 兜底：按索引命名
+            importance_dict = {f"feature_{i}": imp for i, imp in enumerate(importances)}
+elif hasattr(model, 'coef_'):
+    importances = np.abs(model.coef_).flatten()
+    if len(importances) == len(feature_names):
+        importance_dict = dict(zip(feature_names, importances))
+    else:
+        importance_dict = {f"feature_{i}": imp for i, imp in enumerate(importances)}
+else:
+    # 无法获取特征重要性，生成占位
+    importance_dict = {name: 0.0 for name in feature_names}
+
+# 排除目标列（cnt）相关的特征（如 cnt_lag1, cnt_lag2 等以 cnt 开头的特征）
+# 注意：这些是输入特征，但名称包含目标列名，保留它们因为它们是合法的滞后特征
+# 只需要确保没有名为 'cnt' 的特征
+importance_dict = {k: v for k, v in importance_dict.items() if k != target_col}
+
+# 按重要性降序排列
+importance_sorted = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
+
+# 保存特征重要性 CSV
+importance_df = pd.DataFrame(importance_sorted, columns=['name', 'importance'])
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("特征重要性已保存到 output/feature_importance.csv")
+
+# ========== 生成特征重要性图 ==========
+top_n = min(20, len(importance_sorted))
+top_features = importance_sorted[:top_n]
+names = [x[0] for x in top_features]
+values = [x[1] for x in top_features]
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(names)), values, color='steelblue')
+plt.yticks(range(len(names)), names)
+plt.xlabel('Importance')
+plt.title('Feature Importance (Top {})'.format(top_n))
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("特征重要性图已保存到 output/feature_importance.png")
+
+# ========== 测试集预测 ==========
+test_clean = preprocess(test, mode='test')
+X_test_raw = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test_raw is test_clean:
+    X_test_raw = test_clean.copy()
+
+X_test_fe = feature_engineering(X_test_raw)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test_raw.index)
+
+# 清洗特征名
+X_test_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# 确保测试集特征列与训练集一致
+for col in feature_names:
+    if col not in X_test_fe.columns:
+        X_test_fe[col] = 0
+X_test_fe = X_test_fe[feature_names]
+
+# 预测
+test_preds = model.predict(X_test_fe)
+
+# 逆变换（如果训练时做了 log1p）
+if PREPROCESS_STATE.get('target_log1p', False):
+    test_preds = np.expm1(test_preds)
+
+# 保存测试集预测
+test_output = test.copy()
+test_output['prediction'] = test_preds
+test_output.to_csv('output/test_predictions.csv', index=False)
+print("测试集预测已保存到 output/test_predictions.csv")
+
+# ========== 生成 report_fig.png（预测值 vs 真实值散点图）==========
+# 由于测试集没有目标列，使用训练集的预测残差来展示模型拟合效果
+# 对训练集做预测（使用训练好的模型）
+X_train_fe_aligned = X_train_fe[feature_names] if set(feature_names).issubset(set(X_train_fe.columns)) else X_train_fe
+train_preds_raw = model.predict(X_train_fe_aligned)
+if PREPROCESS_STATE.get('target_log1p', False):
+    train_preds_raw = np.expm1(train_preds_raw)
+    y_train_original = np.expm1(y_train)
+else:
+    y_train_original = y_train.values if hasattr(y_train, 'values') else np.array(y_train)
+
+plt.figure(figsize=(8, 8))
+plt.scatter(y_train_original, train_preds_raw, alpha=0.3, s=10, color='steelblue')
+max_val = max(y_train_original.max(), train_preds_raw.max())
+min_val = min(y_train_original.min(), train_preds_raw.min())
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='y = x')
+plt.xlabel('True Values')
+plt.ylabel('Predicted Values')
+plt.title('Predicted vs True Values (Training Set)')
+plt.legend()
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("report_fig.png 已保存到 output/report_fig.png")
+
+# ========== 计算训练集指标 ==========
+train_rmse = float(root_mean_squared_error(y_train_original, train_preds_raw))
+train_mae = float(mean_absolute_error(y_train_original, train_preds_raw))
+train_r2 = float(r2_score(y_train_original, train_preds_raw))
+residuals = y_train_original - train_preds_raw
+
+metrics_summary = {
+    'train_rmse': round(train_rmse, 4),
+    'train_mae': round(train_mae, 4),
+    'train_r2': round(train_r2, 4),
+    'residual_mean': round(float(np.mean(residuals)), 4),
+    'residual_std': round(float(np.std(residuals)), 4),
+}
+
+# ========== 生成 HTML 报告 ==========
+# 构建特征重要性表格行
+importance_rows = ""
+for name, imp in importance_sorted[:30]:
+    importance_rows += f"<tr><td>{name}</td><td>{imp:.6f}</td></tr>\n"
+
+# 测试集预测预览（前10行）
+test_preview_rows = ""
+preview_cols = list(test_output.columns)
+# 限制预览列数
+display_cols = preview_cols[:8] if len(preview_cols) > 8 else preview_cols
+header = "".join(f"<th>{c}</th>" for c in display_cols)
+for i in range(min(10, len(test_output))):
+    row_html = "".join(f"<td>{test_output.iloc[i][c]}</td>" for c in display_cols)
+    test_preview_rows += f"<tr>{row_html}</tr>\n"
+
+html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>模型报告 - 回归任务</title>
+<style>
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; background-color: #f5f7fa; color: #333; }}
+    h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+    h2 {{ color: #2c3e50; margin-top: 30px; }}
+    .card {{ background: white; border-radius: 8px; padding: 20px; margin: 15px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+    table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+    th, td {{ border: 1px solid #ddd; padding: 10px 12px; text-align: left; }}
+    th {{ background-color: #3498db; color: white; }}
+    tr:nth-child(even) {{ background-color: #f9f9f9; }}
+    .metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }}
+    .metric-item {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }}
+    .metric-value {{ font-size: 2em; font-weight: bold; }}
+    .metric-label {{ font-size: 0.9em; opacity: 0.9; }}
+    .footer {{ margin-top: 30px; color: #888; font-size: 0.85em; }}
+    img {{ max-width: 100%; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+</style>
+</head>
+<body>
+<h1>📊 回归模型报告</h1>
+
+<div class="card">
+    <h2>模型指标摘要</h2>
+    <div class="metric-grid">
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['train_rmse']}</div>
+            <div class="metric-label">RMSE</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['train_mae']}</div>
+            <div class="metric-label">MAE</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['train_r2']}</div>
+            <div class="metric-label">R² Score</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['residual_mean']}</div>
+            <div class="metric-label">残差均值</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">{metrics_summary['residual_std']}</div>
+            <div class="metric-label">残差标准差</div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>残差统计</h2>
+    <table>
+        <tr><th>指标</th><th>值</th></tr>
+        <tr><td>RMSE</td><td>{metrics_summary['train_rmse']}</td></tr>
+        <tr><td>MAE</td><td>{metrics_summary['train_mae']}</td></tr>
+        <tr><td>R²</td><td>{metrics_summary['train_r2']}</td></tr>
+        <tr><td>残差均值</td><td>{metrics_summary['residual_mean']}</td></tr>
+        <tr><td>残差标准差</td><td>{metrics_summary['residual_std']}</td></tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>预测值 vs 真实值</h2>
+    <img src="report_fig.png" alt="预测值 vs 真实值散点图">
+</div>
+
+<div class="card">
+    <h2>特征重要性 (Top 30)</h2>
+    <table>
+        <tr><th>特征名</th><th>重要性</th></tr>
+        {importance_rows}
+    </table>
+    <img src="feature_importance.png" alt="特征重要性图" style="margin-top:15px;">
+</div>
+
+<div class="card">
+    <h2>测试集预测预览 (前10行)</h2>
+    <table>
+        <tr>{header}</tr>
+        {test_preview_rows}
+    </table>
+    <p style="margin-top:10px; color:#888;">完整预测结果请查看 output/test_predictions.csv</p>
+</div>
+
+<div class="footer">
+    <p>模型类型: LightGBM Regressor | 特征数量: {len(feature_names)} | 测试集样本数: {len(test_output)}</p>
+</div>
+</body>
+</html>"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML 报告已保存到 output/report.html")
+
+# ========== 生成独立预测脚本 output/predict.py ==========
+predict_script = '''#!/usr/bin/env python3
+"""独立预测脚本：加载模型对新数据进行预测"""
+import pandas as pd
+import numpy as np
+import pickle
+import os
+import sys
+import re
+import warnings
+warnings.filterwarnings('ignore')
+
+# 预处理状态（与训练时一致）
+PREPROCESS_STATE = {
+    'target_log1p': True,
+    'scaler': None,
+    'train_len': None,
+    'lag_values': {},
+}
+
+def preprocess(df, mode='test'):
+    global PREPROCESS_STATE
+    target_col = 'cnt'
+    
+    drop_cols = ['instant', 'casual', 'registered']
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    if 'dteday' in df.columns:
+        df['dteday'] = pd.to_datetime(df['dteday'], errors='coerce')
+        df['year'] = df['dteday'].dt.year
+        df['month'] = df['dteday'].dt.month
+        df['day'] = df['dteday'].dt.day
+        df['dayofweek'] = df['dteday'].dt.dayofweek
+        df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
+        df = df.drop(columns=['dteday'])
+    
+    return df
+
+def feature_engineering(df):
+    global PREPROCESS_STATE
+    target_col = 'cnt'
+    
+    y = None
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    if 'hr' in X.columns:
+        X['hr_sin'] = np.sin(X['hr'] * 2 * np.pi / 24)
+        X['hr_cos'] = np.cos(X['hr'] * 2 * np.pi / 24)
+    
+    if 'temp' in X.columns and 'hum' in X.columns:
+        X['temp_hum'] = X['temp'] * X['hum']
+    if 'weathersit' in X.columns and 'windspeed' in X.columns:
+        X['weathersit_windspeed'] = X['weathersit'] * X['windspeed']
+    
+    lag_vals = PREPROCESS_STATE.get('lag_values', {'lag1': 0, 'lag2': 0})
+    X['cnt_lag1'] = lag_vals.get('lag1', 0)
+    X['cnt_lag2'] = lag_vals.get('lag2', 0)
+    
+    num_cols = ['temp', 'atemp', 'hum', 'windspeed']
+    num_cols_present = [c for c in num_cols if c in X.columns]
+    
+    if num_cols_present:
+        scaler = PREPROCESS_STATE.get('scaler')
+        if scaler is not None:
+            if 'windspeed' in X.columns:
+                upper = X['windspeed'].quantile(0.99)
+                X['windspeed'] = X['windspeed'].clip(upper=upper)
+            X[num_cols_present] = scaler.transform(X[num_cols_present])
+    
+    X = X.fillna(0)
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+    
+    return X
+
+def predict(input_path, output_path=None):
+    """对新数据进行预测"""
+    # 加载模型
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(input_path)
+    
+    # 预处理
+    df_clean = preprocess(df, mode='test')
+    
+    # 特征工程
+    X = feature_engineering(df_clean)
+    if isinstance(X, np.ndarray):
+        X = pd.DataFrame(X)
+    
+    # 清洗特征名
+    X.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X.columns]
+    
+    # 获取模型期望的特征名
+    if hasattr(model, 'feature_name_'):
+        expected_features = model.feature_name_
+    else:
+        expected_features = None
+    
+    # 对齐特征
+    if expected_features is not None:
+        for col in expected_features:
+            if col not in X.columns:
+                X[col] = 0
+        X = X[expected_features]
+    
+    # 预测
+    preds = model.predict(X)
+    
+    # 逆变换
+    if PREPROCESS_STATE.get('target_log1p', False):
+        preds = np.expm1(preds)
+    
+    # 输出
+    result = df.copy()
+    result['prediction'] = preds
+    
+    if output_path is None:
+        output_path = input_path.replace('.csv', '_predictions.csv')
+    result.to_csv(output_path, index=False)
+    print(f"预测完成，结果已保存到 {output_path}")
+    return result
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("用法: python predict.py <输入CSV文件路径> [输出CSV文件路径]")
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2] if len(sys.argv) > 2 else None
+    predict(input_file, output_file)
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("独立预测脚本已保存到 output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_type': 'LightGBM Regressor',
+    'metrics': metrics_summary,
+    'feature_count': len(feature_names),
+    'test_samples': len(test_output),
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/report_fig.png',
+        'output/test_predictions.csv',
+        'output/predict.py',
+    ]
+}
+print(json.dumps(summary))
+```
+</code>

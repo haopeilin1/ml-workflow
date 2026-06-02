@@ -1,0 +1,33 @@
+{
+  "val_metrics": {
+    "metric_name": "",
+    "val_score": null,
+    "val_auc": null,
+    "val_accuracy": 0.9444444444444444,
+    "val_f1_macro": null,
+    "val_rmse": null,
+    "train_auc": null,
+    "train_score": null,
+    "overfit_ratio": null,
+    "overfit_severe": false
+  },
+  "test_metrics": {
+    "auc": null,
+    "accuracy": 0.9666666666666667,
+    "f1": null,
+    "f1_macro": 0.9710144927536232,
+    "log_loss": null,
+    "rmse": null,
+    "mae": null,
+    "r2": null
+  },
+  "best_score": 82.0,
+  "task_type": "multiclass_classification",
+  "target_column": "species",
+  "eval_metric": "Accuracy",
+  "complexity": "complex",
+  "complexity_reason": "LLM直接判定为complex",
+  "is_time_series": false,
+  "intent_recognized": true,
+  "prediction_strategy": "embedded_best"
+}

@@ -1,0 +1,431 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于肝硬化患者生存记录，预测患者随访终点时的生存状态（Status）。目标为三分类问题：C（截尾/存活）、CL（肝移植后存活）、D（死亡）。数据集含N_Days、Drug、Bilirubin、Albumin等19项特征，缺失较多。需提交每条样本属于三个类别的预测概率。评估指标仅采用多分类对数损失（Multi-class Log Loss）。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 12000,
+  "col_count": 20,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 12000,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        10203.0,
+        2610.0,
+        13130.0,
+        13735.0,
+        13351.0
+      ],
+      "min": 0.0,
+      "max": 14999.0,
+      "mean": 7513.554833333334,
+      "std": 4327.876943979595,
+      "median": 7517.5,
+      "skewness": -0.006105903714911261,
+      "isMonotonic": false
+    },
+    {
+      "name": "N_Days",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 516,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        2844.0,
+        2580.0,
+        597.0,
+        1150.0,
+        2332.0
+      ],
+      "min": 3.0,
+      "max": 27220.0,
+      "mean": 1974.1380833333333,
+      "std": 1234.7318223967084,
+      "median": 1832.0,
+      "skewness": 4.429172716579742
+    },
+    {
+      "name": "Drug",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 5267,
+      "missingRate": 43.89,
+      "sampleValues": [
+        "D-penicillamine",
+        "D-penicillamine",
+        "D-penicillamine",
+        "D-penicillamine",
+        "Placebo"
+      ],
+      "mostCommon": "D-penicillamine",
+      "mostCommonFreq": 3562,
+      "cardinality": "low"
+    },
+    {
+      "name": "Age",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 380,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        19724.0,
+        25568.0,
+        23011.0,
+        22646.0,
+        22388.0
+      ],
+      "min": 91.0,
+      "max": 35463.0,
+      "mean": 19301.655166666667,
+      "std": 3669.0047451920336,
+      "median": 19693.0,
+      "skewness": -0.2927379031981003
+    },
+    {
+      "name": "Sex",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "F",
+        "F",
+        "F",
+        "F",
+        "F"
+      ],
+      "mostCommon": "F",
+      "mostCommonFreq": 11484,
+      "cardinality": "low"
+    },
+    {
+      "name": "Ascites",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 5260,
+      "missingRate": 43.83,
+      "sampleValues": [
+        "N",
+        "N",
+        "N",
+        "N",
+        "N"
+      ],
+      "mostCommon": "N",
+      "mostCommonFreq": 6440,
+      "cardinality": "low"
+    },
+    {
+      "name": "Hepatomegaly",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 5266,
+      "missingRate": 43.88,
+      "sampleValues": [
+        "N",
+        "N",
+        "Y",
+        "Y",
+        "N"
+      ],
+      "mostCommon": "N",
+      "mostCommonFreq": 3701,
+      "cardinality": "low"
+    },
+    {
+      "name": "Spiders",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 5267,
+      "missingRate": 43.89,
+      "sampleValues": [
+        "N",
+        "N",
+        "Y",
+        "N",
+        "N"
+      ],
+      "mostCommon": "N",
+      "mostCommonFreq": 5399,
+      "cardinality": "low"
+    },
+    {
+      "name": "Edema",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "N",
+        "S",
+        "N",
+        "N",
+        "N"
+      ],
+      "mostCommon": "N",
+      "mostCommonFreq": 11115,
+      "cardinality": "low"
+    },
+    {
+      "name": "Bilirubin",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 115,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.1,
+        0.6,
+        1.4,
+        0.6,
+        0.9
+      ],
+      "min": 0.15,
+      "max": 28.0,
+      "mean": 1.8751191666666667,
+      "std": 2.7487237904172255,
+      "median": 0.9,
+      "skewness": 3.981063962223411
+    },
+    {
+      "name": "Cholesterol",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 212,
+      "missingCount": 6736,
+      "missingRate": 56.13,
+      "sampleValues": [
+        253.0,
+        360.0,
+        236.0,
+        282.0,
+        204.0
+      ],
+      "min": 119.0,
+      "max": 1868.0,
+      "mean": 328.5321048632219,
+      "std": 179.97001068304462,
+      "median": 280.0,
+      "skewness": 4.601155878121791
+    },
+    {
+      "name": "Albumin",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 163,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        3.15,
+        3.65,
+        3.68,
+        3.49,
+        3.87
+      ],
+      "min": 1.96,
+      "max": 4.7,
+      "mean": 3.5225483333333334,
+      "std": 0.37658109853549926,
+      "median": 3.58,
+      "skewness": -0.31597396137912165
+    },
+    {
+      "name": "Copper",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 171,
+      "missingCount": 5331,
+      "missingRate": 44.42,
+      "sampleValues": [
+        173.0,
+        96.0,
+        76.0,
+        52.0,
+        22.0
+      ],
+      "min": 3.0,
+      "max": 608.0,
+      "mean": 75.26915579547159,
+      "std": 74.71453357611604,
+      "median": 52.0,
+      "skewness": 3.128405524495968
+    },
+    {
+      "name": "Alk_Phos",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 351,
+      "missingCount": 5270,
+      "missingRate": 43.92,
+      "sampleValues": [
+        9009.8,
+        1257.0,
+        1052.0,
+        9066.8,
+        1282.0
+      ],
+      "min": 2.75,
+      "max": 24201.2,
+      "mean": 1643.5010252600298,
+      "std": 1840.6020101337538,
+      "median": 1065.0,
+      "skewness": 3.3581233035648137
+    },
+    {
+      "name": "SGOT",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 200,
+      "missingCount": 5269,
+      "missingRate": 43.91,
+      "sampleValues": [
+        127.0,
+        122.45,
+        89.9,
+        72.24,
+        72.85
+      ],
+      "min": 16.2,
+      "max": 601.25,
+      "mean": 105.32655326103105,
+      "std": 49.36007330682587,
+      "median": 97.65,
+      "skewness": 1.839299445331879
+    },
+    {
+      "name": "Tryglicerides",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 157,
+      "missingCount": 6760,
+      "missingRate": 56.33,
+      "sampleValues": [
+        96.0,
+        152.0,
+        86.0,
+        111.0,
+        58.0
+      ],
+      "min": 11.0,
+      "max": 608.0,
+      "mean": 112.20209923664122,
+      "std": 53.68043086219366,
+      "median": 99.0,
+      "skewness": 2.6160493294595217
+    },
+    {
+      "name": "Platelets",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 252,
+      "missingCount": 438,
+      "missingRate": 3.65,
+      "sampleValues": [
+        286.0,
+        160.0,
+        141.0,
+        224.0,
+        271.0
+      ],
+      "min": 0.4,
+      "max": 721.0,
+      "mean": 253.2903546099291,
+      "std": 93.37004465133732,
+      "median": 249.0,
+      "skewness": 0.5503842270350265
+    },
+    {
+      "name": "Prothrombin",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 53,
+      "missingCount": 16,
+      "missingRate": 0.13,
+      "sampleValues": [
+        10.6,
+        11.2,
+        11.2,
+        9.9,
+        10.6
+      ],
+      "min": 9.0,
+      "max": 18.0,
+      "mean": 10.63793391188251,
+      "std": 0.7661447788895138,
+      "median": 10.6,
+      "skewness": 1.9000216803552383
+    },
+    {
+      "name": "Stage",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        4.0,
+        4.0,
+        4.0,
+        1.0,
+        2.0
+      ],
+      "min": 1.0,
+      "max": 4.0,
+      "mean": 3.0200833333333335,
+      "std": 0.8777305170878329,
+      "median": 3.0,
+      "skewness": -0.4930716259459307
+    },
+    {
+      "name": "Status",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "C",
+        "D",
+        "D",
+        "C",
+        "C"
+      ],
+      "mostCommon": "C",
+      "mostCommonFreq": 8145,
+      "cardinality": "low"
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

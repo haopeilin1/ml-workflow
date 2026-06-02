@@ -1,0 +1,63 @@
+============================================================
+  任务运行摘要: 垃圾邮件判别-二分类-高维稀疏 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: spam
+  评估指标: ROC-AUC
+  复杂度判定: complex (高维数据(59列)强制complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 92.00
+  总耗时: 0.0s
+  验证集 AUC: 0.9918
+  测试集 AUC: 0.9862
+
+【各阶段耗时】
+  意图识别: 0.9s
+  代码生成: 67.4s
+  沙箱执行: 19.2s
+  评估优化: 19.4s
+  产物生成: 88.1s
+  测试预测: 0.0s
+  总计: 335.9s
+
+【Token 消耗】
+  Plan/Coding 调用: 1 次, 11396 tokens
+  Evaluation 调用: 4 次, 9815 tokens
+  总计: 5 次, 21211 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 14792tokens | 0.9s
+    - qwen3.5-flash@openai: 1 calls, 14792 tokens, 0.9s
+  plan_coding : deepseek-v4-pro@openai | 1calls | 11396tokens | 81.5s
+    - deepseek-v4-pro@openai: 1 calls, 11396 tokens, 81.5s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9815tokens | 19.4s
+    - deepseek-v4-flash@openai: 4 calls, 9815 tokens, 19.4s
+  judge       : qwen3.5-flash@openai | 1calls | 1562tokens | 2.9s
+    - qwen3.5-flash@openai: 1 calls, 1562 tokens, 2.9s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：ROC-AUC】为核心标准。模型在验证集上取得了0.9918的AUC，在测试集上取得了0.9862的AUC。测试集AUC高达0.9862，远超二分类任务通常可接受的0.7基线，表明模型具有极强的区分能力。泛化一致性方面，验证集与测试集的相对差距为 (0.9918 - 0.9862) / 0.9918 ≈ 0.56%，远小于10%的良好阈值，说明模型在未见数据上表现极其稳定，未出现过拟合现象。预测策略未知且无证据表明使用了通用回退模板，结合极高的核心指标和优异的泛化表现，该模型质量极高，符合交付标准。...
+
+【维度评分】
+  unknown: 98.0 (weight=0.3)
+  unknown: 90.0 (weight=0.25)
+  unknown: 90.0 (weight=0.2)
+  unknown: 85.0 (weight=0.15)
+  unknown: 95.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 13:43:08 UTC
+============================================================

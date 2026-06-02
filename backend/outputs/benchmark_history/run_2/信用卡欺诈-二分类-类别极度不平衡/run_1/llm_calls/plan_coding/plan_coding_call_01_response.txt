@@ -1,0 +1,570 @@
+<plan>
+产物生成计划：二分类任务，目标列 IsFraud，评估指标 ROC-AUC。
+
+1. 优先加载 data/best_model.pkl，如果失败则回退到重新训练（使用最佳代码中的预处理和模型逻辑）。
+2. 加载测试集 data/test.csv 并进行预测，生成 output/test_predictions.csv（含 prediction 和 probability 列）。
+3. 保存最终模型到 output/model.pkl。
+4. 从模型属性提取特征重要性，生成 output/feature_importance.csv 和 output/feature_importance.png。
+5. 生成 output/report.html，包含模型指标摘要、特征重要性表格、测试集预测预览、混淆矩阵、分类报告。
+6. 生成 output/report_fig.png（ROC 曲线，标注 AUC 值）。
+7. 生成 output/predict.py 独立预测脚本。
+8. 输出摘要 JSON。
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import (
+    roc_auc_score, roc_curve, confusion_matrix, classification_report,
+    accuracy_score, precision_score, recall_score, f1_score
+)
+from sklearn.preprocessing import LabelEncoder
+import lightgbm as lgb
+
+warnings.filterwarnings('ignore')
+
+# ========== 确保输出目录存在 ==========
+os.makedirs('output', exist_ok=True)
+
+# ========== 全局预处理状态 ==========
+PREPROCESS_STATE = {
+    'fitted': False,
+    'amount_median': None,
+    'hourly_avg_amount': None,
+    'time_min': None,
+    'time_max': None,
+}
+
+# ========== 预处理函数（与最佳代码一致） ==========
+def preprocess(df, mode='train'):
+    target_col = 'IsFraud'
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    df = df.copy()
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if target_col in numeric_cols:
+        numeric_cols.remove(target_col)
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            if mode == 'train':
+                PREPROCESS_STATE[f'{col}_median'] = df[col].median()
+            median_val = PREPROCESS_STATE.get(f'{col}_median', df[col].median())
+            df[col] = df[col].fillna(median_val)
+    if 'Transaction_Amount' in df.columns:
+        df['Transaction_Amount'] = df['Transaction_Amount'].clip(lower=0)
+        df['Transaction_Amount'] = np.log1p(df['Transaction_Amount'])
+    if 'Time' in df.columns:
+        df['Time'] = df['Time'] / 3600.0
+    PREPROCESS_STATE['fitted'] = True
+    return df
+
+def feature_engineering(df):
+    target_col = 'IsFraud'
+    df = df.copy()
+    if 'Time' in df.columns:
+        df['Time_hour_sin'] = np.sin(2 * np.pi * df['Time'] / 24.0)
+        df['Time_hour_cos'] = np.cos(2 * np.pi * df['Time'] / 24.0)
+        df['Time_hour'] = (df['Time'].astype(int) % 24).astype(int)
+    if 'Transaction_Amount' in df.columns:
+        df['Amount_squared'] = df['Transaction_Amount'] ** 2
+        df['Amount_sqrt'] = np.sqrt(df['Transaction_Amount'].clip(lower=0))
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    return df
+
+def build_model():
+    scale_pos_weight = 19964.0 / 36.0
+    model = lgb.LGBMClassifier(
+        objective='binary',
+        metric='auc',
+        scale_pos_weight=scale_pos_weight,
+        n_estimators=2000,
+        learning_rate=0.03,
+        max_depth=6,
+        num_leaves=63,
+        min_child_samples=50,
+        min_child_weight=1e-3,
+        subsample=0.8,
+        colsample_bytree=0.7,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbose=-1,
+        n_jobs=-1,
+    )
+    return model
+
+# ========== 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+target_col = 'IsFraud'
+id_col = 'id' if 'id' in test.columns else test.columns[0]
+
+# ========== 尝试加载已有模型 ==========
+model = None
+label_encoder = None
+best_threshold = 0.5
+metrics = {}
+
+if os.path.exists('data/best_model.pkl'):
+    try:
+        with open('data/best_model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        print("Successfully loaded model from data/best_model.pkl")
+    except Exception as e:
+        print(f"Failed to load data/best_model.pkl: {e}")
+        model = None
+
+# ========== 如果加载失败，重新训练 ==========
+if model is None:
+    print("Retraining model...")
+    train_clean = preprocess(train, mode='train')
+    if target_col in train_clean.columns:
+        y_train = train_clean[target_col]
+        X_train = train_clean.drop(columns=[target_col])
+    else:
+        y_train = train[target_col]
+        X_train = train_clean
+
+    X_train_fe = feature_engineering(X_train)
+    if isinstance(X_train_fe, np.ndarray):
+        X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+    X_train_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_train_fe.columns]
+
+    model = build_model()
+    model.fit(X_train_fe, y_train)
+
+    # 保存模型
+    with open('data/best_model.pkl', 'wb') as f:
+        pickle.dump(model, f)
+    print("Model retrained and saved to data/best_model.pkl")
+
+# ========== 预处理测试集 ==========
+test_clean = preprocess(test, mode='test')
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+X_test_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_test_fe.columns]
+
+# ========== 测试集预测 ==========
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+
+# 尝试从 PREPROCESS_STATE 获取最优阈值
+best_threshold = PREPROCESS_STATE.get('best_threshold', 0.5)
+test_preds = (test_probs >= best_threshold).astype(int)
+
+# ========== 保存测试预测 ==========
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+    'probability': test_probs
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 保存模型到 output/model.pkl ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 特征重要性 ==========
+feature_names = X_test_fe.columns.tolist()
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    importances = np.abs(model.coef_).flatten()
+else:
+    importances = np.ones(len(feature_names))
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    importances = importances[:len(feature_names)]
+
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# ========== 特征重要性图 ==========
+top_n = min(20, len(importance_df))
+top_features = importance_df.head(top_n)
+plt.figure(figsize=(10, 8))
+plt.barh(range(top_n), top_features['importance'].values[::-1], color='steelblue')
+plt.yticks(range(top_n), top_features['name'].values[::-1])
+plt.xlabel('Importance')
+plt.title('Top {} Feature Importance'.format(top_n))
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100)
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 计算验证集指标（用于报告） ==========
+val = pd.read_csv('data/validation.csv')
+val_clean = preprocess(val, mode='test')
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_val_fe.columns = [re.sub('[^\\w]', '_', str(c)) for c in X_val_fe.columns]
+
+if hasattr(model, 'predict_proba'):
+    val_probs = model.predict_proba(X_val_fe)[:, 1]
+else:
+    val_probs = model.predict(X_val_fe).astype(float)
+
+val_preds = (val_probs >= best_threshold).astype(int)
+
+val_auc = roc_auc_score(y_val, val_probs)
+val_accuracy = accuracy_score(y_val, val_preds)
+val_precision = precision_score(y_val, val_preds, zero_division=0)
+val_recall = recall_score(y_val, val_preds, zero_division=0)
+val_f1 = f1_score(y_val, val_preds, zero_division=0)
+
+metrics = {
+    'val_roc_auc': float(val_auc),
+    'val_accuracy': float(val_accuracy),
+    'val_precision': float(val_precision),
+    'val_recall': float(val_recall),
+    'val_f1': float(val_f1),
+    'best_threshold': float(best_threshold)
+}
+
+# ========== ROC 曲线图 ==========
+fpr, tpr, _ = roc_curve(y_val, val_probs)
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, color='darkorange', lw=2, label='ROC curve (AUC = {:.4f})'.format(val_auc))
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver Operating Characteristic (ROC) Curve')
+plt.legend(loc='lower right')
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100)
+plt.close()
+print("ROC curve saved to output/report_fig.png")
+
+# ========== 混淆矩阵 ==========
+cm = confusion_matrix(y_val, val_preds)
+cm_df = pd.DataFrame(cm, index=['Actual Negative', 'Actual Positive'], columns=['Predicted Negative', 'Predicted Positive'])
+
+# ========== 分类报告 ==========
+cr_dict = classification_report(y_val, val_preds, output_dict=True, zero_division=0)
+cr_df = pd.DataFrame(cr_dict).transpose()
+
+# ========== 生成 HTML 报告 ==========
+importance_html = importance_df.head(20).to_html(index=False, classes='table table-striped', border=0)
+cm_html = cm_df.to_html(classes='table table-bordered', border=0)
+cr_html = cr_df.to_html(classes='table table-striped', border=0)
+
+# 测试集预测预览
+preview_df = result_df.head(10)
+preview_html = preview_df.to_html(index=False, classes='table table-striped', border=0)
+
+html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Binary Classification</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 40px;
+            background-color: #f5f7fa;
+            color: #333;
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #2980b9;
+            margin-top: 30px;
+        }}
+        .metrics-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }}
+        .metric-card {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+        .metric-value {{
+            font-size: 28px;
+            font-weight: bold;
+            color: #2c3e50;
+        }}
+        .metric-label {{
+            font-size: 14px;
+            color: #7f8c8d;
+            margin-top: 5px;
+        }}
+        .table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .table th {{
+            background-color: #3498db;
+            color: white;
+            padding: 12px;
+            text-align: left;
+        }}
+        .table td {{
+            padding: 10px 12px;
+            border-bottom: 1px solid #ecf0f1;
+        }}
+        .table tr:hover {{
+            background-color: #f8f9fa;
+        }}
+        .section {{
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin: 20px 0;
+        }}
+        img {{
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+    </style>
+</head>
+<body>
+    <h1>Binary Classification Model Report</h1>
+    <p><strong>Target Column:</strong> {target_col}</p>
+    <p><strong>Evaluation Metric:</strong> ROC-AUC</p>
+    <p><strong>Best Threshold:</strong> {best_threshold:.4f}</p>
+
+    <h2>Model Performance Metrics</h2>
+    <div class="metrics-grid">
+        <div class="metric-card">
+            <div class="metric-value">{val_auc:.4f}</div>
+            <div class="metric-label">ROC-AUC</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{val_accuracy:.4f}</div>
+            <div class="metric-label">Accuracy</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{val_precision:.4f}</div>
+            <div class="metric-label">Precision</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{val_recall:.4f}</div>
+            <div class="metric-label">Recall</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{val_f1:.4f}</div>
+            <div class="metric-label">F1-Score</div>
+        </div>
+    </div>
+
+    <h2>ROC Curve</h2>
+    <div class="section">
+        <img src="report_fig.png" alt="ROC Curve">
+    </div>
+
+    <h2>Confusion Matrix</h2>
+    <div class="section">
+        {cm_html}
+    </div>
+
+    <h2>Classification Report</h2>
+    <div class="section">
+        {cr_html}
+    </div>
+
+    <h2>Feature Importance (Top 20)</h2>
+    <div class="section">
+        <img src="feature_importance.png" alt="Feature Importance">
+        {importance_html}
+    </div>
+
+    <h2>Test Set Predictions Preview (First 10 rows)</h2>
+    <div class="section">
+        {preview_html}
+    </div>
+
+    <p><em>Report generated automatically. Model saved as output/model.pkl</em></p>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 生成独立预测脚本 ==========
+predict_script = '''
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+# 预处理状态（与训练时一致）
+PREPROCESS_STATE = {
+    'fitted': False,
+}
+
+def preprocess(df, mode='test'):
+    target_col = 'IsFraud'
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    df = df.copy()
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if target_col in numeric_cols:
+        numeric_cols.remove(target_col)
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            median_val = PREPROCESS_STATE.get(f'{col}_median', df[col].median())
+            df[col] = df[col].fillna(median_val)
+    if 'Transaction_Amount' in df.columns:
+        df['Transaction_Amount'] = df['Transaction_Amount'].clip(lower=0)
+        df['Transaction_Amount'] = np.log1p(df['Transaction_Amount'])
+    if 'Time' in df.columns:
+        df['Time'] = df['Time'] / 3600.0
+    return df
+
+def feature_engineering(df):
+    target_col = 'IsFraud'
+    df = df.copy()
+    if 'Time' in df.columns:
+        df['Time_hour_sin'] = np.sin(2 * np.pi * df['Time'] / 24.0)
+        df['Time_hour_cos'] = np.cos(2 * np.pi * df['Time'] / 24.0)
+        df['Time_hour'] = (df['Time'].astype(int) % 24).astype(int)
+    if 'Transaction_Amount' in df.columns:
+        df['Amount_squared'] = df['Transaction_Amount'] ** 2
+        df['Amount_sqrt'] = np.sqrt(df['Transaction_Amount'].clip(lower=0))
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    return df
+
+def predict(input_file, output_file, model_path='output/model.pkl', threshold=0.5):
+    """
+    Load model and make predictions on new data.
+    
+    Parameters:
+    - input_file: path to CSV file with features
+    - output_file: path to save predictions
+    - model_path: path to the saved model pickle file
+    - threshold: classification threshold (default 0.5)
+    """
+    # Load model
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # Load data
+    df = pd.read_csv(input_file)
+    id_col = 'id' if 'id' in df.columns else df.columns[0]
+    
+    # Preprocess
+    df_clean = preprocess(df, mode='test')
+    X = df_clean.drop(columns=['IsFraud'], errors='ignore')
+    if X is df_clean:
+        X = df_clean.copy()
+    
+    # Feature engineering
+    X_fe = feature_engineering(X)
+    if isinstance(X_fe, np.ndarray):
+        X_fe = pd.DataFrame(X_fe, index=X.index)
+    X_fe.columns = [re.sub('[^\\\\w]', '_', str(c)) for c in X_fe.columns]
+    
+    # Predict
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X_fe)[:, 1]
+    else:
+        probs = model.predict(X_fe).astype(float)
+    
+    preds = (probs >= threshold).astype(int)
+    
+    # Save results
+    result = pd.DataFrame({
+        'id': df[id_col] if id_col in df.columns else range(len(preds)),
+        'prediction': preds,
+        'probability': probs
+    })
+    result.to_csv(output_file, index=False)
+    print(f"Predictions saved to {output_file}")
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) < 3:
+        print("Usage: python predict.py <input_csv> <output_csv> [threshold]")
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    threshold = float(sys.argv[3]) if len(sys.argv) > 3 else 0.5
+    
+    predict(input_file, output_file, threshold=threshold)
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_loaded_from_best': os.path.exists('data/best_model.pkl'),
+    'test_predictions_count': len(result_df),
+    'test_positive_rate': float(test_preds.mean()),
+    'metrics': metrics,
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/report_fig.png',
+        'output/test_predictions.csv',
+        'output/predict.py'
+    ]
+}
+print(json.dumps(summary))
+```
+</code>

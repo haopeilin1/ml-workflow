@@ -1,0 +1,254 @@
+<plan>
+根据上下文载荷中的评估建议和历史代码分析，当前策略需要调整：
+
+**问题分析：**
+1. 历史代码已尝试增加树深度（max_depth=12）和迭代轮数（n_estimators=1000），但效果不佳
+2. 评估Agent建议：换方向尝试XGBoost、增加特征工程、考虑集成方法
+
+**优化策略：**
+
+1. **模型切换：从LightGBM切换到XGBoost**
+   - 使用XGBRegressor，设置max_depth=10, n_estimators=500, learning_rate=0.05
+   - 添加正则化参数防止过拟合：reg_alpha=0.1, reg_lambda=0.1
+   - 使用early_stopping_rounds通过eval_set控制
+
+2. **增强特征工程**
+   - 保留历史代码中有效的比例特征、对数变换、多项式特征
+   - 新增：经纬度分箱特征（捕捉区域效应）
+   - 新增：收入分箱特征（收入是房价最重要的预测因子）
+   - 新增：房间密度与人口密度的交互特征
+
+3. **预处理优化**
+   - 严格按照检查清单：丢弃id列、填充total_bedrooms缺失值、编码ocean_proximity
+   - 使用ColumnTransformer + OneHotEncoder + SimpleImputer + StandardScaler
+
+4. **过拟合控制**
+   - XGBoost设置subsample=0.8, colsample_bytree=0.8
+   - 使用early_stopping防止过拟合
+   - 验证集RMSE作为早停监控指标
+
+5. **evaluate_model函数**
+   - 保留自定义评估函数，计算val_rmse
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import mean_squared_error
+import xgboost as xgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    global PREPROCESS_STATE
+    
+    # 复制数据，避免修改原始数据
+    df = df.copy()
+    
+    # 丢弃 id 列（标识列，会导致严重过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 分离特征和目标列
+    target_col = 'median_house_value'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 定义数值列和类别列
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    if mode == 'train':
+        # 构建预处理器
+        preprocessor = ColumnTransformer([
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols),
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ]), cat_cols)
+        ], remainder='passthrough')
+        
+        # 拟合预处理器
+        preprocessor.fit(X)
+        
+        # 保存状态
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['num_cols'] = num_cols
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        
+        # 转换数据
+        X_processed = preprocessor.transform(X)
+        
+        # 获取特征名
+        feature_names = []
+        feature_names.extend(num_cols)
+        if cat_cols:
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            cat_feature_names = encoder.get_feature_names_out(cat_cols)
+            feature_names.extend(cat_feature_names)
+        
+        # 转换为 DataFrame
+        X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+        
+    elif mode == 'test':
+        if 'preprocessor' not in PREPROCESS_STATE:
+            raise ValueError("preprocess() must be called with mode='train' before mode='test'")
+        
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        X_processed = preprocessor.transform(X)
+        
+        num_cols = PREPROCESS_STATE['num_cols']
+        cat_cols = PREPROCESS_STATE['cat_cols']
+        feature_names = []
+        feature_names.extend(num_cols)
+        if cat_cols:
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            cat_feature_names = encoder.get_feature_names_out(cat_cols)
+            feature_names.extend(cat_feature_names)
+        
+        X_processed = pd.DataFrame(X_processed, columns=feature_names, index=X.index)
+    
+    # 重新添加目标列
+    if y is not None:
+        X_processed[target_col] = y.values
+    
+    return X_processed
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 分离目标列
+    target_col = 'median_house_value'
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+    else:
+        X = df.copy()
+    
+    # 1. 基础比例特征（保留历史有效特征）
+    if 'total_rooms' in X.columns and 'households' in X.columns:
+        X['rooms_per_household'] = X['total_rooms'] / (X['households'] + 1e-5)
+    
+    if 'total_bedrooms' in X.columns and 'total_rooms' in X.columns:
+        X['bedrooms_per_room'] = X['total_bedrooms'] / (X['total_rooms'] + 1e-5)
+    
+    if 'population' in X.columns and 'households' in X.columns:
+        X['population_per_household'] = X['population'] / (X['households'] + 1e-5)
+    
+    if 'median_income' in X.columns and 'total_rooms' in X.columns:
+        X['income_per_room'] = X['median_income'] / (X['total_rooms'] + 1e-5)
+    
+    if 'total_bedrooms' in X.columns and 'households' in X.columns:
+        X['bedrooms_per_household'] = X['total_bedrooms'] / (X['households'] + 1e-5)
+    
+    if 'total_rooms' in X.columns and 'population' in X.columns:
+        X['rooms_per_population'] = X['total_rooms'] / (X['population'] + 1e-5)
+    
+    if 'median_income' in X.columns and 'households' in X.columns:
+        X['income_per_household'] = X['median_income'] / (X['households'] + 1e-5)
+    
+    # 2. 对数变换（对偏态分布的特征）
+    skewed_cols = ['total_rooms', 'total_bedrooms', 'population', 'households']
+    for col in skewed_cols:
+        if col in X.columns:
+            X[f'{col}_log'] = np.log1p(X[col])
+    
+    # 3. 多项式特征（median_income 是最重要的特征之一）
+    if 'median_income' in X.columns:
+        X['median_income_sq'] = X['median_income'] ** 2
+        X['median_income_cub'] = X['median_income'] ** 3
+    
+    # 4. 交互特征：经纬度组合
+    if 'longitude' in X.columns and 'latitude' in X.columns:
+        X['longitude_latitude_interaction'] = X['longitude'] * X['latitude']
+        X['longitude_sq'] = X['longitude'] ** 2
+        X['latitude_sq'] = X['latitude'] ** 2
+    
+    # 5. 区域密度特征
+    if 'population' in X.columns and 'total_rooms' in X.columns:
+        X['density'] = X['population'] / (X['total_rooms'] + 1e-5)
+    
+    # 6. 房龄相关特征
+    if 'housing_median_age' in X.columns:
+        X['age_squared'] = X['housing_median_age'] ** 2
+    
+    # 7. 新增：经纬度分箱特征（捕捉区域效应）
+    if 'longitude' in X.columns:
+        X['longitude_bin'] = pd.cut(X['longitude'], bins=20, labels=False)
+    if 'latitude' in X.columns:
+        X['latitude_bin'] = pd.cut(X['latitude'], bins=20, labels=False)
+    
+    # 8. 新增：收入分箱特征
+    if 'median_income' in X.columns:
+        X['income_bin'] = pd.cut(X['median_income'], bins=10, labels=False)
+    
+    # 9. 新增：房间密度与人口密度的交互
+    if 'rooms_per_household' in X.columns and 'population_per_household' in X.columns:
+        X['density_interaction'] = X['rooms_per_household'] * X['population_per_household']
+    
+    # 确保所有列是数值类型
+    X = X.select_dtypes(include=[np.number])
+    
+    # 处理无穷值和 NaN
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    model = xgb.XGBRegressor(
+        objective='reg:squarederror',
+        n_estimators=500,
+        max_depth=10,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        min_child_weight=5,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0
+    )
+    
+    return model
+
+
+def evaluate_model(model, X_val, y_val):
+    """
+    自定义验证集评估指标。
+    返回一个 dict，键名以 val_ 开头。
+    """
+    val_preds = model.predict(X_val)
+    rmse = float(np.sqrt(mean_squared_error(y_val, val_preds)))
+    return {'val_rmse': rmse}
+```
+</code>

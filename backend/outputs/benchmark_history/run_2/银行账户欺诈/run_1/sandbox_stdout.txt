@@ -1,0 +1,7 @@
+[EVAL_ERROR] The number of features in data (49) is not the same as it was in training data (50).
+You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.
+[EVAL_FALLBACK_ERROR] The number of features in data (49) is not the same as it was in training data (50).
+You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.
+METRICS_JSON_START
+{}
+METRICS_JSON_END

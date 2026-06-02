@@ -1,0 +1,855 @@
+【当前运行状态 Run State】: OPTIMIZE
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.BINARY_CLASSIFICATION
+- 目标列: smoking
+- 评估指标: ROC-AUC
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于体检生物信号数据构建二分类模型，预测个体吸烟状态。训练集涵盖年龄、身高、体重、腰围、视力、听力、血压、血糖、血脂四项、血红蛋白、尿蛋白、血清肌酐、肝功三项及龋齿等23维特征，无缺失值。模型输出预测概率，以ROC-AUC为唯一评估指标，核心在于挖掘与吸烟相关的生物标志物模式。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 列名 ['height(cm)', 'weight(kg)', 'waist(cm)', 'eyesight(left)', 'eyesight(right)', 'hearing(left)', 'hearing(right)', 'fasting blood sugar', 'Urine protein', 'serum creatinine', 'dental caries'] 包含特殊字符，LightGBM/XGBoost 不支持。必须在 preprocess() 或 feature_engineering() 中用 df.columns = [re.sub('[^\\w]', '_', str(c)) for c in df.columns] 清洗为纯字母数字下划线。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 smoking。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['smoking'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "train.csv",
+  "rowCount": 12000,
+  "columnCount": 24,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 12000,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        310.0,
+        11213.0,
+        2262.0,
+        14902.0,
+        13823.0
+      ],
+      "min": 0.0,
+      "max": 14999.0,
+      "mean": 7489.8206666666665,
+      "std": 4334.181837000985,
+      "median": 7488.5,
+      "skewness": 0.001910359708417929,
+      "isMonotonic": false
+    },
+    {
+      "name": "age",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 14,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        40.0,
+        50.0,
+        60.0,
+        30.0,
+        40.0
+      ],
+      "min": 20.0,
+      "max": 85.0,
+      "mean": 42.6875,
+      "std": 10.564838462291375,
+      "median": 40.0,
+      "skewness": 0.30102989369849614
+    },
+    {
+      "name": "height(cm)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 11,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        165.0,
+        165.0,
+        160.0,
+        175.0,
+        155.0
+      ],
+      "min": 140.0,
+      "max": 190.0,
+      "mean": 164.76291666666665,
+      "std": 8.506482127152829,
+      "median": 165.0,
+      "skewness": -0.12484509802741096
+    },
+    {
+      "name": "weight(kg)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 17,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        60.0,
+        60.0,
+        60.0,
+        65.0,
+        45.0
+      ],
+      "min": 35.0,
+      "max": 115.0,
+      "mean": 64.4875,
+      "std": 11.020887687195822,
+      "median": 65.0,
+      "skewness": 0.4291396178011396
+    },
+    {
+      "name": "waist(cm)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 340,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        74.0,
+        78.0,
+        80.0,
+        84.0,
+        67.0
+      ],
+      "min": 57.0,
+      "max": 114.0,
+      "mean": 80.49611666666667,
+      "std": 7.932090293511809,
+      "median": 80.8,
+      "skewness": 0.12445824709253325
+    },
+    {
+      "name": "eyesight(left)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 14,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.6,
+        1.0,
+        0.8,
+        1.2,
+        1.5
+      ],
+      "min": 0.1,
+      "max": 9.9,
+      "mean": 1.036908333333333,
+      "std": 0.293008696296255,
+      "median": 1.0,
+      "skewness": 2.227715844532571
+    },
+    {
+      "name": "eyesight(right)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 13,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.2,
+        0.9,
+        0.8,
+        1.2,
+        1.5
+      ],
+      "min": 0.1,
+      "max": 2.0,
+      "mean": 1.0328249999999999,
+      "std": 0.2813093444720135,
+      "median": 1.0,
+      "skewness": -0.09347134468873394
+    },
+    {
+      "name": "hearing(left)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 2.0,
+      "mean": 1.0051666666666668,
+      "std": 0.07169658701038682,
+      "median": 1.0,
+      "skewness": 13.805840415570065
+    },
+    {
+      "name": "hearing(right)",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 2.0,
+      "mean": 1.0054166666666666,
+      "std": 0.0734014670845872,
+      "median": 1.0,
+      "skewness": 13.478362143894387
+    },
+    {
+      "name": "systolic",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 80,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        117.0,
+        130.0,
+        133.0,
+        134.0,
+        110.0
+      ],
+      "min": 13.0,
+      "max": 182.0,
+      "mean": 119.10258333333333,
+      "std": 11.217666706149267,
+      "median": 119.0,
+      "skewness": 0.011778477780522845
+    },
+    {
+      "name": "relaxation",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 59,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        82.0,
+        88.0,
+        71.0,
+        84.0,
+        65.0
+      ],
+      "min": 50.0,
+      "max": 114.0,
+      "mean": 74.801,
+      "std": 7.8649043473755045,
+      "median": 75.0,
+      "skewness": 0.07511842172115235
+    },
+    {
+      "name": "fasting blood sugar",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 114,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        97.0,
+        92.0,
+        95.0,
+        96.0,
+        84.0
+      ],
+      "min": 1.0,
+      "max": 249.0,
+      "mean": 95.17416666666666,
+      "std": 10.421614565079034,
+      "median": 94.0,
+      "skewness": 2.3384800521081384
+    },
+    {
+      "name": "Cholesterol",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 155,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        194.0,
+        204.0,
+        211.0,
+        182.0,
+        173.0
+      ],
+      "min": 106.0,
+      "max": 316.0,
+      "mean": 191.18633333333332,
+      "std": 20.58204107768386,
+      "median": 191.0,
+      "skewness": 0.27144085471735085
+    },
+    {
+      "name": "triglyceride",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 310,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        51.0,
+        94.0,
+        79.0,
+        58.0,
+        63.0
+      ],
+      "min": 16.0,
+      "max": 548.0,
+      "mean": 102.55975,
+      "std": 47.863672803097934,
+      "median": 90.0,
+      "skewness": 1.8527990743531408
+    },
+    {
+      "name": "HDL",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 75,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        68.0,
+        50.0,
+        53.0,
+        59.0,
+        60.0
+      ],
+      "min": 28.0,
+      "max": 106.0,
+      "mean": 57.24508333333333,
+      "std": 11.35818067218825,
+      "median": 56.0,
+      "skewness": 0.44846315574396606
+    },
+    {
+      "name": "LDL",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 133,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        116.0,
+        135.0,
+        141.0,
+        111.0,
+        100.0
+      ],
+      "min": 49.0,
+      "max": 211.0,
+      "mean": 113.37258333333334,
+      "std": 18.466722773154792,
+      "median": 112.0,
+      "skewness": 0.22306552038866267
+    },
+    {
+      "name": "hemoglobin",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 102,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        13.9,
+        15.0,
+        12.1,
+        16.2,
+        12.8
+      ],
+      "min": 7.3,
+      "max": 18.8,
+      "mean": 14.550458333333333,
+      "std": 1.3743606497314245,
+      "median": 14.7,
+      "skewness": -0.4610396992522588
+    },
+    {
+      "name": "Urine protein",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 5,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 5.0,
+      "mean": 1.0156666666666667,
+      "std": 0.1620393273792621,
+      "median": 1.0,
+      "skewness": 12.560969798698661
+    },
+    {
+      "name": "serum creatinine",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 13,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.8,
+        1.1,
+        0.7,
+        0.8,
+        0.7
+      ],
+      "min": 0.4,
+      "max": 1.6,
+      "mean": 0.8713583333333335,
+      "std": 0.16796678044730565,
+      "median": 0.9,
+      "skewness": 0.07019653832248049
+    },
+    {
+      "name": "AST",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 54,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        20.0,
+        21.0,
+        20.0,
+        11.0,
+        19.0
+      ],
+      "min": 9.0,
+      "max": 83.0,
+      "mean": 22.257416666666668,
+      "std": 5.661344736757154,
+      "median": 21.0,
+      "skewness": 1.6928198648218715
+    },
+    {
+      "name": "ALT",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 89,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        17.0,
+        15.0,
+        12.0,
+        11.0,
+        13.0
+      ],
+      "min": 6.0,
+      "max": 139.0,
+      "mean": 20.95975,
+      "std": 10.278988345371529,
+      "median": 18.0,
+      "skewness": 2.386297609971964
+    },
+    {
+      "name": "Gtp",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 158,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        13.0,
+        23.0,
+        14.0,
+        16.0,
+        12.0
+      ],
+      "min": 6.0,
+      "max": 371.0,
+      "mean": 26.425666666666668,
+      "std": 18.82456741203924,
+      "median": 21.0,
+      "skewness": 4.09143812458173
+    },
+    {
+      "name": "dental caries",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.14375,
+      "std": 0.3508506740998127,
+      "median": 0.0,
+      "skewness": 2.031117003332975
+    },
+    {
+      "name": "smoking",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.3655,
+      "std": 0.4815901550313489,
+      "median": 0.0,
+      "skewness": 0.5586593454953163
+    }
+  ],
+  "classBalance": {
+    "targetColumn": "eyesight(left)",
+    "nClasses": 14,
+    "maxClassRatio": 0.263,
+    "minClassRatio": 0.0001,
+    "imbalanceRatio": 3156.0,
+    "isSeverelyImbalanced": true
+  }
+}
+
+【上下文载荷 Context Payload】:
+当前val_auc=0.875，可尝试调优：1) 增加n_estimators至200-300并配合early_stopping；2) 调整learning_rate至0.05-0.1；3) 尝试subsample=0.8, colsample_bytree=0.8防止过拟合；4) 可尝试特征交互或增加特征数量。
+
+【历史代码 Previous Code】:
+```python
+import pandas as pd
+import numpy as np
+import dill
+import json
+import re
+import warnings
+from sklearn.metrics import accuracy_score, roc_auc_score, root_mean_squared_error, mean_absolute_error, r2_score, f1_score
+warnings.filterwarnings('ignore')
+
+# ========== 全局状态（用于保存预处理参数）==========
+PREPROCESS_STATE = {}
+
+# ========== LLM 填充区（开始）==========
+import re
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列（如果存在）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 清洗列名：将特殊字符替换为下划线
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    target_col = 'smoking'
+    # 注意：test.csv 没有目标列，所以需要检查
+    if target_col in df.columns:
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df
+    
+    # 4. 数值特征列（所有特征都是数值类型）
+    numeric_cols = X.columns.tolist()
+    
+    # 5. 标准化
+    if mode == 'train':
+        # 拟合 scaler
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+        PREPROCESS_STATE['numeric_cols'] = numeric_cols
+    else:  # mode == 'test'
+        # 应用已拟合的 scaler
+        scaler = PREPROCESS_STATE['scaler']
+        X_scaled = scaler.transform(X)
+    
+    # 6. 转换回 DataFrame
+    X_processed = pd.DataFrame(X_scaled, columns=numeric_cols)
+    
+    # 7. 重新添加目标列（如果存在）
+    if y is not None:
+        X_processed[target_col] = y.values
+    
+    return X_processed
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    # 创建新特征
+    # BMI = weight(kg) / (height(m))^2
+    if 'height_cm_' in df.columns and 'weight_kg_' in df.columns:
+        df['bmi'] = df['weight_kg_'] / ((df['height_cm_'] / 100) ** 2)
+    
+    # 血压差
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['blood_pressure_diff'] = df['systolic'] - df['relaxation']
+    
+    # 血脂比值（triglyceride / HDL）
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['tg_hdl_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+    
+    # 肝功比值（AST / ALT）
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['ast_alt_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能产生的 NaN（除零保护）
+    df = df.fillna(0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 类别不平衡比例
+    # 训练集中 smoking=1 的比例约为 0.3655，smoking=0 的比例约为 0.6345
+    # scale_pos_weight = count(0) / count(1) ≈ 0.6345 / 0.3655 ≈ 1.74
+    scale_pos_weight = 0.6345 / 0.3655
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=31,
+        max_depth=6,
+        learning_rate=0.05,
+        n_estimators=500,
+        subsample=0.8,
+        min_child_samples=20,
+        random_state=42,
+        verbosity=-1
+    )
+    
+    return model
+# ========== LLM 填充区（结束）==========
+
+# ========== 数据加载（系统负责）==========
+train = pd.read_csv('data/train.csv')
+val = pd.read_csv('data/validation.csv')
+test = pd.read_csv('data/test.csv')
+
+# 获取目标列和 id 列
+target_col = 'smoking'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 检查目标列是否存在
+if target_col not in train.columns:
+    raise ValueError(f"目标列 '{target_col}' 不在训练数据中，可用列: {list(train.columns)}")
+
+# ========== 预处理（系统调用 LLM 填充的函数）==========
+train_clean = preprocess(train, mode='train')
+val_clean = preprocess(val, mode='test')
+test_clean = preprocess(test, mode='test')
+
+# 分离特征和目标（兼容 preprocess 是否保留目标列的情况）
+if target_col in train_clean.columns:
+    y_train = train_clean[target_col]
+    X_train = train_clean.drop(columns=[target_col])
+else:
+    y_train = train[target_col]
+    X_train = train_clean
+
+if target_col in val_clean.columns:
+    y_val = val_clean[target_col]
+    X_val = val_clean.drop(columns=[target_col])
+else:
+    y_val = val[target_col]
+    X_val = val_clean
+
+# 【强制编码】如果原始目标列是字符串/类别，强制从原始数据获取并统一编码
+# 这能覆盖 LLM 可能在 preprocess 中对目标列做的任何编码，确保 predict 后可反编码回原始标签
+_label_encoder = None
+_target_dtype = str(train[target_col].dtype).lower() if target_col in train.columns else ''
+_is_string_target = target_col in train.columns and (
+    train[target_col].dtype == object or _target_dtype == 'category' or
+    _target_dtype.startswith('str') or _target_dtype.startswith('string')
+)
+if _is_string_target:
+    from sklearn.preprocessing import LabelEncoder
+    _label_encoder = LabelEncoder()
+    y_train = _label_encoder.fit_transform(train[target_col])
+    try:
+        y_val = _label_encoder.transform(val[target_col])
+    except ValueError:
+        # 验证集可能出现训练集未见的标签（如带空格/点号变体），统一用训练集映射兜底
+        _val_labels = val[target_col].astype(str).str.strip().str.rstrip('.')
+        _train_labels = pd.Series(train[target_col]).astype(str).str.strip().str.rstrip('.')
+        _label_encoder.fit(_train_labels)
+        y_val = _label_encoder.transform(_val_labels)
+    PREPROCESS_STATE['label_encoder'] = _label_encoder
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+# ========== 特征工程（系统调用 LLM 填充的函数）==========
+X_train_fe = feature_engineering(X_train)
+if isinstance(X_train_fe, np.ndarray):
+    X_train_fe = pd.DataFrame(X_train_fe, index=X_train.index)
+X_val_fe = feature_engineering(X_val)
+if isinstance(X_val_fe, np.ndarray):
+    X_val_fe = pd.DataFrame(X_val_fe, index=X_val.index)
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# ========== 清洗特征名（LGBM/XGBoost 不支持特殊 JSON 字符）==========
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    _df.columns = [re.sub('[^\\w]', '_', str(c)) for c in _df.columns]
+# 去重列名
+for _df in [X_train_fe, X_val_fe, X_test_fe]:
+    if _df.columns.duplicated().any():
+        _df.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(_df.columns)]
+
+# ========== 模型训练（系统负责）==========
+model = build_model()
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+try:
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+except Exception:
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+    try:
+        model.fit(X_train_fe, y_train)
+    except Exception as _fit_err:
+        print(f"[FIT_ERROR] {_fit_err}")
+        raise
+
+# ========== 验证评估（LLM 可覆盖，系统兜底）==========
+# 如果 LLM 定义了 evaluate_model()，使用 LLM 的评估逻辑；否则使用系统默认指标
+try:
+    if 'evaluate_model' in globals():
+        metrics = evaluate_model(model, X_val_fe, y_val)
+    else:
+        if hasattr(model, 'predict_proba'):
+            val_probs = model.predict_proba(X_val_fe)[:, 1]
+        else:
+            val_probs = model.predict(X_val_fe).astype(float)
+        val_preds = (val_probs >= 0.5).astype(int)
+        metrics = {
+            'val_auc': float(roc_auc_score(y_val, val_probs)),
+            'val_accuracy': float(accuracy_score(y_val, val_preds))
+        }
+except Exception as e:
+    print(f"[EVAL_ERROR] {e}")
+    metrics = {}
+    # 尝试最基本的预测来兜底
+    try:
+        _pred = model.predict(X_val_fe)
+        if task_type == "binary_classification" and hasattr(model, 'predict_proba'):
+            _prob = model.predict_proba(X_val_fe)[:, 1]
+            metrics = {'val_auc': float(roc_auc_score(y_val, _prob)), 'val_accuracy': float(accuracy_score(y_val, (_prob >= 0.5).astype(int)))}
+        elif task_type == "multiclass_classification":
+            metrics = {'val_accuracy': float(accuracy_score(y_val, _pred)), 'val_f1_macro': float(f1_score(y_val, _pred, average='macro'))}
+        elif task_type in ("regression", "time_series_forecasting"):
+            metrics = {'val_rmse': float(root_mean_squared_error(y_val, _pred)), 'val_mae': float(mean_absolute_error(y_val, _pred)), 'val_r2': float(r2_score(y_val, _pred))}
+    except Exception as e2:
+        print(f"[EVAL_FALLBACK_ERROR] {e2}")
+        metrics = {}
+
+# ========== 测试预测（系统保证格式）==========
+# 注意：如果前面的代码（特征工程/model.fit）有 bug，这里会抛出异常
+# 这是正确的行为——错误应该被暴露，让 DEBUG 循环去修复根因，而不是用假数据掩盖
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_fe)[:, 1]
+else:
+    test_probs = model.predict(X_test_fe).astype(float)
+test_preds = (test_probs >= 0.5).astype(int)
+
+
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+})
+result_df['probability'] = test_probs
+result_df.to_csv('data/test_predictions.csv', index=False)
+
+# ========== 模型保存（系统保证可序列化）==========
+with open('data/best_model.pkl', 'wb') as f:
+    dill.dump(model, f)
+
+# ========== 输出指标（系统抓取）==========
+print('METRICS_JSON_START')
+print(json.dumps(metrics))
+print('METRICS_JSON_END')
+
+```
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

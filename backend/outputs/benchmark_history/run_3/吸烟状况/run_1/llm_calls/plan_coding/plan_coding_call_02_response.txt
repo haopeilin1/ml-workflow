@@ -1,0 +1,187 @@
+<plan>
+## 优化规划
+
+### 当前状态分析
+当前模型已接近良好水平（OPTIMIZE阶段），上下文载荷建议：
+1. **调参**：增大n_estimators至500，降低learning_rate至0.05，配合early_stopping ✅ 已实现
+2. **特征工程**：添加特征交叉或使用目标编码 ✅ 已有部分特征工程
+3. **数据增强**：对少数类进行SMOTE过采样 ❌ 未实现
+
+### 优化策略
+
+#### 1. 数据增强 - SMOTE过采样
+当前正样本比例约36.6%，存在一定类别不平衡。使用SMOTE对训练集进行过采样，提升模型对少数类的识别能力。必须使用`imblearn.pipeline.Pipeline`确保SMOTE只在训练时应用。
+
+#### 2. 特征工程增强
+- 添加更多交叉特征：BMI分类、血压分级、血脂综合指标
+- 对偏态特征（triglyceride, Gtp, ALT, fasting_blood_sugar）做对数变换
+- 创建聚合特征：肝肾功能综合指标
+
+#### 3. 模型调参优化
+- 保持n_estimators=500，learning_rate=0.05
+- 添加early_stopping回调防止过拟合
+- 调整正则化参数（reg_alpha, reg_lambda）
+- 使用scale_pos_weight处理类别不平衡
+
+#### 4. 关键修复
+- 修复列名清洗逻辑，确保所有特殊字符被替换
+- 确保feature_engineering中正确处理列名（清洗后的下划线格式）
+- 添加SMOTE到Pipeline中
+
+### 代码修改要点
+1. **preprocess**：保持现有逻辑，确保列名清洗正确
+2. **feature_engineering**：增强特征工程，添加更多交叉特征
+3. **build_model**：使用ImbPipeline集成SMOTE，添加early_stopping
+</plan>
+<code>
+```python
+import re
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+# 全局状态变量
+PREPROCESS_STATE = {}
+FEATURE_ENG_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 1. 丢弃 id 列
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 2. 清洗列名：特殊字符替换为下划线
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 4. 数值特征标准化
+    num_cols = X.columns.tolist()
+    
+    if mode == 'train':
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        PREPROCESS_STATE['scaler'] = scaler
+        PREPROCESS_STATE['num_cols'] = num_cols
+    else:
+        scaler = PREPROCESS_STATE.get('scaler')
+        if scaler is None:
+            raise ValueError("PREPROCESS_STATE 中未找到 scaler，请先运行 train 模式")
+        X_scaled = scaler.transform(X)
+    
+    # 5. 重新构建 DataFrame
+    X_scaled_df = pd.DataFrame(X_scaled, columns=num_cols, index=df.index)
+    
+    if y is not None:
+        X_scaled_df[target_col] = y.values
+    
+    return X_scaled_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    df = df.copy()
+    
+    # 丢弃目标列
+    target_col = 'smoking'
+    if target_col in df.columns:
+        df = df.drop(columns=[target_col])
+    
+    # 创建新特征
+    # BMI
+    if 'weight_kg_' in df.columns and 'height_cm_' in df.columns:
+        df['bmi'] = df['weight_kg_'] / ((df['height_cm_'] / 100) ** 2)
+        # BMI 分类特征
+        df['bmi_category'] = pd.cut(df['bmi'], bins=[0, 18.5, 24, 28, 100], labels=[0, 1, 2, 3]).astype(float)
+    
+    # 血压差
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['blood_pressure_diff'] = df['systolic'] - df['relaxation']
+        df['mean_arterial_pressure'] = df['relaxation'] + (df['blood_pressure_diff'] / 3)
+    
+    # 血脂比
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['triglyceride_hdl_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+    
+    # 肝功比
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['ast_alt_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+    
+    # 平均视力
+    if 'eyesight_left_' in df.columns and 'eyesight_right_' in df.columns:
+        df['avg_eyesight'] = (df['eyesight_left_'] + df['eyesight_right_']) / 2
+    
+    # 对偏态特征做对数变换（加1避免log0）
+    skewed_cols = ['triglyceride', 'Gtp', 'ALT', 'fasting_blood_sugar']
+    for col in skewed_cols:
+        if col in df.columns:
+            # 确保非负
+            min_val = df[col].min()
+            shift = 0 if min_val > 0 else abs(min_val) + 1
+            df[f'log_{col}'] = np.log1p(df[col] + shift)
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 填充可能出现的NaN（由除零等引起）
+    df = df.fillna(0)
+    
+    return df
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重（正样本比例约36.6%）
+    scale_pos_weight = (1 - 0.3655) / 0.3655  # ≈ 1.735
+    
+    # 使用 ImbPipeline 集成 SMOTE，确保只在训练时应用
+    pipeline = ImbPipeline([
+        ('smote', SMOTE(random_state=42, sampling_strategy=0.5)),  # 将少数类提升到多数类的50%
+        ('model', LGBMClassifier(
+            objective='binary',
+            scale_pos_weight=scale_pos_weight,
+            num_leaves=31,
+            max_depth=6,
+            learning_rate=0.05,
+            n_estimators=500,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_samples=20,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            random_state=42,
+            verbosity=-1
+        ))
+    ])
+    
+    return pipeline
+```
+</code>

@@ -1,0 +1,218 @@
+【当前运行状态 Run State】: INIT
+
+【意图澄清与任务配置 Task Config】:
+- 任务类型: TaskType.REGRESSION
+- 目标列: charges
+- 评估指标: RMSE
+- 复杂度判定: simple（原因: LLM判定为simple，无复杂信号触发）
+- 特征约束（需丢弃的列）: []
+- 用户描述: 基于被保险人的人口统计、健康指标与生活方式数据，构建回归模型预测年度医疗保险费用（charges）。特征包括年龄、性别、BMI、受抚养人数量、是否吸烟及地理区域。评估指标采用RMSE，值越小精度越高。
+
+【数据预处理强制检查清单 Data Preprocessing Checklist】（以下检查必须无条件执行，否则代码会执行失败）：
+
+- 类别特征列 ['sex', 'smoker', 'region'] 必须纳入 Pipeline 的 ColumnTransformer 中，使用 OneHotEncoder(handle_unknown='ignore') 或 OrdinalEncoder 编码，严禁直接传入模型。
+- id 列 ['id'] 必须丢弃（uniqueCount ≈ rowCount），严禁传入模型，否则会导致严重过拟合。
+- 【目标列保留】preprocess(df, mode='test') 严禁 drop 目标列 charges。验证集仍包含目标列用于评估。正确做法：df.drop(columns=['charges'], errors='ignore')。
+
+【用户建模建议 User Modeling Suggestions】（重要参考，灵活采纳而非死板执行）：
+无
+
+【上传文件信息】:
+【原始上传文件】:
+- train.csv (role=train)
+- test.csv (role=test)
+
+【沙箱内可用文件（已被统一转换为 CSV）】:
+- data/train.csv （训练集，必用）
+- data/validation.csv （验证集，必用）
+- data/test.csv （测试集，仅用于最终预测）
+
+【重要提醒】代码中读取数据时，请只使用上述【沙箱内可用文件】的路径，不要引用原始文件名。
+
+【数据画像 Data Profile】:
+{
+  "fileName": "train.csv",
+  "rowCount": 856,
+  "columnCount": 8,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 856,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        1.0,
+        2.0,
+        5.0,
+        6.0,
+        7.0
+      ],
+      "min": 1.0,
+      "max": 1070.0,
+      "mean": 542.3399532710281,
+      "std": 312.0957269430938,
+      "median": 546.5,
+      "skewness": -0.027121396269772908,
+      "isMonotonic": true
+    },
+    {
+      "name": "age",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 47,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        46.0,
+        47.0,
+        54.0,
+        63.0,
+        22.0
+      ],
+      "min": 18.0,
+      "max": 64.0,
+      "mean": 39.32943925233645,
+      "std": 14.144744571162816,
+      "median": 39.5,
+      "skewness": 0.03338898745558283
+    },
+    {
+      "name": "sex",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "female",
+        "female",
+        "female",
+        "male",
+        "female"
+      ],
+      "mostCommon": "male",
+      "mostCommonFreq": 440,
+      "cardinality": "low"
+    },
+    {
+      "name": "bmi",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 439,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        19.95,
+        24.32,
+        21.47,
+        41.47,
+        24.3
+      ],
+      "min": 16.815,
+      "max": 53.13,
+      "mean": 30.529293224299064,
+      "std": 6.140077832278152,
+      "median": 30.205,
+      "skewness": 0.30194175425590675
+    },
+    {
+      "name": "children",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 6,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        2.0,
+        0.0,
+        3.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 5.0,
+      "mean": 1.1144859813084111,
+      "std": 1.2315446364692235,
+      "median": 1.0,
+      "skewness": 0.9636069180272021
+    },
+    {
+      "name": "smoker",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "no",
+        "no",
+        "no",
+        "no",
+        "no"
+      ],
+      "mostCommon": "no",
+      "mostCommonFreq": 678,
+      "cardinality": "low"
+    },
+    {
+      "name": "region",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 4,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "northwest",
+        "northeast",
+        "northwest",
+        "southeast",
+        "southwest"
+      ],
+      "mostCommon": "southwest",
+      "mostCommonFreq": 223,
+      "cardinality": "low"
+    },
+    {
+      "name": "charges",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 856,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        9193.8385,
+        8534.6718,
+        12475.3513,
+        13405.3903,
+        2150.469
+      ],
+      "min": 1121.8739,
+      "max": 62592.87309,
+      "mean": 13185.568185233646,
+      "std": 11856.071131794048,
+      "median": 9573.46115,
+      "skewness": 1.5620280383324152,
+      "isMonotonic": false
+    }
+  ],
+  "timeSeriesSignal": {
+    "coherent": false,
+    "column": "id",
+    "intervalStd": 0.5262,
+    "intervalMean": 1.2503,
+    "reason": "列 'id' 单调递增，但相邻间隔不稳定（std/mean=0.42）"
+  }
+}
+
+【上下文载荷 Context Payload】:
+无
+
+【历史代码 Previous Code】:
+无（当前为首次生成）
+
+请根据以上信息，生成对应的 <plan> 和 <code>。
+在规划时，请特别关注【数据预处理强制检查清单】、【用户建模建议】和【上下文载荷】中的评估建议，将其作为调优方向的重要参考，但保持专业判断，不合理的建议可调整并说明理由。

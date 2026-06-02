@@ -9,6 +9,10 @@ from datetime import datetime
 
 
 def main():
+    # Windows GBK 编码修复
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+
     if len(sys.argv) < 3:
         print("Usage: python -m scripts.summarize_batch <eval_id> <output_base_dir>")
         sys.exit(1)

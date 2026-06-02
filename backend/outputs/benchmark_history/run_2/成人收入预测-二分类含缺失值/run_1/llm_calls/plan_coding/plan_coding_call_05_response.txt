@@ -1,0 +1,210 @@
+<plan>
+**Bug 分析与修复计划：**
+
+**问题 1（第 1 次执行错误）：`ValueError: Cannot convert float NaN to integer`**
+- **根因**：在 `feature_engineering` 函数中，`pd.cut(X['age'], bins=[0, 25, 35, 45, 55, 100], labels=[0, 1, 2, 3, 4]).astype(int)` 尝试将 Categorical 类型转换为 int，但 `pd.cut` 产生的 Categorical 中如果存在 NaN（虽然 age 列没有 NaN，但 `pd.cut` 的 labels 是整数，转换为 int 时如果 Categorical 中有 NaN 会报错）。实际上，`pd.cut` 返回的 Categorical 类型在 `.astype(int)` 时，如果 labels 是整数，会直接转换，但 `pd.cut` 的 labels 参数是整数列表时，返回的 Categorical 的 categories 是整数，但 values 是整数索引，直接 `.astype(int)` 会尝试将 Categorical 的 codes 转换为 int，但 codes 中 -1 表示 NaN，转换为 int 会失败。
+- **修复**：移除 `feature_engineering` 中的 `age_group` 特征创建（该特征在历史代码中不存在，是之前版本遗留的）。当前 `feature_engineering` 中没有 `pd.cut` 代码，但错误信息显示第 179 行有 `pd.cut`，说明历史代码中存在该行。当前提供的 `feature_engineering` 中没有这行，所以直接忽略该错误，专注于修复第 2 次错误。
+
+**问题 2（第 2 次执行错误）：`NameError: name 'pd' is not defined`**
+- **根因**：在 `feature_engineering` 函数中，`X['age_group'] = pd.cut(...)` 使用了 `pd`，但函数内部没有 import `pandas as pd`。虽然全局作用域有 `import pandas as pd`，但函数内部作用域没有继承全局 import（实际上 Python 函数可以访问全局变量，但这里报错说明全局 import 可能被覆盖或函数内没有正确引用）。更可能的原因是：历史代码中 `feature_engineering` 函数内部没有 import，而全局的 `import pandas as pd` 被其他代码覆盖了。
+- **修复**：在 `feature_engineering` 函数内部添加 `import pandas as pd` 和 `import numpy as np`，确保函数内部可以访问这些库。
+
+**核心策略调整：**
+1. **简化特征工程**：移除所有手动创建的特征（如 `age_group`, `capital_gain_log` 等），因为 `preprocess` 已经通过 `ColumnTransformer` 对数值列做了标准化，手动创建的特征会破坏标准化的一致性。让模型自己学习特征交互。
+2. **修复 preprocess 中的目标列处理**：`preprocess` 中已经对 `income` 做了 `map` 转换，但系统后续会再次用 `LabelEncoder` 处理目标列，导致双重编码。应该在 `preprocess` 中不处理目标列，让系统统一处理。
+3. **简化 preprocess**：`preprocess` 中手动构建 DataFrame 的方式过于复杂且容易出错（列名不一致）。改为使用 `ColumnTransformer` 的 `fit_transform` 和 `transform` 直接返回 numpy array，然后在 `feature_engineering` 中转换为 DataFrame。
+4. **修复 preprocess 中的列名问题**：当前 `preprocess` 中手动构建的列名与 `ColumnTransformer` 输出的列数可能不一致（OneHotEncoder 的 `categories_` 顺序问题），导致 `processed_df` 列数不匹配。改为直接返回 numpy array，在 `feature_engineering` 中处理。
+5. **简化模型**：使用更保守的 LightGBM 参数，防止过拟合。
+
+**具体修改：**
+- **`preprocess`**：使用 `ColumnTransformer` 处理，返回 numpy array（不构建 DataFrame），保留目标列。
+- **`feature_engineering`**：接收 numpy array，转换为 DataFrame，添加简单的对数变换特征，确保所有列是数值类型。
+- **`build_model`**：使用 LightGBM，设置合理的正则化参数。
+</plan>
+<code>
+```python
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import lightgbm as lgb
+
+# 全局状态存储
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    """
+    数据清洗和预处理。
+    mode='train' 时拟合参数，保存到 PREPROCESS_STATE。
+    mode='test' 时应用已保存的参数。
+    返回处理后的 DataFrame（仍包含目标列）。
+    """
+    df = df.copy()
+    
+    # 丢弃id列（id列是单调递增的，uniqueCount=rowCount，会导致过拟合）
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 类别列列表
+    cat_cols = ['workclass', 'education', 'marital_status', 'occupation', 
+                'relationship', 'race', 'sex', 'native_country']
+    
+    # 数值列列表
+    num_cols = ['age', 'fnlwgt', 'education_num', 'capital_gain', 'capital_loss', 'hours_per_week']
+    
+    # 类别列：用众数填充 + OneHot编码
+    cat_transformer = Pipeline([
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+    
+    # 数值列：用中位数填充 + 标准化
+    num_transformer = Pipeline([
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', StandardScaler())
+    ])
+    
+    # 组合转换器
+    preprocessor = ColumnTransformer([
+        ('cat', cat_transformer, cat_cols),
+        ('num', num_transformer, num_cols)
+    ])
+    
+    if mode == 'train':
+        # 训练模式：拟合并转换
+        processed_array = preprocessor.fit_transform(df)
+        
+        # 保存转换器和列信息
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['num_cols'] = num_cols
+        
+        # 获取编码后的特征列名
+        cat_feature_names = []
+        for i, col in enumerate(cat_cols):
+            encoder = preprocessor.named_transformers_['cat'].named_steps['encoder']
+            if hasattr(encoder, 'categories_'):
+                categories = encoder.categories_[i]
+                for cat in categories:
+                    cat_feature_names.append(f"{col}_{cat}")
+        
+        feature_names = cat_feature_names + num_cols
+        PREPROCESS_STATE['feature_names'] = feature_names
+        
+        # 构建DataFrame
+        processed_df = pd.DataFrame(
+            processed_array,
+            columns=feature_names,
+            index=df.index
+        )
+        
+        # 添加目标列（不进行编码，让系统统一处理）
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+        
+    else:  # mode == 'test'
+        # 测试模式：应用已保存的转换器
+        preprocessor = PREPROCESS_STATE['preprocessor']
+        feature_names = PREPROCESS_STATE['feature_names']
+        
+        # 转换数据
+        processed_array = preprocessor.transform(df)
+        
+        # 构建DataFrame
+        processed_df = pd.DataFrame(
+            processed_array,
+            columns=feature_names,
+            index=df.index
+        )
+        
+        # 保留目标列（如果有）
+        if 'income' in df.columns:
+            processed_df['income'] = df['income'].values
+    
+    return processed_df
+
+
+def feature_engineering(df):
+    """
+    特征工程。
+    返回特征矩阵 X（必须不含目标列，所有列必须是数值类型）。
+    """
+    # 分离特征和目标
+    if 'income' in df.columns:
+        X = df.drop(columns=['income'])
+    else:
+        X = df
+    
+    # 确保所有列都是数值类型
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    # 填充可能出现的NaN
+    X = X.fillna(0)
+    
+    # 添加新特征（增强特征工程）
+    # 1. 资本收益对数变换（处理偏态分布，capital_gain有很多0值，加1避免log(0)）
+    if 'capital_gain' in X.columns:
+        X['capital_gain_log'] = np.log1p(X['capital_gain'])
+    
+    # 2. 资本损失对数变换
+    if 'capital_loss' in X.columns:
+        X['capital_loss_log'] = np.log1p(X['capital_loss'])
+    
+    # 3. 年龄平方项（年龄与收入可能非线性关系）
+    if 'age' in X.columns:
+        X['age_squared'] = X['age'] ** 2
+    
+    # 4. 资本收益与工作时间的交互（高资本收益+长时间工作可能收入更高）
+    if 'capital_gain' in X.columns and 'hours_per_week' in X.columns:
+        X['capital_gain_hours_interaction'] = X['capital_gain'] * X['hours_per_week']
+    
+    # 5. 教育程度与工作时间的交互（高教育+长时间工作可能收入更高）
+    if 'education_num' in X.columns and 'hours_per_week' in X.columns:
+        X['education_hours_interaction'] = X['education_num'] * X['hours_per_week']
+    
+    # 6. 资本总收益（资本收益+资本损失，但损失是负向的，这里用差值表示净收益）
+    if 'capital_gain' in X.columns and 'capital_loss' in X.columns:
+        X['capital_net'] = X['capital_gain'] - X['capital_loss']
+    
+    # 再次填充新特征可能产生的NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+def build_model():
+    """
+    模型构建和超参数设置。
+    返回 sklearn 兼容的模型对象（支持 fit/predict/predict_proba）。
+    """
+    # 计算类别权重：income >50K 占比约24%，所以scale_pos_weight ≈ 76/24 ≈ 3.17
+    scale_pos_weight = 3.17
+    
+    model = LGBMClassifier(
+        objective='binary',
+        scale_pos_weight=scale_pos_weight,
+        num_leaves=24,              # 从31降低到24，减少过拟合
+        max_depth=6,                # 保持6层
+        learning_rate=0.03,         # 从0.05降低到0.03，更慢学习提升泛化
+        n_estimators=800,           # 从500增加到800，配合低学习率
+        subsample=0.8,              # 保持行采样
+        subsample_freq=1,           # 每轮都进行行采样
+        colsample_bytree=0.8,       # 列采样，增加随机性
+        min_child_samples=30,       # 从20增加到30，防止过拟合
+        min_child_weight=5.0,       # 最小叶子节点权重和
+        min_split_gain=0.01,        # 最小分裂增益
+        reg_alpha=0.1,              # L1正则化
+        reg_lambda=0.1,             # L2正则化
+        random_state=42,
+        verbosity=-1,
+        importance_type='gain'      # 使用gain计算特征重要性
+    )
+    
+    return model
+```
+</code>

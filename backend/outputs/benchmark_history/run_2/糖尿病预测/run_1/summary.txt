@@ -1,0 +1,65 @@
+============================================================
+  任务运行摘要: 糖尿病预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: Outcome
+  评估指标: AUC
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 78.00
+  总耗时: 0.0s
+  验证集 AUC: 0.8002
+  测试集 F1: 0.6136
+  测试集 AUC: 0.7942
+
+【各阶段耗时】
+  意图识别: 0.9s
+  代码生成: 23.9s
+  沙箱执行: 16.9s
+  评估优化: 23.3s
+  产物生成: 92.3s
+  测试预测: 0.0s
+  总计: 231.7s
+
+【Token 消耗】
+  Plan/Coding 调用: 5 次, 60639 tokens
+  Evaluation 调用: 4 次, 9637 tokens
+  总计: 9 次, 70276 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 4022tokens | 0.9s
+    - qwen3.5-flash@openai: 1 calls, 4022 tokens, 0.9s
+  plan_coding : deepseek-v4-flash@openai | 5calls | 60639tokens | 178.6s
+    - deepseek-v4-flash@openai: 4 calls, 49119 tokens, 92.7s
+    - deepseek-v4-pro@openai: 1 calls, 11520 tokens, 85.9s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9637tokens | 23.3s
+    - deepseek-v4-flash@openai: 4 calls, 9637 tokens, 23.3s
+  judge       : qwen3.5-flash@openai | 1calls | 1613tokens | 2.9s
+    - qwen3.5-flash@openai: 1 calls, 1613 tokens, 2.9s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：AUC】为核心标准。模型在验证集上的 AUC 为 0.8002，在测试集上的 AUC 为 0.7942。测试集 AUC 达到了二分类任务的可接受水平（>0.7），且表现稳定。泛化一致性方面，验证集与测试集的相对差距为 (0.8002 - 0.7942) / 0.8002 ≈ 0.75%，远小于 10% 的良好标准，表明模型未出现过拟合，泛化能力优秀。辅助指标 Accuracy (0.7236) 和 F1 (0.6136) 也处于合理范围，与 AUC 表现一致。预测策略未知，但基于优异的指标表现和高度的一致性，判定模型质量合格。...
+
+【维度评分】
+  unknown: 75.0 (weight=0.3)
+  unknown: 85.0 (weight=0.25)
+  unknown: 80.0 (weight=0.2)
+  unknown: 80.0 (weight=0.15)
+  unknown: 75.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 14:15:24 UTC
+============================================================

@@ -1,0 +1,53 @@
+【任务目标 Task Target】: binary_classification - target=IsFraud
+【核心评估指标 Core Metric】: ROC-AUC
+【重要】评估时请优先以该指标为核心标准。
+
+
+【本次运行沙箱输出 Metrics】:
+```json
+{
+  "metric_name": "",
+  "val_auc": 0.31036009445100354,
+  "overfit_severe": false
+}
+```
+
+【沙箱完整输出】:
+```
+METRICS_JSON_START
+{"val_roc_auc": 0.31036009445100354, "val_ap": 0.0012450431842837663, "val_f1": 0.0, "val_recall": 0.0, "val_precision": 0.0, "val_best_threshold": 0.5, "val_tn": 7623, "val_fp": 363, "val_fn": 14, "val_tp": 0}
+METRICS_JSON_END
+
+```
+
+
+
+【本轮关键代码片段】（仅用于 method_summary 描述技术选型，严禁基于代码片段做技术判断）：
+```python
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, FunctionTransformer
+from sklearn.pipeline import Pipeline
+    对数值特征进行标准化（StandardScaler），在训练集上 fit，在测试集上 transform。
+        scaler = StandardScaler()
+    使用 LightGBM + scale_pos_weight 处理极度类别不平衡。
+    # 计算 scale_pos_weight（负类数/正类数）
+    # 构建预处理 Pipeline（标准化）
+    preprocessor = Pipeline([
+        ('scaler', StandardScaler()),
+    # 使用 scale_pos_weight 处理类别不平衡（避免使用 class_weight）
+    model = lgb.LGBMClassifier(
+        scale_pos_weight=554.56,  # 负类数/正类数，约19964/36
+    # 完整 Pipeline：预处理 + 模型
+    pipeline = Pipeline([
+# 尝试传入 eval_set（XGBoost/LightGBM 等支持 early stopping 的模型需要）
+    model.fit(X_train_fe, y_train, eval_set=[(X_val_fe, y_val)])
+    # 第一次 fit 可能因 eval_set 不被支持而失败（如 sklearn 原生模型）
+    # 尝试不带 eval_set 的 fit；若仍失败，说明是真正的数据/代码错误，必须抛出
+```
+
+
+【内部优化轮数 Optimize Round】: 0 / 3
+
+
+请根据以上信息，严格按照 JSON 格式输出评估结论、方法总结和优化建议。
+必须包含：dimension_scores 数组、score、decision、method_summary。

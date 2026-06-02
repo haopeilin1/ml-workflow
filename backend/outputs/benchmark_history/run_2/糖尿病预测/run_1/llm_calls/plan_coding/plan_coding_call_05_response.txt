@@ -1,0 +1,603 @@
+<plan>
+产物生成计划概述：
+1. 加载已存在的 data/best_model.pkl 模型文件
+2. 加载测试集 data/test.csv 并进行预测
+3. 生成所有必需产物：model.pkl、feature_importance.csv、feature_importance.png、report.html、test_predictions.csv、predict.py
+4. 对于二分类任务，额外生成 ROC 曲线图（report_fig.png），在 report.html 中包含混淆矩阵和分类报告
+5. 输出摘要 JSON
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import os
+import json
+import warnings
+import re
+from sklearn.metrics import (
+    accuracy_score, roc_auc_score, f1_score,
+    precision_score, recall_score, confusion_matrix,
+    classification_report, roc_curve
+)
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+warnings.filterwarnings('ignore')
+
+# ========== 确保输出目录存在 ==========
+os.makedirs('output', exist_ok=True)
+
+# ========== 1. 加载已保存的最佳模型 ==========
+print("Loading best model from data/best_model.pkl...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Model loaded successfully.")
+except Exception as e:
+    print(f"Failed to load model with pickle: {e}")
+    # 尝试用 dill 加载
+    try:
+        import dill
+        with open('data/best_model.pkl', 'rb') as f:
+            model = dill.load(f)
+        print("Model loaded successfully with dill.")
+    except Exception as e2:
+        print(f"Failed to load model with dill: {e2}")
+        raise RuntimeError("Cannot load the saved model. Please check data/best_model.pkl")
+
+# ========== 2. 加载测试集 ==========
+test = pd.read_csv('data/test.csv')
+print(f"Test set loaded: {test.shape}")
+
+# 目标列
+target_col = 'Outcome'
+
+# 保存原始测试集（用于最终输出）
+test_original = test.copy()
+
+# ========== 3. 预处理测试集（与训练时一致） ==========
+# 从模型中提取特征名（如果模型是 Pipeline）
+def get_feature_names_from_model(model):
+    """从模型中提取特征名"""
+    try:
+        if hasattr(model, 'feature_name_'):
+            return model.feature_name_
+        if hasattr(model, 'feature_names_in_'):
+            return model.feature_names_in_
+        # 尝试从 Pipeline 中获取
+        if hasattr(model, 'named_steps'):
+            for step_name, step in model.named_steps.items():
+                if hasattr(step, 'feature_names_in_'):
+                    return step.feature_names_in_
+                if hasattr(step, 'feature_name_'):
+                    return step.feature_name_
+        # 尝试从 booster 获取
+        if hasattr(model, 'booster_') and hasattr(model.booster_, 'feature_name'):
+            return model.booster_.feature_name()
+    except Exception:
+        pass
+    return None
+
+# 预处理函数（与训练时一致）
+def preprocess_test(df, target_col='Outcome'):
+    """对测试集进行与训练时相同的预处理"""
+    df = df.copy()
+    
+    # 丢弃 id 列
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 将医学上不可能的 0 值视为缺失值
+    zero_as_missing_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+    for col in zero_as_missing_cols:
+        if col in df.columns:
+            df[col] = df[col].replace(0, np.nan)
+    
+    # 分离目标列（如果存在）
+    y = None
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        df = df.drop(columns=[target_col])
+    
+    # 中位数填充
+    from sklearn.impute import SimpleImputer
+    imputer = SimpleImputer(strategy='median')
+    feature_cols = df.columns.tolist()
+    df_imputed = pd.DataFrame(
+        imputer.fit_transform(df),
+        columns=feature_cols,
+        index=df.index
+    )
+    
+    # 标准化
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    df_scaled = pd.DataFrame(
+        scaler.fit_transform(df_imputed),
+        columns=feature_cols,
+        index=df.index
+    )
+    
+    # 特征工程（与训练时一致）
+    df_fe = df_scaled.copy()
+    
+    # 交互特征
+    if 'Glucose' in df_fe.columns and 'BMI' in df_fe.columns:
+        df_fe['Glucose_BMI_interaction'] = df_fe['Glucose'] * df_fe['BMI']
+    if 'Glucose' in df_fe.columns and 'Age' in df_fe.columns:
+        df_fe['Glucose_Age_interaction'] = df_fe['Glucose'] * df_fe['Age']
+    if 'Age' in df_fe.columns and 'Pregnancies' in df_fe.columns:
+        df_fe['Age_Pregnancies_interaction'] = df_fe['Age'] * df_fe['Pregnancies']
+    if 'BMI' in df_fe.columns and 'Age' in df_fe.columns:
+        df_fe['BMI_Age_interaction'] = df_fe['BMI'] * df_fe['Age']
+    
+    # 多项式特征
+    if 'Glucose' in df_fe.columns:
+        df_fe['Glucose_squared'] = df_fe['Glucose'] ** 2
+    if 'BMI' in df_fe.columns:
+        df_fe['BMI_squared'] = df_fe['BMI'] ** 2
+    if 'Insulin' in df_fe.columns:
+        df_fe['Insulin_squared'] = df_fe['Insulin'] ** 2
+    
+    # 比率特征
+    if 'Glucose' in df_fe.columns and 'BMI' in df_fe.columns:
+        df_fe['Glucose_BMI_ratio'] = df_fe['Glucose'] / (df_fe['BMI'] + 1e-8)
+    if 'Insulin' in df_fe.columns and 'Glucose' in df_fe.columns:
+        df_fe['Insulin_Glucose_ratio'] = df_fe['Insulin'] / (df_fe['Glucose'] + 1e-8)
+    
+    # 确保所有列都是数值类型
+    for col in df_fe.columns:
+        if df_fe[col].dtype == 'object' or df_fe[col].dtype.name == 'category':
+            df_fe[col] = pd.factorize(df_fe[col])[0]
+    
+    return df_fe, y
+
+# 预处理测试集
+X_test_processed, y_test = preprocess_test(test_original, target_col)
+
+# 清洗特征名
+X_test_processed.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_processed.columns]
+if X_test_processed.columns.duplicated().any():
+    X_test_processed.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_processed.columns)]
+
+# 获取模型期望的特征名
+model_feature_names = get_feature_names_from_model(model)
+
+if model_feature_names is not None:
+    # 对齐特征列
+    missing_cols = set(model_feature_names) - set(X_test_processed.columns)
+    extra_cols = set(X_test_processed.columns) - set(model_feature_names)
+    
+    # 添加缺失列（填充0）
+    for col in missing_cols:
+        X_test_processed[col] = 0
+    
+    # 只保留模型需要的列，按模型顺序排列
+    available_cols = [col for col in model_feature_names if col in X_test_processed.columns]
+    X_test_processed = X_test_processed[available_cols]
+    
+    print(f"Features aligned: {X_test_processed.shape[1]} features")
+
+# ========== 4. 测试集预测 ==========
+print("Making predictions on test set...")
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test_processed)[:, 1]
+    test_preds = (test_probs >= 0.5).astype(int)
+else:
+    test_preds = model.predict(X_test_processed)
+    test_probs = test_preds.astype(float)
+
+# ========== 5. 保存测试预测结果 ==========
+result_df = test_original.copy()
+result_df['prediction'] = test_preds
+result_df['probability'] = test_probs
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 6. 保存模型到 output/model.pkl ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 7. 特征重要性 ==========
+print("Extracting feature importance...")
+feature_names = X_test_processed.columns.tolist()
+
+# 尝试从模型中获取特征重要性
+importance = None
+if hasattr(model, 'feature_importances_'):
+    importance = model.feature_importances_
+elif hasattr(model, 'named_steps'):
+    # 如果是 Pipeline，尝试从最后一步获取
+    steps = dict(model.named_steps)
+    for step_name in ['classifier', 'model', 'regressor', 'estimator']:
+        if step_name in steps and hasattr(steps[step_name], 'feature_importances_'):
+            importance = steps[step_name].feature_importances_
+            break
+    # 如果没找到，遍历所有步骤
+    if importance is None:
+        for step_name, step in steps.items():
+            if hasattr(step, 'feature_importances_'):
+                importance = step.feature_importances_
+                break
+
+if importance is None:
+    # 如果无法获取特征重要性，使用均匀分布
+    print("Warning: Cannot extract feature importance, using uniform distribution.")
+    importance = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importance) != len(feature_names):
+    print(f"Warning: importance length ({len(importance)}) != feature_names length ({len(feature_names)}). Truncating/expanding.")
+    if len(importance) > len(feature_names):
+        importance = importance[:len(feature_names)]
+    else:
+        importance = np.pad(importance, (0, len(feature_names) - len(importance)), 'constant', constant_values=0)
+
+# 创建特征重要性 DataFrame
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importance
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# ========== 8. 特征重要性图 ==========
+print("Generating feature importance plot...")
+top_n = min(20, len(importance_df))
+top_features = importance_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(len(top_features)), top_features['importance'].values, color='steelblue')
+plt.yticks(range(len(top_features)), top_features['name'].values)
+plt.xlabel('Importance')
+plt.title('Top Feature Importance')
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 9. ROC 曲线图（二分类任务） ==========
+print("Generating ROC curve plot...")
+if y_test is not None:
+    fpr, tpr, thresholds = roc_curve(y_test, test_probs)
+    auc_score = roc_auc_score(y_test, test_probs)
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc_score:.4f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend(loc='lower right')
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("ROC curve saved to output/report_fig.png")
+else:
+    # 如果没有真实标签，创建一个占位图
+    plt.figure(figsize=(8, 6))
+    plt.text(0.5, 0.5, 'No ground truth labels available\nfor ROC curve', 
+             ha='center', va='center', fontsize=14)
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    auc_score = None
+
+# ========== 10. 计算评估指标（如果有真实标签） ==========
+metrics = {}
+if y_test is not None:
+    metrics['test_auc'] = float(roc_auc_score(y_test, test_probs))
+    metrics['test_accuracy'] = float(accuracy_score(y_test, test_preds))
+    metrics['test_precision'] = float(precision_score(y_test, test_preds, zero_division=0))
+    metrics['test_recall'] = float(recall_score(y_test, test_preds, zero_division=0))
+    metrics['test_f1'] = float(f1_score(y_test, test_preds, zero_division=0))
+    
+    cm = confusion_matrix(y_test, test_preds)
+    metrics['confusion_matrix'] = cm.tolist()
+    
+    # 分类报告
+    report_dict = classification_report(y_test, test_preds, output_dict=True, zero_division=0)
+else:
+    metrics['test_auc'] = None
+    metrics['test_accuracy'] = None
+    metrics['test_precision'] = None
+    metrics['test_recall'] = None
+    metrics['test_f1'] = None
+    cm = None
+    report_dict = None
+
+# ========== 11. 生成 HTML 报告 ==========
+print("Generating HTML report...")
+
+# 构建特征重要性表格 HTML
+importance_html = '<table border="1" cellpadding="5" cellspacing="0">'
+importance_html += '<tr><th>Rank</th><th>Feature</th><th>Importance</th></tr>'
+for i, row in importance_df.head(30).iterrows():
+    importance_html += f'<tr><td>{i+1}</td><td>{row["name"]}</td><td>{row["importance"]:.6f}</td></tr>'
+importance_html += '</table>'
+
+# 构建指标摘要 HTML
+metrics_html = '<h3>Model Performance Metrics</h3>'
+metrics_html += '<table border="1" cellpadding="5" cellspacing="0">'
+metrics_html += '<tr><th>Metric</th><th>Value</th></tr>'
+for key, value in metrics.items():
+    if key != 'confusion_matrix':
+        if value is not None:
+            metrics_html += f'<tr><td>{key}</td><td>{value:.4f}</td></tr>'
+        else:
+            metrics_html += f'<tr><td>{key}</td><td>N/A</td></tr>'
+metrics_html += '</table>'
+
+# 混淆矩阵 HTML
+cm_html = ''
+if cm is not None:
+    cm_html = '<h3>Confusion Matrix</h3>'
+    cm_html += '<table border="1" cellpadding="5" cellspacing="0">'
+    cm_html += '<tr><th></th><th>Predicted 0</th><th>Predicted 1</th></tr>'
+    cm_html += f'<tr><td>Actual 0</td><td>{cm[0][0]}</td><td>{cm[0][1]}</td></tr>'
+    cm_html += f'<tr><td>Actual 1</td><td>{cm[1][0]}</td><td>{cm[1][1]}</td></tr>'
+    cm_html += '</table>'
+
+# 分类报告 HTML
+cr_html = ''
+if report_dict is not None:
+    cr_html = '<h3>Classification Report</h3>'
+    cr_html += '<table border="1" cellpadding="5" cellspacing="0">'
+    cr_html += '<tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>'
+    for cls, vals in report_dict.items():
+        if isinstance(vals, dict):
+            cr_html += f'<tr><td>{cls}</td><td>{vals["precision"]:.4f}</td><td>{vals["recall"]:.4f}</td><td>{vals["f1-score"]:.4f}</td><td>{vals["support"]}</td></tr>'
+    cr_html += '</table>'
+
+# 测试集预测预览 HTML
+preview_html = '<h3>Test Predictions Preview (First 20 rows)</h3>'
+preview_html += result_df.head(20).to_html(index=False, border=1)
+
+# 完整 HTML 报告
+html_content = f'''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Binary Classification</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        h3 {{ color: #666; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        tr:hover {{ background-color: #ddd; }}
+        .figure {{ text-align: center; margin: 20px 0; }}
+        .figure img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Binary Classification Model Report</h1>
+        <p><strong>Task Type:</strong> Binary Classification</p>
+        <p><strong>Target Column:</strong> {target_col}</p>
+        <p><strong>Evaluation Metric:</strong> AUC</p>
+        <p><strong>Test Set Size:</strong> {len(result_df)} samples</p>
+        <p><strong>Number of Features:</strong> {len(feature_names)}</p>
+        
+        {metrics_html}
+        
+        {cm_html}
+        
+        {cr_html}
+        
+        <h2>ROC Curve</h2>
+        <div class="figure">
+            <img src="report_fig.png" alt="ROC Curve">
+        </div>
+        
+        <h2>Feature Importance</h2>
+        <div class="figure">
+            <img src="feature_importance.png" alt="Feature Importance">
+        </div>
+        
+        <h3>Feature Importance Table (Top 30)</h3>
+        {importance_html}
+        
+        {preview_html}
+        
+        <h2>Output Files</h2>
+        <ul>
+            <li><strong>model.pkl</strong> - Trained model (pickle format)</li>
+            <li><strong>feature_importance.csv</strong> - Feature importance values</li>
+            <li><strong>feature_importance.png</strong> - Feature importance plot</li>
+            <li><strong>report_fig.png</strong> - ROC curve</li>
+            <li><strong>test_predictions.csv</strong> - Test set predictions</li>
+            <li><strong>predict.py</strong> - Standalone prediction script</li>
+        </ul>
+    </div>
+</body>
+</html>
+'''
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 12. 生成独立预测脚本 ==========
+predict_script = '''#!/usr/bin/env python3
+"""
+Standalone prediction script for binary classification model.
+Usage: python predict.py <input_csv> <output_csv>
+"""
+
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import sys
+import os
+
+def preprocess(df):
+    """Apply the same preprocessing as training."""
+    df = df.copy()
+    
+    # Drop id column if exists
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # Replace 0 with NaN for medical columns
+    zero_as_missing_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+    for col in zero_as_missing_cols:
+        if col in df.columns:
+            df[col] = df[col].replace(0, np.nan)
+    
+    # Drop target column if exists
+    if 'Outcome' in df.columns:
+        df = df.drop(columns=['Outcome'])
+    
+    # Impute missing values with median
+    from sklearn.impute import SimpleImputer
+    imputer = SimpleImputer(strategy='median')
+    feature_cols = df.columns.tolist()
+    df_imputed = pd.DataFrame(
+        imputer.fit_transform(df),
+        columns=feature_cols,
+        index=df.index
+    )
+    
+    # Standardize
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    df_scaled = pd.DataFrame(
+        scaler.fit_transform(df_imputed),
+        columns=feature_cols,
+        index=df.index
+    )
+    
+    # Feature engineering
+    df_fe = df_scaled.copy()
+    
+    if 'Glucose' in df_fe.columns and 'BMI' in df_fe.columns:
+        df_fe['Glucose_BMI_interaction'] = df_fe['Glucose'] * df_fe['BMI']
+    if 'Glucose' in df_fe.columns and 'Age' in df_fe.columns:
+        df_fe['Glucose_Age_interaction'] = df_fe['Glucose'] * df_fe['Age']
+    if 'Age' in df_fe.columns and 'Pregnancies' in df_fe.columns:
+        df_fe['Age_Pregnancies_interaction'] = df_fe['Age'] * df_fe['Pregnancies']
+    if 'BMI' in df_fe.columns and 'Age' in df_fe.columns:
+        df_fe['BMI_Age_interaction'] = df_fe['BMI'] * df_fe['Age']
+    
+    if 'Glucose' in df_fe.columns:
+        df_fe['Glucose_squared'] = df_fe['Glucose'] ** 2
+    if 'BMI' in df_fe.columns:
+        df_fe['BMI_squared'] = df_fe['BMI'] ** 2
+    if 'Insulin' in df_fe.columns:
+        df_fe['Insulin_squared'] = df_fe['Insulin'] ** 2
+    
+    if 'Glucose' in df_fe.columns and 'BMI' in df_fe.columns:
+        df_fe['Glucose_BMI_ratio'] = df_fe['Glucose'] / (df_fe['BMI'] + 1e-8)
+    if 'Insulin' in df_fe.columns and 'Glucose' in df_fe.columns:
+        df_fe['Insulin_Glucose_ratio'] = df_fe['Insulin'] / (df_fe['Glucose'] + 1e-8)
+    
+    # Ensure numeric types
+    for col in df_fe.columns:
+        if df_fe[col].dtype == 'object' or df_fe[col].dtype.name == 'category':
+            df_fe[col] = pd.factorize(df_fe[col])[0]
+    
+    return df_fe
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python predict.py <input_csv> <output_csv>")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2]
+    
+    # Load model
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pkl')
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # Load data
+    df = pd.read_csv(input_path)
+    original_df = df.copy()
+    
+    # Preprocess
+    X = preprocess(df)
+    
+    # Clean feature names
+    X.columns = [re.sub(r'[^\\w]', '_', str(c)) for c in X.columns]
+    
+    # Align features with model
+    if hasattr(model, 'feature_names_in_'):
+        expected_features = model.feature_names_in_
+    elif hasattr(model, 'feature_name_'):
+        expected_features = model.feature_name_
+    else:
+        expected_features = X.columns.tolist()
+    
+    # Add missing columns
+    for col in expected_features:
+        if col not in X.columns:
+            X[col] = 0
+    
+    # Keep only expected columns in order
+    X = X[[col for col in expected_features if col in X.columns]]
+    
+    # Predict
+    if hasattr(model, 'predict_proba'):
+        probs = model.predict_proba(X)[:, 1]
+        preds = (probs >= 0.5).astype(int)
+    else:
+        preds = model.predict(X)
+        probs = preds.astype(float)
+    
+    # Save results
+    result = original_df.copy()
+    result['prediction'] = preds
+    result['probability'] = probs
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+
+
+if __name__ == '__main__':
+    main()
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 13. 输出摘要 JSON ==========
+summary = {
+    'task_type': 'binary_classification',
+    'target_col': target_col,
+    'test_samples': len(result_df),
+    'num_features': len(feature_names),
+    'metrics': metrics,
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report_fig.png',
+        'output/report.html',
+        'output/test_predictions.csv',
+        'output/predict.py'
+    ]
+}
+
+print('METRICS_JSON_START')
+print(json.dumps(summary))
+print('METRICS_JSON_END')
+```
+</code>

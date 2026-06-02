@@ -1,0 +1,602 @@
+<plan>
+产物生成计划：
+1. 加载已存在的 data/best_model.pkl 模型
+2. 对测试集 data/test.csv 进行预测（需要先做预处理和特征工程）
+3. 生成多分类任务所需的所有产物文件到 output/ 目录
+4. 关键修复：确保特征工程后的所有列都是数值类型，避免 LightGBM 报错
+5. 生成混淆矩阵热力图作为 report_fig.png
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 加载已保存的模型 ==========
+print("Loading best model from data/best_model.pkl...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Model loaded successfully.")
+except Exception as e:
+    print(f"Failed to load model: {e}")
+    raise
+
+# ========== 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'Status'
+id_col = 'id' if 'id' in test.columns else test.columns[0]
+
+# ========== 预处理函数（与训练时保持一致）==========
+PREPROCESS_STATE = {}
+
+def preprocess(df, mode='train'):
+    global PREPROCESS_STATE
+    
+    # 1. 丢弃id列
+    df = df.drop(columns=['id'], errors='ignore')
+    
+    # 2. 清洗特征名
+    df.columns = [re.sub(r'[^\w]', '_', str(c)) for c in df.columns]
+    
+    # 3. 分离特征和目标列
+    if target_col in df.columns:
+        y = df[target_col].copy()
+        X = df.drop(columns=[target_col])
+    else:
+        y = None
+        X = df.copy()
+    
+    # 4. 识别列类型
+    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+    num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+    
+    # 5. 识别高缺失率特征
+    high_missing_num = []
+    low_missing_num = []
+    for col in num_cols:
+        missing_rate = X[col].isnull().mean()
+        if missing_rate > 0.4:
+            high_missing_num.append(col)
+        else:
+            low_missing_num.append(col)
+    
+    # 6. 右偏特征
+    right_skewed_features = ['N_Days', 'Bilirubin', 'Cholesterol', 'Copper', 'Alk_Phos', 'Tryglicerides', 'SGOT']
+    right_skewed_features = [f for f in right_skewed_features if f in num_cols]
+    
+    # 7. 类别编码策略
+    edema_col = 'Edema' if 'Edema' in cat_cols else None
+    binary_cat_cols = [c for c in cat_cols if c != edema_col and X[c].nunique() <= 2]
+    other_cat_cols = [c for c in cat_cols if c not in binary_cat_cols and c != edema_col]
+    
+    if mode == 'train':
+        from sklearn.compose import ColumnTransformer
+        from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler, FunctionTransformer
+        from sklearn.impute import SimpleImputer
+        from sklearn.experimental import enable_iterative_imputer
+        from sklearn.impute import IterativeImputer
+        from sklearn.pipeline import Pipeline
+        
+        def log_transform_right_skewed(X):
+            X = X.copy()
+            for col in right_skewed_features:
+                if col in X.columns:
+                    min_val = X[col].min()
+                    if pd.notna(min_val) and min_val < 0:
+                        X[col] = X[col] - min_val
+                    X[col] = np.log1p(X[col].clip(lower=0))
+            return X
+        
+        log_transformer = FunctionTransformer(log_transform_right_skewed, validate=False)
+        iterative_imputer = IterativeImputer(random_state=42, max_iter=10, verbose=0)
+        scaler = StandardScaler()
+        
+        num_pipeline = Pipeline([
+            ('log_transform', log_transformer),
+            ('iterative_imputer', iterative_imputer),
+            ('scaler', scaler)
+        ])
+        
+        cat_transformers = []
+        
+        if edema_col:
+            edema_pipeline = Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OrdinalEncoder(categories=[['N', 'S', 'Y']], handle_unknown='use_encoded_value', unknown_value=-1))
+            ])
+            cat_transformers.append(('edema', edema_pipeline, [edema_col]))
+        
+        if binary_cat_cols:
+            binary_pipeline = Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+            ])
+            cat_transformers.append(('binary_cat', binary_pipeline, binary_cat_cols))
+        
+        if other_cat_cols:
+            other_pipeline = Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ])
+            cat_transformers.append(('other_cat', other_pipeline, other_cat_cols))
+        
+        transformers = []
+        if num_cols:
+            transformers.append(('num', num_pipeline, num_cols))
+        transformers.extend(cat_transformers)
+        
+        preprocessor = ColumnTransformer(transformers, remainder='drop')
+        X_processed = preprocessor.fit_transform(X)
+        
+        feature_names = []
+        if num_cols:
+            feature_names.extend(num_cols)
+        if edema_col:
+            feature_names.append(edema_col)
+        if binary_cat_cols:
+            feature_names.extend(binary_cat_cols)
+        if other_cat_cols:
+            other_encoder = preprocessor.named_transformers_['other_cat'].named_steps['encoder']
+            ohe_features = other_encoder.get_feature_names_out(other_cat_cols).tolist()
+            feature_names.extend(ohe_features)
+        
+        PREPROCESS_STATE['preprocessor'] = preprocessor
+        PREPROCESS_STATE['feature_names'] = feature_names
+        PREPROCESS_STATE['target_col'] = target_col
+        PREPROCESS_STATE['num_cols'] = num_cols
+        PREPROCESS_STATE['cat_cols'] = cat_cols
+        PREPROCESS_STATE['right_skewed_features'] = right_skewed_features
+        
+        X_processed_df = pd.DataFrame(X_processed, index=X.index, columns=feature_names)
+        if y is not None:
+            X_processed_df[target_col] = y.values
+        
+        return X_processed_df
+    
+    else:
+        preprocessor = PREPROCESS_STATE.get('preprocessor')
+        feature_names = PREPROCESS_STATE.get('feature_names', [])
+        
+        if preprocessor is None:
+            raise ValueError("PREPROCESS_STATE['preprocessor'] not found.")
+        
+        X_processed = preprocessor.transform(X)
+        X_processed_df = pd.DataFrame(X_processed, index=X.index, columns=feature_names)
+        
+        if y is not None:
+            X_processed_df[target_col] = y.values
+        
+        return X_processed_df
+
+
+def feature_engineering(df):
+    target_col_local = PREPROCESS_STATE.get('target_col', 'Status')
+    
+    if target_col_local in df.columns:
+        X = df.drop(columns=[target_col_local])
+    else:
+        X = df.copy()
+    
+    # 1. 交叉特征
+    if 'Stage' in X.columns and 'Bilirubin' in X.columns:
+        X['Stage_Bilirubin_interact'] = X['Stage'] * X['Bilirubin']
+    
+    # 2. N_Days分段
+    if 'N_Days' in X.columns:
+        X['N_Days_segment'] = pd.cut(X['N_Days'], 
+                                      bins=[-np.inf, 365, 1825, np.inf], 
+                                      labels=[0, 1, 2]).astype(float)
+        if 'Stage' in X.columns:
+            X['Stage_N_Days_interact'] = X['Stage'] * X['N_Days']
+    
+    # 3. Albumin/Bilirubin比值
+    if 'Albumin' in X.columns and 'Bilirubin' in X.columns:
+        X['Albumin_Bilirubin_ratio'] = X['Albumin'] / (X['Bilirubin'] + 1e-6)
+    
+    # 4. Age分段
+    if 'Age' in X.columns:
+        X['Age_years'] = X['Age'] / 365.25
+        X['Age_group'] = pd.cut(X['Age_years'], 
+                                 bins=[0, 40, 50, 60, 70, 100], 
+                                 labels=[0, 1, 2, 3, 4]).astype(float)
+    
+    # 5. 确保所有列都是数值类型（关键修复）
+    for col in X.columns:
+        if X[col].dtype == 'object' or X[col].dtype.name == 'category':
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    # 6. 填充NaN
+    X = X.fillna(0)
+    
+    return X
+
+
+# ========== 对训练集做预处理以获取状态 ==========
+print("Preprocessing training data to get state...")
+train_clean = preprocess(train, mode='train')
+
+# ========== 对测试集做预处理和特征工程 ==========
+print("Preprocessing test data...")
+test_clean = preprocess(test, mode='test')
+
+X_test = test_clean.drop(columns=[target_col], errors='ignore')
+if X_test is test_clean:
+    X_test = test_clean.copy()
+
+print("Feature engineering on test data...")
+X_test_fe = feature_engineering(X_test)
+if isinstance(X_test_fe, np.ndarray):
+    X_test_fe = pd.DataFrame(X_test_fe, index=X_test.index)
+
+# 清洗特征名
+X_test_fe.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_test_fe.columns]
+if X_test_fe.columns.duplicated().any():
+    X_test_fe.columns = [f"{c}_{i}" if i > 0 else str(c) for i, c in enumerate(X_test_fe.columns)]
+
+# 最终确保所有列都是数值类型
+for col in X_test_fe.columns:
+    if X_test_fe[col].dtype == 'object' or X_test_fe[col].dtype.name == 'category':
+        X_test_fe[col] = pd.to_numeric(X_test_fe[col], errors='coerce')
+X_test_fe = X_test_fe.fillna(0)
+
+print(f"Test features shape: {X_test_fe.shape}")
+print(f"Test features dtypes: {X_test_fe.dtypes.unique()}")
+
+# ========== 测试集预测 ==========
+print("Making predictions on test set...")
+test_preds = model.predict(X_test_fe)
+test_probs = model.predict_proba(X_test_fe)
+
+# 构建预测结果DataFrame
+result_df = pd.DataFrame()
+if id_col in test.columns:
+    result_df['id'] = test[id_col].values
+else:
+    result_df['id'] = range(len(test_preds))
+
+result_df['prediction'] = test_preds
+
+# 添加各类概率列
+for i in range(test_probs.shape[1]):
+    result_df[f'proba_{i}'] = test_probs[:, i]
+
+result_df.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 保存模型 ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 特征重要性 ==========
+print("Extracting feature importance...")
+feature_names = X_test_fe.columns.tolist()
+
+# 从模型获取特征重要性
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+elif hasattr(model, 'coef_'):
+    importances = np.abs(model.coef_).flatten()
+else:
+    importances = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保长度匹配
+if len(importances) != len(feature_names):
+    print(f"Warning: feature_importances_ length ({len(importances)}) != feature_names length ({len(feature_names)})")
+    min_len = min(len(importances), len(feature_names))
+    importances = importances[:min_len]
+    feature_names = feature_names[:min_len]
+
+# 保存特征重要性CSV
+fi_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importances
+})
+fi_df = fi_df.sort_values('importance', ascending=False)
+fi_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# ========== 特征重要性图 ==========
+print("Generating feature importance plot...")
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# 取前20个最重要的特征
+top_n = min(20, len(fi_df))
+top_fi = fi_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(top_n), top_fi['importance'].values[::-1], color='steelblue')
+plt.yticks(range(top_n), top_fi['name'].values[::-1])
+plt.xlabel('Importance')
+plt.title('Top {} Feature Importance'.format(top_n))
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 混淆矩阵热力图（多分类任务）==========
+print("Generating confusion matrix heatmap...")
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+
+# 对训练集做预测以获取混淆矩阵
+if target_col in train.columns:
+    train_clean_for_eval = preprocess(train, mode='test')
+    if target_col in train_clean_for_eval.columns:
+        y_train_true = train_clean_for_eval[target_col]
+        X_train_eval = train_clean_for_eval.drop(columns=[target_col])
+    else:
+        y_train_true = train[target_col]
+        X_train_eval = train_clean_for_eval
+    
+    X_train_fe_eval = feature_engineering(X_train_eval)
+    if isinstance(X_train_fe_eval, np.ndarray):
+        X_train_fe_eval = pd.DataFrame(X_train_fe_eval, index=X_train_eval.index)
+    X_train_fe_eval.columns = [re.sub(r'[^\w]', '_', str(c)) for c in X_train_fe_eval.columns]
+    for col in X_train_fe_eval.columns:
+        if X_train_fe_eval[col].dtype == 'object' or X_train_fe_eval[col].dtype.name == 'category':
+            X_train_fe_eval[col] = pd.to_numeric(X_train_fe_eval[col], errors='coerce')
+    X_train_fe_eval = X_train_fe_eval.fillna(0)
+    
+    y_train_pred = model.predict(X_train_fe_eval)
+    
+    cm = confusion_matrix(y_train_true, y_train_pred)
+    classes = sorted(set(y_train_true) | set(y_train_pred))
+    class_names = [str(c) for c in classes]
+    
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("Confusion matrix saved to output/report_fig.png")
+else:
+    cm = None
+    class_names = []
+    y_train_true = None
+    y_train_pred = None
+
+# ========== 生成HTML报告 ==========
+print("Generating HTML report...")
+
+# 计算分类报告指标
+from sklearn.metrics import classification_report, accuracy_score
+
+if y_train_true is not None and y_train_pred is not None:
+    accuracy = accuracy_score(y_train_true, y_train_pred)
+    report_dict = classification_report(y_train_true, y_train_pred, output_dict=True, zero_division=0)
+else:
+    accuracy = 0.0
+    report_dict = {}
+
+# 构建特征重要性表格HTML
+fi_html_rows = ""
+for _, row in fi_df.head(20).iterrows():
+    fi_html_rows += f"<tr><td>{row['name']}</td><td>{row['importance']:.6f}</td></tr>"
+
+# 构建分类报告表格HTML
+cr_html_rows = ""
+if report_dict:
+    for cls_name, metrics in report_dict.items():
+        if isinstance(metrics, dict) and cls_name not in ['accuracy', 'macro avg', 'weighted avg']:
+            cr_html_rows += f"""
+            <tr>
+                <td>{cls_name}</td>
+                <td>{metrics.get('precision', 0):.4f}</td>
+                <td>{metrics.get('recall', 0):.4f}</td>
+                <td>{metrics.get('f1-score', 0):.4f}</td>
+                <td>{metrics.get('support', 0)}</td>
+            </tr>"""
+    # 添加macro avg和weighted avg
+    for avg_type in ['macro avg', 'weighted avg']:
+        if avg_type in report_dict:
+            m = report_dict[avg_type]
+            cr_html_rows += f"""
+            <tr style="font-weight:bold;">
+                <td>{avg_type}</td>
+                <td>{m.get('precision', 0):.4f}</td>
+                <td>{m.get('recall', 0):.4f}</td>
+                <td>{m.get('f1-score', 0):.4f}</td>
+                <td>{m.get('support', 0)}</td>
+            </tr>"""
+
+# 构建预测预览表格HTML
+preview_html_rows = ""
+for i in range(min(10, len(result_df))):
+    row = result_df.iloc[i]
+    proba_str = ", ".join([f"{row.get(f'proba_{j}', 0):.4f}" for j in range(test_probs.shape[1])])
+    preview_html_rows += f"<tr><td>{row['id']}</td><td>{row['prediction']}</td><td>{proba_str}</td></tr>"
+
+# 混淆矩阵表格HTML
+cm_html_rows = ""
+if cm is not None:
+    cm_html_rows += "<tr><th></th>"
+    for c in class_names:
+        cm_html_rows += f"<th>Pred {c}</th>"
+    cm_html_rows += "</tr>"
+    for i, row_cm in enumerate(cm):
+        cm_html_rows += f"<tr><th>True {class_names[i]}</th>"
+        for val in row_cm:
+            cm_html_rows += f"<td>{val}</td>"
+        cm_html_rows += "</tr>"
+
+html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Report - Multiclass Classification</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metric-box {{ display: inline-block; background: #e8f5e9; padding: 15px 25px; margin: 10px; border-radius: 5px; text-align: center; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2e7d32; }}
+        .metric-label {{ font-size: 12px; color: #666; }}
+        img {{ max-width: 100%; height: auto; margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Multiclass Classification Model Report</h1>
+        
+        <h2>Model Summary</h2>
+        <div class="metric-box">
+            <div class="metric-value">{accuracy:.4f}</div>
+            <div class="metric-label">Accuracy</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-value">{len(fi_df)}</div>
+            <div class="metric-label">Features</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-value">{len(result_df)}</div>
+            <div class="metric-label">Test Samples</div>
+        </div>
+        
+        <h2>Classification Report</h2>
+        <table>
+            <tr>
+                <th>Class</th>
+                <th>Precision</th>
+                <th>Recall</th>
+                <th>F1-Score</th>
+                <th>Support</th>
+            </tr>
+            {cr_html_rows}
+        </table>
+        
+        <h2>Confusion Matrix</h2>
+        <table>
+            {cm_html_rows}
+        </table>
+        <img src="report_fig.png" alt="Confusion Matrix Heatmap" style="max-width:500px;">
+        
+        <h2>Feature Importance (Top 20)</h2>
+        <table>
+            <tr><th>Feature</th><th>Importance</th></tr>
+            {fi_html_rows}
+        </table>
+        <img src="feature_importance.png" alt="Feature Importance" style="max-width:600px;">
+        
+        <h2>Test Predictions Preview (First 10)</h2>
+        <table>
+            <tr><th>ID</th><th>Prediction</th><th>Probabilities</th></tr>
+            {preview_html_rows}
+        </table>
+        
+        <p><em>Report generated automatically. Full predictions saved to test_predictions.csv</em></p>
+    </div>
+</body>
+</html>
+"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 生成配套预测脚本 ==========
+predict_script = '''
+import pandas as pd
+import numpy as np
+import pickle
+import re
+import os
+
+def predict_new_data(input_csv_path, output_csv_path, model_path='model.pkl'):
+    """
+    加载模型并对新数据进行预测。
+    
+    Parameters:
+    - input_csv_path: 输入CSV文件路径（包含与训练数据相同的特征列）
+    - output_csv_path: 输出CSV文件路径（包含预测结果）
+    - model_path: 模型文件路径
+    """
+    # 加载模型
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    # 加载数据
+    df = pd.read_csv(input_csv_path)
+    
+    # 注意：这里需要与训练时相同的预处理和特征工程
+    # 由于预处理管道保存在模型中，这里简化处理
+    # 实际使用时请确保数据已经过相同的预处理
+    
+    # 确保所有列都是数值类型
+    for col in df.columns:
+        if df[col].dtype == 'object' or df[col].dtype.name == 'category':
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.fillna(0)
+    
+    # 预测
+    predictions = model.predict(df)
+    probabilities = model.predict_proba(df)
+    
+    # 构建输出
+    result = pd.DataFrame()
+    result['prediction'] = predictions
+    for i in range(probabilities.shape[1]):
+        result[f'proba_{i}'] = probabilities[:, i]
+    
+    result.to_csv(output_csv_path, index=False)
+    print(f"Predictions saved to {output_csv_path}")
+    return result
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) < 3:
+        print("Usage: python predict.py <input_csv> <output_csv>")
+        sys.exit(1)
+    predict_new_data(sys.argv[1], sys.argv[2])
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 输出摘要 ==========
+summary = {
+    "status": "success",
+    "model_loaded_from": "data/best_model.pkl",
+    "test_samples": len(result_df),
+    "num_features": len(feature_names),
+    "num_classes": test_probs.shape[1],
+    "accuracy": round(float(accuracy), 4) if accuracy else None,
+    "output_files": [
+        "output/model.pkl",
+        "output/feature_importance.csv",
+        "output/feature_importance.png",
+        "output/report.html",
+        "output/report_fig.png",
+        "output/test_predictions.csv",
+        "output/predict.py"
+    ]
+}
+print(json.dumps(summary))
+```
+</code>

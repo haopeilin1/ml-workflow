@@ -1,0 +1,460 @@
+<plan>
+产物生成计划：
+1. 加载 data/best_model.pkl（已存在的最佳模型）
+2. 由于数据集超过10万行，跳过所有复杂可视化（feature_importance.png、report_fig.png、SHAP等）
+3. 生成核心产物：output/model.pkl、output/feature_importance.csv、output/report.html（纯文本表格）、output/test_predictions.csv、output/predict.py
+4. 特征重要性直接从模型属性获取（feature_importances_）
+5. 对测试集进行预测并保存结果
+</plan>
+
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+from datetime import datetime
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 1. 加载已保存的最佳模型 ==========
+print("正在加载模型...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("成功从 data/best_model.pkl 加载模型")
+except Exception as e:
+    print(f"加载模型失败: {e}")
+    print("将尝试重新训练模型...")
+    # 如果加载失败，回退到重新训练
+    raise SystemExit("模型加载失败，请检查 data/best_model.pkl 是否存在且有效")
+
+# ========== 2. 加载数据 ==========
+train = pd.read_csv('data/train.csv')
+test = pd.read_csv('data/test.csv')
+
+target_col = 'Churn'
+id_col = 'id' if 'id' in test.columns else test.columns[0]
+
+print(f"训练集大小: {train.shape}")
+print(f"测试集大小: {test.shape}")
+
+# ========== 3. 预处理函数（与训练时保持一致）==========
+# 从最佳代码中提取预处理逻辑
+cat_cols = ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines',
+            'InternetService', 'OnlineSecurity', 'OnlineBackup', 'DeviceProtection',
+            'TechSupport', 'StreamingTV', 'StreamingMovies', 'Contract',
+            'PaperlessBilling', 'PaymentMethod']
+
+def preprocess_data(df, is_train=False):
+    """预处理数据，返回处理后的DataFrame"""
+    df = df.copy()
+    
+    # 丢弃id列
+    if 'id' in df.columns:
+        df = df.drop(columns=['id'])
+    
+    # 处理目标列
+    if target_col in df.columns:
+        from sklearn.preprocessing import LabelEncoder
+        le = LabelEncoder()
+        df[target_col] = le.fit_transform(df[target_col])
+    
+    # 只保留实际存在的类别列
+    existing_cat_cols = [c for c in cat_cols if c in df.columns]
+    
+    # 数值列
+    exclude_cols = set(existing_cat_cols + [target_col])
+    num_cols = [c for c in df.columns if c not in exclude_cols and df[c].dtype in ['int64', 'float64']]
+    
+    return df, existing_cat_cols, num_cols
+
+# ========== 4. 构建完整的Pipeline（用于保存）==========
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+
+# 预处理训练数据以获取列信息
+train_processed, train_cat_cols, train_num_cols = preprocess_data(train, is_train=True)
+
+# 构建预处理器
+preprocessor = ColumnTransformer([
+    ('cat', Pipeline([
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ]), train_cat_cols),
+    ('num', Pipeline([
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', StandardScaler())
+    ]), train_num_cols)
+], remainder='passthrough')
+
+# 拟合预处理器
+X_train_raw = train_processed.drop(columns=[target_col], errors='ignore')
+preprocessor.fit(X_train_raw)
+
+# 获取特征名称
+try:
+    feature_names = preprocessor.get_feature_names_out()
+except AttributeError:
+    ohe = preprocessor.named_transformers_['cat'].named_steps['encoder']
+    cat_feature_names = []
+    for i, col in enumerate(train_cat_cols):
+        categories = ohe.categories_[i]
+        cat_feature_names.extend([f"{col}_{cat}" for cat in categories])
+    feature_names = np.array(cat_feature_names + train_num_cols)
+
+# 清洗特征名
+feature_names_clean = [re.sub(r'[^\w]', '_', str(c)) for c in feature_names]
+
+# ========== 5. 构建完整Pipeline并保存 ==========
+full_pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('model', model)
+])
+
+# 保存完整Pipeline
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(full_pipeline, f)
+print("模型已保存到 output/model.pkl")
+
+# ========== 6. 特征重要性（直接从模型获取）==========
+print("正在提取特征重要性...")
+if hasattr(model, 'feature_importances_'):
+    importances = model.feature_importances_
+    
+    # 确保特征名称和重要性长度一致
+    if len(feature_names_clean) == len(importances):
+        feature_importance_df = pd.DataFrame({
+            'name': feature_names_clean,
+            'importance': importances
+        })
+    else:
+        # 如果长度不匹配，使用索引
+        feature_importance_df = pd.DataFrame({
+            'name': [f'feature_{i}' for i in range(len(importances))],
+            'importance': importances
+        })
+    
+    # 按重要性降序排序
+    feature_importance_df = feature_importance_df.sort_values('importance', ascending=False)
+    feature_importance_df.to_csv('output/feature_importance.csv', index=False)
+    print(f"特征重要性已保存到 output/feature_importance.csv (共 {len(feature_importance_df)} 个特征)")
+else:
+    # 如果模型没有feature_importances_属性
+    feature_importance_df = pd.DataFrame({'name': ['N/A'], 'importance': [0]})
+    feature_importance_df.to_csv('output/feature_importance.csv', index=False)
+    print("警告: 模型没有 feature_importances_ 属性")
+
+# ========== 7. 测试集预测 ==========
+print("正在对测试集进行预测...")
+
+# 预处理测试集
+test_processed, _, _ = preprocess_data(test, is_train=False)
+
+# 移除目标列（如果存在）
+if target_col in test_processed.columns:
+    X_test = test_processed.drop(columns=[target_col])
+else:
+    X_test = test_processed.copy()
+
+# 预测
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(preprocessor.transform(X_test))[:, 1]
+else:
+    test_probs = model.predict(preprocessor.transform(X_test)).astype(float)
+
+test_preds = (test_probs >= 0.5).astype(int)
+
+# 保存预测结果
+result_df = pd.DataFrame({
+    'id': test[id_col] if id_col in test.columns else range(len(test_preds)),
+    'prediction': test_preds,
+    'probability': test_probs
+})
+result_df.to_csv('output/test_predictions.csv', index=False)
+print(f"测试集预测结果已保存到 output/test_predictions.csv (共 {len(result_df)} 行)")
+
+# ========== 8. 生成HTML报告（纯文本表格）==========
+print("正在生成HTML报告...")
+
+# 计算基本统计信息
+total_test = len(result_df)
+positive_count = int(result_df['prediction'].sum())
+negative_count = total_test - positive_count
+positive_rate = positive_count / total_test * 100 if total_test > 0 else 0
+
+# 特征重要性Top 10
+top_features = feature_importance_df.head(10).to_dict('records') if len(feature_importance_df) > 0 else []
+
+# 预测概率分布
+prob_mean = float(result_df['probability'].mean())
+prob_median = float(result_df['probability'].median())
+prob_std = float(result_df['probability'].std())
+
+html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型报告 - 二分类任务</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }}
+        .container {{
+            max-width: 900px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #333;
+            border-bottom: 2px solid #4CAF50;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #555;
+            margin-top: 25px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }}
+        th, td {{
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }}
+        th {{
+            background-color: #4CAF50;
+            color: white;
+        }}
+        tr:nth-child(even) {{
+            background-color: #f2f2f2;
+        }}
+        .metric-box {{
+            display: inline-block;
+            background-color: #e8f5e9;
+            border: 1px solid #4CAF50;
+            border-radius: 5px;
+            padding: 10px 15px;
+            margin: 5px;
+            min-width: 120px;
+            text-align: center;
+        }}
+        .metric-value {{
+            font-size: 24px;
+            font-weight: bold;
+            color: #2e7d32;
+        }}
+        .metric-label {{
+            font-size: 12px;
+            color: #666;
+        }}
+        .footer {{
+            margin-top: 30px;
+            padding-top: 15px;
+            border-top: 1px solid #ddd;
+            color: #999;
+            font-size: 12px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>二分类模型报告</h1>
+        <p>生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p>任务类型: 二分类 (Binary Classification)</p>
+        <p>目标列: {target_col}</p>
+        <p>评估指标: AUC-ROC</p>
+        
+        <h2>数据集概览</h2>
+        <table>
+            <tr><th>指标</th><th>值</th></tr>
+            <tr><td>训练集大小</td><td>{train.shape[0]:,} 行 × {train.shape[1]} 列</td></tr>
+            <tr><td>测试集大小</td><td>{test.shape[0]:,} 行 × {test.shape[1]} 列</td></tr>
+            <tr><td>特征数量（预处理后）</td><td>{len(feature_names_clean):,}</td></tr>
+        </table>
+        
+        <h2>测试集预测结果</h2>
+        <div>
+            <div class="metric-box">
+                <div class="metric-value">{total_test:,}</div>
+                <div class="metric-label">总样本数</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{positive_count:,}</div>
+                <div class="metric-label">预测正类</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{negative_count:,}</div>
+                <div class="metric-label">预测负类</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{positive_rate:.2f}%</div>
+                <div class="metric-label">正类比例</div>
+            </div>
+        </div>
+        
+        <h2>预测概率分布</h2>
+        <table>
+            <tr><th>统计量</th><th>值</th></tr>
+            <tr><td>均值</td><td>{prob_mean:.4f}</td></tr>
+            <tr><td>中位数</td><td>{prob_median:.4f}</td></tr>
+            <tr><td>标准差</td><td>{prob_std:.4f}</td></tr>
+        </table>
+        
+        <h2>特征重要性 Top 10</h2>
+        <table>
+            <tr><th>排名</th><th>特征名称</th><th>重要性</th></tr>
+"""
+for i, feat in enumerate(top_features):
+    html_content += f"            <tr><td>{i+1}</td><td>{feat['name']}</td><td>{feat['importance']:.6f}</td></tr>\n"
+
+html_content += """        </table>
+        
+        <h2>预测结果预览（前10行）</h2>
+        <table>
+            <tr><th>ID</th><th>预测类别</th><th>概率</th></tr>
+"""
+for i, row in result_df.head(10).iterrows():
+    html_content += f"            <tr><td>{row['id']}</td><td>{int(row['prediction'])}</td><td>{row['probability']:.4f}</td></tr>\n"
+
+html_content += f"""        </table>
+        
+        <div class="footer">
+            <p>注：由于数据集较大（训练集 {train.shape[0]:,} 行），已跳过复杂可视化生成。</p>
+            <p>模型文件: output/model.pkl | 特征重要性: output/feature_importance.csv | 预测结果: output/test_predictions.csv</p>
+        </div>
+    </div>
+</body>
+</html>"""
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML报告已保存到 output/report.html")
+
+# ========== 9. 生成配套预测脚本 ==========
+predict_script = '''#!/usr/bin/env python3
+"""
+独立预测脚本
+用法: python predict.py <输入CSV文件路径> [输出CSV文件路径]
+示例: python predict.py new_data.csv predictions.csv
+"""
+import pandas as pd
+import pickle
+import sys
+import os
+
+def load_model(model_path='output/model.pkl'):
+    """加载保存的模型"""
+    if not os.path.exists(model_path):
+        # 尝试从当前目录的output子目录加载
+        model_path = os.path.join(os.path.dirname(__file__), 'output', 'model.pkl')
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"模型文件未找到: {model_path}")
+    
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    return model
+
+def predict(model, data_path, output_path=None):
+    """对数据进行预测"""
+    # 加载数据
+    df = pd.read_csv(data_path)
+    print(f"加载数据: {df.shape[0]} 行 × {df.shape[1]} 列")
+    
+    # 保存ID列（如果存在）
+    id_col = None
+    if 'id' in df.columns:
+        id_col = df['id'].copy()
+    
+    # 预测
+    if hasattr(model, 'predict_proba'):
+        probabilities = model.predict_proba(df)[:, 1]
+        predictions = (probabilities >= 0.5).astype(int)
+    else:
+        predictions = model.predict(df)
+        probabilities = predictions.astype(float)
+    
+    # 构建结果
+    result = pd.DataFrame()
+    if id_col is not None:
+        result['id'] = id_col
+    else:
+        result['id'] = range(len(predictions))
+    
+    result['prediction'] = predictions
+    result['probability'] = probabilities
+    
+    # 保存结果
+    if output_path is None:
+        output_path = 'predictions.csv'
+    
+    result.to_csv(output_path, index=False)
+    print(f"预测结果已保存到: {output_path}")
+    print(f"预测统计: 正类={predictions.sum()}, 负类={(1-predictions).sum()}")
+    
+    return result
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("用法: python predict.py <输入CSV文件路径> [输出CSV文件路径]")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else None
+    
+    model = load_model()
+    predict(model, input_path, output_path)
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("预测脚本已保存到 output/predict.py")
+
+# ========== 10. 输出摘要 ==========
+summary = {
+    "status": "success",
+    "task_type": "binary_classification",
+    "target_col": target_col,
+    "train_shape": list(train.shape),
+    "test_shape": list(test.shape),
+    "num_features": len(feature_names_clean),
+    "test_predictions": {
+        "total": total_test,
+        "positive": positive_count,
+        "negative": negative_count,
+        "positive_rate": round(positive_rate, 2)
+    },
+    "probability_stats": {
+        "mean": round(prob_mean, 4),
+        "median": round(prob_median, 4),
+        "std": round(prob_std, 4)
+    },
+    "output_files": [
+        "output/model.pkl",
+        "output/feature_importance.csv",
+        "output/report.html",
+        "output/test_predictions.csv",
+        "output/predict.py"
+    ],
+    "note": "大数据集模式：已跳过 feature_importance.png 和复杂可视化生成"
+}
+
+print(json.dumps(summary))
+```
+</code>

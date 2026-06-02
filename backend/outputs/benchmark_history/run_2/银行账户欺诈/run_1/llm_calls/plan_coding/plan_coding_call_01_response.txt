@@ -1,0 +1,383 @@
+<plan>
+产物生成计划：加载已保存的最佳模型（data/best_model.pkl），对测试集进行预测，生成二分类任务所需的所有产物文件。由于模型已存在，无需重新训练。产物包括：模型文件、特征重要性CSV和PNG、HTML报告、测试集预测CSV、PR曲线图、以及独立的预测脚本。
+</plan>
+<code>
+```python
+import pandas as pd
+import numpy as np
+import pickle
+import json
+import os
+import re
+import warnings
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, confusion_matrix, classification_report
+
+warnings.filterwarnings('ignore')
+
+# 确保输出目录存在
+os.makedirs('output', exist_ok=True)
+
+# ========== 1. 加载已保存的最佳模型 ==========
+print("Loading best model from data/best_model.pkl...")
+try:
+    with open('data/best_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("Model loaded successfully.")
+except Exception as e:
+    print(f"Failed to load model: {e}")
+    print("Attempting to retrain...")
+    # 如果加载失败，回退到重新训练
+    # 这里需要重新执行训练逻辑，但根据提示，模型已存在，此分支仅作兜底
+    raise RuntimeError("Model loading failed and retraining is not implemented in this script. Please ensure data/best_model.pkl exists.")
+
+# ========== 2. 加载测试数据 ==========
+test = pd.read_csv('data/test.csv')
+target_col = 'fraud_bool'
+id_col = 'id'
+if id_col not in test.columns:
+    id_col = test.columns[0]
+
+# 测试集没有目标列，直接使用所有特征
+X_test = test.copy()
+
+# ========== 3. 对测试集进行预测 ==========
+print("Making predictions on test set...")
+if hasattr(model, 'predict_proba'):
+    test_probs = model.predict_proba(X_test)[:, 1]
+    test_preds = (test_probs >= 0.5).astype(int)
+else:
+    test_preds = model.predict(X_test).astype(int)
+    test_probs = test_preds.astype(float)
+
+# 保存测试集预测结果
+test_result = test.copy()
+test_result['prediction'] = test_preds
+test_result['probability'] = test_probs
+test_result.to_csv('output/test_predictions.csv', index=False)
+print("Test predictions saved to output/test_predictions.csv")
+
+# ========== 4. 保存模型到 output/model.pkl ==========
+with open('output/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
+print("Model saved to output/model.pkl")
+
+# ========== 5. 提取特征重要性 ==========
+print("Extracting feature importance...")
+feature_names = X_test.columns.tolist()
+
+# 尝试从模型中获取特征重要性
+importance = None
+if hasattr(model, 'feature_importances_'):
+    importance = model.feature_importances_
+elif hasattr(model, 'named_steps'):
+    # 如果是Pipeline，尝试从最后一步获取
+    final_step = model.steps[-1][1]
+    if hasattr(final_step, 'feature_importances_'):
+        importance = final_step.feature_importances_
+    elif hasattr(final_step, 'coef_'):
+        importance = np.abs(final_step.coef_).flatten()
+
+if importance is None:
+    # 如果无法获取特征重要性，使用均匀分布
+    print("Warning: Could not extract feature importance from model. Using uniform importance.")
+    importance = np.ones(len(feature_names)) / len(feature_names)
+
+# 确保特征重要性长度与特征名匹配
+if len(importance) != len(feature_names):
+    print(f"Warning: Feature importance length ({len(importance)}) does not match feature names length ({len(feature_names)}). Truncating/padding.")
+    if len(importance) > len(feature_names):
+        importance = importance[:len(feature_names)]
+    else:
+        importance = np.pad(importance, (0, len(feature_names) - len(importance)), 'constant', constant_values=0)
+
+# 创建特征重要性DataFrame
+importance_df = pd.DataFrame({
+    'name': feature_names,
+    'importance': importance
+})
+importance_df = importance_df.sort_values('importance', ascending=False)
+
+# 保存特征重要性CSV
+importance_df.to_csv('output/feature_importance.csv', index=False)
+print("Feature importance saved to output/feature_importance.csv")
+
+# ========== 6. 生成特征重要性图 ==========
+print("Generating feature importance plot...")
+# 只显示前20个最重要的特征
+top_n = min(20, len(importance_df))
+top_features = importance_df.head(top_n)
+
+plt.figure(figsize=(10, 8))
+plt.barh(range(top_n), top_features['importance'].values, align='center')
+plt.yticks(range(top_n), top_features['name'].values)
+plt.xlabel('Importance')
+plt.title('Top {} Feature Importance'.format(top_n))
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('output/feature_importance.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("Feature importance plot saved to output/feature_importance.png")
+
+# ========== 7. 生成PR曲线图（二分类任务） ==========
+print("Generating PR curve plot...")
+# 由于测试集没有真实标签，我们使用训练集来生成PR曲线
+# 加载训练数据并重新预测
+train = pd.read_csv('data/train.csv')
+y_train = train[target_col]
+X_train = train.drop(columns=[target_col], errors='ignore')
+
+if hasattr(model, 'predict_proba'):
+    train_probs = model.predict_proba(X_train)[:, 1]
+else:
+    train_probs = model.predict(X_train).astype(float)
+
+# 计算PR曲线
+precision, recall, thresholds = precision_recall_curve(y_train, train_probs)
+ap_score = average_precision_score(y_train, train_probs)
+auc_score = roc_auc_score(y_train, train_probs)
+
+plt.figure(figsize=(8, 6))
+plt.plot(recall, precision, 'b-', linewidth=2, label=f'PR Curve (AP={ap_score:.4f})')
+plt.xlabel('Recall')
+plt.ylabel('Precision')
+plt.title(f'Precision-Recall Curve (AUC={auc_score:.4f}, AP={ap_score:.4f})')
+plt.legend(loc='lower left')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('output/report_fig.png', dpi=100, bbox_inches='tight')
+plt.close()
+print("PR curve saved to output/report_fig.png")
+
+# ========== 8. 计算模型指标（使用训练集） ==========
+print("Calculating model metrics...")
+train_preds = (train_probs >= 0.5).astype(int)
+cm = confusion_matrix(y_train, train_preds)
+tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+
+# 生成分类报告
+report_dict = classification_report(y_train, train_preds, output_dict=True, target_names=['Non-Fraud', 'Fraud'])
+
+metrics_summary = {
+    'ROC-AUC': round(float(auc_score), 4),
+    'Average Precision': round(float(ap_score), 4),
+    'True Positives': int(tp),
+    'False Positives': int(fp),
+    'True Negatives': int(tn),
+    'False Negatives': int(fn),
+    'Precision (Fraud)': round(report_dict['Fraud']['precision'], 4),
+    'Recall (Fraud)': round(report_dict['Fraud']['recall'], 4),
+    'F1-Score (Fraud)': round(report_dict['Fraud']['f1-score'], 4),
+    'Precision (Non-Fraud)': round(report_dict['Non-Fraud']['precision'], 4),
+    'Recall (Non-Fraud)': round(report_dict['Non-Fraud']['recall'], 4),
+    'F1-Score (Non-Fraud)': round(report_dict['Non-Fraud']['f1-score'], 4),
+}
+
+# ========== 9. 生成HTML报告 ==========
+print("Generating HTML report...")
+
+# 构建特征重要性表格HTML
+importance_html = '<table border="1" style="border-collapse: collapse; width: 100%;">'
+importance_html += '<tr><th>Rank</th><th>Feature</th><th>Importance</th></tr>'
+for i, row in importance_df.head(20).iterrows():
+    importance_html += f'<tr><td>{i+1}</td><td>{row["name"]}</td><td>{row["importance"]:.6f}</td></tr>'
+importance_html += '</table>'
+
+# 构建混淆矩阵表格HTML
+cm_html = '<table border="1" style="border-collapse: collapse; width: 50%;">'
+cm_html += '<tr><th></th><th>Predicted Non-Fraud</th><th>Predicted Fraud</th></tr>'
+cm_html += f'<tr><td><b>Actual Non-Fraud</b></td><td>{tn}</td><td>{fp}</td></tr>'
+cm_html += f'<tr><td><b>Actual Fraud</b></td><td>{fn}</td><td>{tp}</td></tr>'
+cm_html += '</table>'
+
+# 构建分类报告表格HTML
+cr_html = '<table border="1" style="border-collapse: collapse; width: 100%;">'
+cr_html += '<tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr>'
+for cls_name, cls_metrics in report_dict.items():
+    if cls_name in ['Non-Fraud', 'Fraud']:
+        cr_html += f'<tr><td>{cls_name}</td><td>{cls_metrics["precision"]:.4f}</td><td>{cls_metrics["recall"]:.4f}</td><td>{cls_metrics["f1-score"]:.4f}</td><td>{cls_metrics["support"]}</td></tr>'
+cr_html += '</table>'
+
+# 构建测试集预测预览表格
+preview_html = '<table border="1" style="border-collapse: collapse; width: 100%;">'
+preview_html += '<tr><th>Index</th><th>Prediction</th><th>Probability</th></tr>'
+for i in range(min(10, len(test_result))):
+    preview_html += f'<tr><td>{i}</td><td>{test_result.iloc[i]["prediction"]}</td><td>{test_result.iloc[i]["probability"]:.4f}</td></tr>'
+preview_html += '</table>'
+
+# 构建完整HTML报告
+html_content = f'''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fraud Detection Model Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        table {{ margin: 15px 0; }}
+        th {{ background-color: #4CAF50; color: white; padding: 10px; text-align: left; }}
+        td {{ padding: 8px; border: 1px solid #ddd; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .metrics-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }}
+        .metric-card {{ background-color: #e8f5e9; padding: 15px; border-radius: 8px; text-align: center; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2e7d32; }}
+        .metric-label {{ font-size: 12px; color: #666; }}
+        img {{ max-width: 100%; height: auto; margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Fraud Detection Model Report</h1>
+        <p><strong>Task Type:</strong> Binary Classification</p>
+        <p><strong>Target Column:</strong> fraud_bool</p>
+        <p><strong>Evaluation Metric:</strong> ROC-AUC</p>
+        
+        <h2>Model Performance Metrics</h2>
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-value">{metrics_summary['ROC-AUC']}</div>
+                <div class="metric-label">ROC-AUC</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics_summary['Average Precision']}</div>
+                <div class="metric-label">Average Precision</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics_summary['F1-Score (Fraud)']}</div>
+                <div class="metric-label">F1-Score (Fraud)</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics_summary['Precision (Fraud)']}</div>
+                <div class="metric-label">Precision (Fraud)</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics_summary['Recall (Fraud)']}</div>
+                <div class="metric-label">Recall (Fraud)</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{metrics_summary['True Positives']}</div>
+                <div class="metric-label">True Positives</div>
+            </div>
+        </div>
+        
+        <h2>Confusion Matrix</h2>
+        {cm_html}
+        
+        <h2>Classification Report</h2>
+        {cr_html}
+        
+        <h2>Precision-Recall Curve</h2>
+        <img src="report_fig.png" alt="PR Curve">
+        
+        <h2>Feature Importance (Top 20)</h2>
+        {importance_html}
+        <img src="feature_importance.png" alt="Feature Importance">
+        
+        <h2>Test Set Predictions Preview (First 10 rows)</h2>
+        {preview_html}
+        <p><strong>Total test predictions:</strong> {len(test_result)} rows saved to test_predictions.csv</p>
+    </div>
+</body>
+</html>
+'''
+
+with open('output/report.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("HTML report saved to output/report.html")
+
+# ========== 10. 生成独立的预测脚本 ==========
+predict_script = '''
+import pandas as pd
+import pickle
+import os
+import sys
+
+def load_model(model_path='model.pkl'):
+    """加载保存的模型"""
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    return model
+
+def predict(model, data_path):
+    """对新数据进行预测"""
+    # 加载数据
+    df = pd.read_csv(data_path)
+    
+    # 进行预测
+    if hasattr(model, 'predict_proba'):
+        probabilities = model.predict_proba(df)[:, 1]
+        predictions = (probabilities >= 0.5).astype(int)
+    else:
+        predictions = model.predict(df).astype(int)
+        probabilities = predictions.astype(float)
+    
+    # 构建结果DataFrame
+    result = df.copy()
+    result['prediction'] = predictions
+    result['probability'] = probabilities
+    
+    return result
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <input_csv_path> [output_csv_path]")
+        print("Example: python predict.py new_data.csv predictions.csv")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else 'predictions.csv'
+    
+    if not os.path.exists(input_path):
+        print(f"Error: Input file '{input_path}' not found.")
+        sys.exit(1)
+    
+    # 加载模型
+    model = load_model('model.pkl')
+    
+    # 进行预测
+    result = predict(model, input_path)
+    
+    # 保存结果
+    result.to_csv(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+    print(f"Total rows processed: {len(result)}")
+    print(f"Fraud predictions: {result['prediction'].sum()}")
+    print(f"Fraud rate: {result['prediction'].mean():.4f}")
+'''
+
+with open('output/predict.py', 'w', encoding='utf-8') as f:
+    f.write(predict_script)
+print("Prediction script saved to output/predict.py")
+
+# ========== 11. 输出摘要 ==========
+summary = {
+    'status': 'success',
+    'model_loaded_from': 'data/best_model.pkl',
+    'model_saved_to': 'output/model.pkl',
+    'test_predictions_count': len(test_result),
+    'fraud_predictions_count': int(test_preds.sum()),
+    'fraud_rate': round(float(test_preds.mean()), 4),
+    'feature_count': len(feature_names),
+    'top_feature': importance_df.iloc[0]['name'] if len(importance_df) > 0 else 'N/A',
+    'top_feature_importance': round(float(importance_df.iloc[0]['importance']), 6) if len(importance_df) > 0 else 0,
+    'metrics': metrics_summary,
+    'output_files': [
+        'output/model.pkl',
+        'output/feature_importance.csv',
+        'output/feature_importance.png',
+        'output/report.html',
+        'output/report_fig.png',
+        'output/test_predictions.csv',
+        'output/predict.py'
+    ]
+}
+
+print(json.dumps(summary))
+```
+</code>

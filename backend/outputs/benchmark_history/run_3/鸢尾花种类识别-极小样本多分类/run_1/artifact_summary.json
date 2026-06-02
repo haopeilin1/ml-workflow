@@ -1,0 +1,23 @@
+{
+  "completeness": "full",
+  "generated_files": [
+    "test_predictions.csv",
+    "model.pkl",
+    "feature_importance.csv",
+    "feature_importance.png",
+    "report.html",
+    "report_fig.png",
+    "predict.py"
+  ],
+  "prediction_file": true,
+  "model_file": true,
+  "feature_importance_csv": true,
+  "feature_importance_png": true,
+  "report_html": true,
+  "report_fig_png": true,
+  "predict_script": true,
+  "pipeline_py": false,
+  "residual_png": false,
+  "cluster_png": false,
+  "ts_forecast_png": false
+}

@@ -1,0 +1,64 @@
+============================================================
+  任务运行摘要: 支付欺诈 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: label
+  评估指标: Accuracy
+  复杂度判定: complex (极度不平衡(sampleValues推断最大类占比100%)强制complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 85.00
+  总耗时: 0.0s
+  验证集 AUC: 0.8842
+  测试集 F1: 0.3696
+  测试集 AUC: 0.9944
+
+【各阶段耗时】
+  意图识别: 1.0s
+  代码生成: 424.4s
+  沙箱执行: 15.2s
+  评估优化: 23.7s
+  产物生成: 102.5s
+  测试预测: 0.0s
+  总计: 754.0s
+
+【Token 消耗】
+  Plan/Coding 调用: 1 次, 13319 tokens
+  Evaluation 调用: 4 次, 12541 tokens
+  总计: 5 次, 25860 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 3738tokens | 0.9s
+    - qwen3.5-flash@openai: 1 calls, 3738 tokens, 0.9s
+  plan_coding : deepseek-v4-pro@openai | 1calls | 13319tokens | 98.0s
+    - deepseek-v4-pro@openai: 1 calls, 13319 tokens, 98.0s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 12541tokens | 23.7s
+    - deepseek-v4-flash@openai: 4 calls, 12541 tokens, 23.7s
+  judge       : qwen3.5-flash@openai | 1calls | 1659tokens | 3.5s
+    - qwen3.5-flash@openai: 1 calls, 1659 tokens, 3.5s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：Accuracy】为核心标准。模型在验证集上的 Accuracy 为 0.9857，在测试集上达到了 0.9511。虽然测试集 AUC (0.9944) 异常高于验证集 AUC (0.8842)，且测试集 F1 (0.3696) 显著低于验证集表现（暗示类别分布可能极度不平衡或阈值选择导致正类召回率极低），但核心指标 Accuracy 从验证集的 0.9857 下降至测试集的 0.9511，相对差距约为 3.5%，处于良好的泛化一致性范围内（<10%）。测试集 Accuracy > 0.95 表明模型整体分类正确率极高，达到了可交付水平。预测策略显示为“未知”...
+
+【维度评分】
+  unknown: 85.0 (weight=0.3)
+  unknown: 70.0 (weight=0.25)
+  unknown: 90.0 (weight=0.2)
+  unknown: 85.0 (weight=0.15)
+  unknown: 90.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 14:02:47 UTC
+============================================================

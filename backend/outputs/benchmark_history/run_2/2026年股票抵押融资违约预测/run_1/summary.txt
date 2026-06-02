@@ -1,0 +1,63 @@
+============================================================
+  任务运行摘要: 2026年股票抵押融资违约预测 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: IsDefault
+  评估指标: ROC-AUC
+  复杂度判定: complex (LLM直接判定为complex)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ❌ 否
+
+【核心指标】
+  Best Score: 73.80
+  总耗时: 0.0s
+  验证集 AUC: 1.0000
+  测试集 AUC: 1.0000
+
+【各阶段耗时】
+  意图识别: 1.8s
+  代码生成: 146.8s
+  沙箱执行: 22.9s
+  评估优化: 18.6s
+  产物生成: 348.7s
+  测试预测: 0.0s
+  总计: 741.3s
+
+【Token 消耗】
+  Plan/Coding 调用: 1 次, 14958 tokens
+  Evaluation 调用: 4 次, 9750 tokens
+  总计: 5 次, 24708 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 15348tokens | 1.8s
+    - qwen3.5-flash@openai: 1 calls, 15348 tokens, 1.8s
+  plan_coding : deepseek-v4-pro@openai | 1calls | 14958tokens | 342.1s
+    - deepseek-v4-pro@openai: 1 calls, 14958 tokens, 342.1s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9750tokens | 18.6s
+    - deepseek-v4-flash@openai: 4 calls, 9750 tokens, 18.6s
+  judge       : qwen3.5-flash@openai | 1calls | 1531tokens | 2.6s
+    - qwen3.5-flash@openai: 1 calls, 1531 tokens, 2.6s
+
+【产物生成】
+  完整性: full
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, feature_importance.png, report.html, report_fig.png, predict.py
+
+【评审分析】
+  模型在验证集和测试集上均报告了完美的 ROC-AUC 1.0000。虽然从数值上看指标极高且泛化一致性（相对差距为 0%）完美，但在二分类任务中，AUC 达到 1.0 通常意味着数据泄露、标签泄露或过拟合到了训练数据的噪声/特征中，这在真实业务场景中几乎不可能发生。这种极端的完美表现表明模型并未真正学习到泛化规律，而是记住了数据或存在严重的评估缺陷。作为质量控制官，必须拒绝这种不可信的结果，因为它无法代表模型在未知真实数据上的实际能力。...
+
+【维度评分】
+  unknown: 95.0 (weight=0.3)
+  unknown: 30.0 (weight=0.25)
+  unknown: 80.0 (weight=0.2)
+  unknown: 85.0 (weight=0.15)
+  unknown: 90.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 11:29:40 UTC
+============================================================

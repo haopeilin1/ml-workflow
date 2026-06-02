@@ -1,0 +1,215 @@
+【任务描述】（优先级最高，其中的明确指令必须严格遵守）：
+基于历史交易数据构建支付欺诈二分类模型。数据集包含账户年龄、商品数量、交易时间、支付方式、支付方式绑定时长、商品类目及是否周末等特征，目标变量为0（正常）/1（欺诈）。训练集含标签用于建模，测试集无标签需预测。要求模型对缺失值与类别偏移具备一定容忍度。评估指标：准确率（Accuracy）。
+
+【重点信号】（以下信号由数据画像自动检测，强烈建议参考）：
+（无特殊信号）
+
+【数据画像】（供参考和验证，当与任务描述冲突时，以任务描述为准）：
+{
+  "row_count": 25100,
+  "col_count": 9,
+  "columns": [
+    {
+      "name": "id",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 25100,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "isLikelyId": true,
+      "sampleValues": [
+        4948.0,
+        16197.0,
+        29297.0,
+        16441.0,
+        16849.0
+      ],
+      "min": 0.0,
+      "max": 31375.0,
+      "mean": 15621.524422310757,
+      "std": 9038.08620509719,
+      "median": 15594.5,
+      "skewness": 0.008304362684767967,
+      "isMonotonic": false
+    },
+    {
+      "name": "accountAgeDays",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 1982,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        2000.0,
+        9.0,
+        482.0,
+        80.0,
+        28.0
+      ],
+      "min": 1.0,
+      "max": 2000.0,
+      "mean": 855.9953386454183,
+      "std": 804.8375998127685,
+      "median": 602.0,
+      "skewness": 0.36380583713077236
+    },
+    {
+      "name": "numItems",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 13,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "min": 1.0,
+      "max": 29.0,
+      "mean": 1.0845418326693228,
+      "std": 0.5748005934088644,
+      "median": 1.0,
+      "skewness": 14.504097870599308
+    },
+    {
+      "name": "localTime",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 24,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        5.034622,
+        4.836982,
+        4.505662,
+        4.886641,
+        4.745402
+      ],
+      "min": 2.596228,
+      "max": 5.040929,
+      "mean": 4.747858879840637,
+      "std": 0.3892682928384681,
+      "median": 4.886641,
+      "skewness": -2.9091251779788783
+    },
+    {
+      "name": "paymentMethod",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        "creditcard",
+        "creditcard",
+        "paypal",
+        "creditcard",
+        "creditcard"
+      ],
+      "mostCommon": "creditcard",
+      "mostCommonFreq": 17938,
+      "cardinality": "low"
+    },
+    {
+      "name": "paymentMethodAgeDays",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 11144,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        2.241666667,
+        0.001388889,
+        0.00625,
+        79.07291667,
+        27.07361111
+      ],
+      "min": 0.0,
+      "max": 1999.580556,
+      "mean": 122.16100597650805,
+      "std": 284.0171864219487,
+      "median": 0.011111111,
+      "skewness": 3.252781561353926
+    },
+    {
+      "name": "Category",
+      "type": "categorical",
+      "originalDtype": "str",
+      "uniqueCount": 3,
+      "missingCount": 59,
+      "missingRate": 0.24,
+      "sampleValues": [
+        "food",
+        "food",
+        "electronics",
+        "shopping",
+        "electronics"
+      ],
+      "mostCommon": "shopping",
+      "mostCommonFreq": 8488,
+      "cardinality": "low"
+    },
+    {
+      "name": "isWeekend",
+      "type": "numeric",
+      "originalDtype": "float64",
+      "uniqueCount": 2,
+      "missingCount": 358,
+      "missingRate": 1.43,
+      "sampleValues": [
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.49777705925147525,
+      "std": 0.500005162992576,
+      "median": 0.0,
+      "skewness": 0.008892389988145746
+    },
+    {
+      "name": "label",
+      "type": "numeric",
+      "originalDtype": "int64",
+      "uniqueCount": 2,
+      "missingCount": 0,
+      "missingRate": 0.0,
+      "sampleValues": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.014262948207171314,
+      "std": 0.11857519419350876,
+      "median": 0.0,
+      "skewness": 8.19354777073967
+    }
+  ]
+}
+
+【提取要求】
+1. 如果任务描述中明确提到了目标列名（如"预测charges列""判断是否会Churn""目标列为fraud_bool"），必须直接选择该列，不要再看数据统计推断。
+2. 如果任务描述中明确提到了任务类型（如"二分类""回归""多分类"），必须直接采用，不要被数据的统计特征误导。
+3. 如果任务描述中明确提到了评估指标（如"以AUC为评估标准"），必须直接采用。
+4. 只有在任务描述未明确说明时，才结合数据画像进行推断。
+5. 必须同时判定 complexity（simple 或 complex），参考标准见 system prompt。
+6. 必须同时判定 is_time_series（true 或 false），参考标准见 system prompt。
+
+请严格输出 JSON：
+{
+  "target_column": "列名",
+  "task_type": "binary_classification/multiclass_classification/regression",
+  "eval_metric": "用户指定的评估指标名称（开放取值）",
+  "complexity": "simple/complex",
+  "is_time_series": true/false
+}

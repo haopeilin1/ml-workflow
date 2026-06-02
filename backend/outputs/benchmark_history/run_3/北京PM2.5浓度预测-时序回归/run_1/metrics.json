@@ -1,0 +1,13 @@
+{
+  "val_metrics": null,
+  "test_metrics": null,
+  "best_score": null,
+  "task_type": "regression",
+  "target_column": "pm2.5",
+  "eval_metric": "RMSE",
+  "complexity": "complex",
+  "complexity_reason": "时序任务强制complex",
+  "is_time_series": true,
+  "intent_recognized": true,
+  "prediction_strategy": null
+}

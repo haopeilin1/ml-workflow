@@ -1,0 +1,65 @@
+============================================================
+  任务运行摘要: 成人收入预测-二分类含缺失值 (第 1 次运行)
+============================================================
+
+【基本信息】
+  任务类型: binary_classification
+  目标列: income
+  评估指标: AUC
+  复杂度判定: simple (LLM判定为simple，无复杂信号触发)
+  时序任务: 否
+  意图识别: ✅ 成功
+  预测策略: embedded_best
+  运行结果: ✅ 成功
+  评审通过: ✅ 是
+
+【核心指标】
+  Best Score: 89.20
+  总耗时: 0.0s
+  验证集 AUC: 0.9234
+  测试集 F1: 0.7199
+  测试集 AUC: 0.9266
+
+【各阶段耗时】
+  意图识别: 1.1s
+  代码生成: 73.0s
+  沙箱执行: 23.6s
+  评估优化: 21.3s
+  产物生成: 201.6s
+  测试预测: 0.0s
+  总计: 402.5s
+
+【Token 消耗】
+  Plan/Coding 调用: 9 次, 120990 tokens
+  Evaluation 调用: 4 次, 9576 tokens
+  总计: 13 次, 130566 tokens
+
+【LLM 使用追踪】
+  intent      : qwen3.5-flash@openai | 1calls | 4625tokens | 1.0s
+    - qwen3.5-flash@openai: 1 calls, 4625 tokens, 1.0s
+  plan_coding : deepseek-v4-flash@openai | 9calls | 120990tokens | 333.7s
+    - deepseek-v4-flash@openai: 7 calls, 95479 tokens, 142.5s
+    - deepseek-v4-pro@openai: 2 calls, 25511 tokens, 191.2s
+  evaluation  : deepseek-v4-flash@openai | 4calls | 9576tokens | 21.3s
+    - deepseek-v4-flash@openai: 4 calls, 9576 tokens, 21.3s
+  judge       : qwen3.5-flash@openai | 1calls | 1589tokens | 2.4s
+    - qwen3.5-flash@openai: 1 calls, 1589 tokens, 2.4s
+
+【产物生成】
+  完整性: simplified
+  生成文件: test_predictions.csv, model.pkl, feature_importance.csv, report.html, report_fig.png, predict.py
+
+【评审分析】
+  本次评估以【建模时使用的主要指标：AUC】为核心标准。模型在验证集上的 AUC 为 0.9234，在测试集上达到了 0.9266。测试集核心指标不仅远超二分类任务的可接受基线（通常 AUC > 0.7），且表现略优于验证集，相对差距为负值（-0.35%），表明模型具有极佳的泛化能力，不存在过拟合现象。同时，测试集 Accuracy (0.8422) 和 F1 (0.7199) 也处于优秀水平，与 AUC 表现一致。预测策略未显示使用通用回退模板，特征工程一致性得到保障。...
+
+【维度评分】
+  unknown: 92.0 (weight=0.3)
+  unknown: 85.0 (weight=0.25)
+  unknown: 90.0 (weight=0.2)
+  unknown: 88.0 (weight=0.15)
+  unknown: 90.0 (weight=0.1)
+
+============================================================
+  结果目录: N/A
+  生成时间: 2026-05-27 13:50:01 UTC
+============================================================
