@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.api import files, tasks, evaluate
+from app.api import files, tasks, evaluate, config, llm
 
 
 def create_app() -> FastAPI:
@@ -32,6 +32,8 @@ def create_app() -> FastAPI:
     app.include_router(files.router)
     app.include_router(tasks.router)
     app.include_router(evaluate.router)
+    app.include_router(config.router)
+    app.include_router(llm.router)
     
     # 挂载产物文件目录，供前端下载
     app.mount("/artifacts", StaticFiles(directory=str(settings.OUTPUT_DIR)), name="artifacts")

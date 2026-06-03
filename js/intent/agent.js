@@ -29,7 +29,7 @@ const IntentAgent = {
 
     /**
      * 调用真实 LLM API
-     * 支持：OpenAI 兼容格式 / Ollama 本地格式
+     * 通过后端代理，避免前端直接暴露 API Key 和遇到 CORS 问题
      */
     async _callRealLLM({ dataProfile, dialogueHistory, userInput }) {
         const config = AppState.llmConfig;
@@ -38,7 +38,6 @@ const IntentAgent = {
         if (config.useSeparateConfigs && config.intent) {
             agentConfig = { ...config, ...config.intent };
         }
-        const provider = agentConfig.provider || 'openai';
         const systemPrompt = this._buildSystemPrompt();
 
         // 构建对话历史
@@ -54,52 +53,27 @@ const IntentAgent = {
         const userPayload = this._buildUserPayload(dataProfile, userInput);
         messages.push({ role: 'user', content: userPayload });
 
-        let response, content;
+        // 通过后端代理调用 LLM
+        const apiBase = window.FastEngine?.API_BASE || 'http://localhost:8002';
+        const response = await fetch(`${apiBase}/api/llm/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: agentConfig.model,
+                messages: messages,
+                temperature: 0.3,
+                max_tokens: 1500,
+                stream: false
+            })
+        });
 
-        if (provider === 'ollama') {
-            // Ollama 原生格式
-            response = await fetch(`${agentConfig.baseUrl}/api/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model: agentConfig.model,
-                    messages: messages,
-                    stream: false,
-                    options: { temperature: 0.3 }
-                })
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`HTTP ${response.status}: ${errorText}`);
-            }
-
-            const data = await response.json();
-            content = data.message?.content;
-        } else {
-            // OpenAI 兼容格式（云端 + local-openai）
-            const headers = { 'Content-Type': 'application/json' };
-            if (agentConfig.apiKey) headers['Authorization'] = `Bearer ${agentConfig.apiKey}`;
-
-            response = await fetch(`${agentConfig.baseUrl}/chat/completions`, {
-                method: 'POST',
-                headers: headers,
-                body: JSON.stringify({
-                    model: agentConfig.model,
-                    messages: messages,
-                    temperature: 0.3,
-                    max_tokens: 1500
-                })
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`HTTP ${response.status}: ${errorText}`);
-            }
-
-            const data = await response.json();
-            content = data.choices?.[0]?.message?.content;
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`HTTP ${response.status}: ${errorText}`);
         }
+
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content;
 
         if (!content) {
             throw new Error('LLM returned empty content');

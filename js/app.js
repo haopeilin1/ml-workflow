@@ -4,11 +4,72 @@
  */
 
 const App = {
-    init() {
+    async init() {
         this.bindEvents();
         Terminal.init();
         this.loadLLMConfig();
+        await this.autoLoadBackendLLMConfig();
         console.log('[ML Agent] App initialized');
+    },
+
+    /**
+     * 自动从后端拉取 LLM 配置
+     * 测试阶段：后端 ALLOW_FRONTEND_LLM_CONFIG=true 时自动填充
+     * 上线阶段：后端关闭后，回退到用户手动配置
+     */
+    async autoLoadBackendLLMConfig() {
+        try {
+            const apiBase = window.FastEngine?.API_BASE || 'http://localhost:8002';
+            const response = await fetch(`${apiBase}/api/config/llm`, {
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (!response.ok) {
+                console.log('[App] Backend LLM config not available');
+                return;
+            }
+
+            const config = await response.json();
+            console.log('[App] Backend LLM config:', config);
+
+            // 如果后端关闭了配置暴露，不做任何修改（让用户手动配置）
+            if (!config.api_key && config.message && config.message.includes('关闭')) {
+                console.log('[App] Backend config sharing disabled');
+                return;
+            }
+
+            // 自动填充配置
+            const provider = config.provider || 'openai';
+            const baseUrl = config.base_url || 'https://api.openai.com/v1';
+            const model = config.model || 'gpt-4o-mini';
+            const apiKey = config.api_key || '';
+
+            // 更新状态
+            AppState.llmConfig.enabled = true;
+            AppState.llmConfig.provider = provider;
+            AppState.llmConfig.baseUrl = baseUrl;
+            AppState.llmConfig.model = model;
+            AppState.llmConfig.apiKey = apiKey;
+
+            // 同步到 localStorage（这样刷新页面后仍然保留）
+            localStorage.setItem('mlworkflow_provider', provider);
+            localStorage.setItem('mlworkflow_base_url', baseUrl);
+            localStorage.setItem('mlworkflow_model', model);
+            if (apiKey) {
+                localStorage.setItem('mlworkflow_api_key', apiKey);
+            }
+
+            // 更新 UI
+            this.loadLLMConfig();
+            this.updateLLMStatusDot();
+
+            Terminal.info(`已自动同步后端 LLM 配置：${model} @ ${provider}`);
+
+        } catch (err) {
+            console.warn('[App] Failed to auto-load backend LLM config:', err);
+            // 静默失败，不影响用户使用手动配置
+        }
     },
 
     bindEvents() {
@@ -214,59 +275,33 @@ const App = {
     },
 
     async testLLMConfig() {
-        const provider = document.getElementById('llm-provider').value;
-        const apiKey = document.getElementById('llm-api-key').value.trim();
-        const baseUrl = document.getElementById('llm-base-url').value.trim();
         const model = document.getElementById('llm-model').value.trim();
 
-        if (provider === 'openai' && !apiKey) {
-            alert('云端 API 需要输入 API Key');
-            return;
-        }
-
         try {
-            let response;
-            if (provider === 'ollama') {
-                response = await fetch(`${baseUrl}/api/chat`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        model: model,
-                        messages: [{ role: 'user', content: 'Hello' }],
-                        stream: false
-                    })
-                });
-            } else {
-                const headers = { 'Content-Type': 'application/json' };
-                if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-                response = await fetch(`${baseUrl}/chat/completions`, {
-                    method: 'POST',
-                    headers: headers,
-                    body: JSON.stringify({
-                        model: model,
-                        messages: [{ role: 'user', content: 'Hello' }],
-                        max_tokens: 5
-                    })
-                });
-            }
+            // 通过后端代理测试 LLM 连接
+            const apiBase = window.FastEngine?.API_BASE || 'http://localhost:8002';
+            const response = await fetch(`${apiBase}/api/llm/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: model,
+                    messages: [{ role: 'user', content: 'Hello' }],
+                    temperature: 0.3,
+                    max_tokens: 5,
+                    stream: false
+                })
+            });
 
             if (response.ok) {
                 const data = await response.json();
-                const content = data.message?.content || data.choices?.[0]?.message?.content;
+                const content = data.choices?.[0]?.message?.content;
                 alert(`连接成功！模型返回："${content?.substring(0, 50)}..."`);
             } else {
                 const err = await response.text();
                 alert(`连接失败：HTTP ${response.status}\n${err.substring(0, 200)}`);
             }
         } catch (err) {
-            let hint = '';
-            if (provider === 'ollama') {
-                hint = '【Ollama 常见原因】\n1. Ollama 未启动：在终端运行 `ollama serve`\n2. CORS 跨域限制：运行 `OLLAMA_ORIGINS=* ollama serve` 允许浏览器访问\n3. 模型未下载：运行 `ollama pull ' + model + '`\n4. 端口被占用：检查是否有其他服务占用了 11434 端口';
-            } else if (provider === 'local-openai') {
-                hint = '【本地服务常见原因】\n1. 服务未启动：请启动 LM Studio / vLLM / text-generation-webui\n2. 端口不对：检查服务实际监听的端口（LM Studio 默认 1234，vLLM 默认 8000）\n3. 防火墙/代理：检查是否被系统防火墙或代理软件拦截';
-            } else {
-                hint = '【云端 API 常见原因】\n1. 网络问题：检查网络连接或代理设置\n2. Key 无效：确认 API Key 是否正确\n3. Base URL 错误：确认接口地址是否完整（需包含 /v1）';
-            }
+            const hint = '【常见原因】\n1. 后端服务未启动：请确认后端在运行\n2. 后端 LLM 配置错误：检查 backend/.env 中的 LLM_BASE_URL 和 LLM_API_KEY\n3. 网络问题：检查与后端服务的连接';
             alert(`连接失败：${err.message}\n\n${hint}`);
         }
     },
@@ -620,6 +655,6 @@ window.switchTab = function(tab) {
 };
 
 // ===================== 初始化 =====================
-document.addEventListener('DOMContentLoaded', () => {
-    App.init();
+document.addEventListener('DOMContentLoaded', async () => {
+    await App.init();
 });

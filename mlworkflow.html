@@ -17,17 +17,24 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <!-- Local Styles -->
     <link rel="stylesheet" href="css/main.css">
+    <!-- Responsive Base Font Size -->
+    <style>
+        html { font-size: calc(15px + 0.35vw); }
+        @media (max-width: 1280px) { html { font-size: 15px; } }
+        @media (min-width: 1920px) { html { font-size: calc(15px + 0.4vw); } }
+        @media (min-width: 2560px) { html { font-size: calc(15px + 0.5vw); } }
+    </style>
     <!-- Code Editor Styles -->
     <style>
-        .code-editor-container { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; background: #1e1e1e; border-radius: 12px; }
+        .code-editor-container { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; background: #1e1e1e; border-radius: 12px; min-width: 0; }
         .code-editor-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #252526; border-bottom: 1px solid #333; }
-        .code-editor-lang { font-size: 11px; color: #9cdcfe; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-        .code-editor-copy { font-size: 11px; color: #858585; background: none; border: none; cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; transition: all 0.2s; }
+        .code-editor-lang { font-size: 0.75rem; color: #9cdcfe; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        .code-editor-copy { font-size: 0.75rem; color: #858585; background: none; border: none; cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; transition: all 0.2s; }
         .code-editor-copy:hover { color: #fff; background: #3c3c3c; }
         .code-editor-body { padding: 12px 0; overflow-x: auto; }
-        .code-line { display: flex; min-height: 20px; line-height: 20px; }
-        .code-line-num { color: #858585; text-align: right; padding: 0 12px; user-select: none; font-size: 12px; }
-        .code-line-content { color: #d4d4d4; font-size: 13px; white-space: pre; padding-right: 16px; }
+        .code-line { display: flex; min-height: 1.625rem; line-height: 1.625rem; }
+        .code-line-num { color: #858585; text-align: right; padding: 0 0.75rem; user-select: none; font-size: 0.875rem; min-width: 2.5rem; }
+        .code-line-content { color: #d4d4d4; font-size: 0.95rem; white-space: pre; padding-right: 1rem; }
         .code-keyword { color: #569cd6; font-weight: 600; }
         .code-string { color: #ce9178; }
         .code-number { color: #b5cea8; }
@@ -204,7 +211,7 @@
     <script src="js/shared/renderer.js"></script>
     <!-- Intent Clarification Module -->
     <script src="js/intent/profiler.js"></script>
-    <script src="js/intent/agent.js"></script>
+    <script src="js/intent/agent.js?v=1"></script>
     <script src="js/intent/flow.js"></script>
     <!-- LLM Config Modal -->
     <div id="llm-config-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/30 backdrop-blur-sm">
@@ -351,6 +358,6 @@
     <script src="js/depth/engine.js"></script>
     <script src="js/depth/ui.js"></script>
     <!-- App Entry -->
-    <script src="js/app.js"></script>
+    <script src="js/app.js?v=1"></script>
 </body>
 </html>

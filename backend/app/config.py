@@ -147,6 +147,9 @@ class Settings(BaseSettings):
         else sys.executable
     )
     
+    # 前端 LLM 配置暴露开关（测试阶段开启，上线关闭）
+    ALLOW_FRONTEND_LLM_CONFIG: bool = False
+    
     # 快速模式限制
     FAST_MAX_OPTIMIZE_ROUNDS: int = 3
     FAST_MAX_DEBUG_ROUNDS: int = 3

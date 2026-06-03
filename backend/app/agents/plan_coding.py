@@ -130,6 +130,43 @@ def evaluate_model(model, X_val, y_val):
    pipeline.fit(X_train, y_train)
    ```
    
+   【preprocess() 中使用 ColumnTransformer 的正确写法 - 必须照抄】
+   ```python
+   def preprocess(df, mode='train'):
+       df = df.copy()
+       target_col = 'TargetName'
+       
+       cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+       if target_col in cat_cols: cat_cols.remove(target_col)
+       num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+       if target_col in num_cols: num_cols.remove(target_col)
+       
+       if mode == 'train':
+           preprocessor = ColumnTransformer([
+               ('cat', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))]), cat_cols),
+               ('num', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), num_cols)
+           ], remainder='passthrough')
+           preprocessor.fit(df)
+           PREPROCESS_STATE['preprocessor'] = preprocessor
+       else:
+           preprocessor = PREPROCESS_STATE['preprocessor']
+       
+       # 关键：必须使用 get_feature_names_out()，严禁手动拼接列名
+       transformed = preprocessor.transform(df)
+       all_feature_names = preprocessor.get_feature_names_out()
+       result_df = pd.DataFrame(transformed, columns=all_feature_names)
+       return result_df
+   ```
+   
+   【绝对禁止】以下写法会导致列数不匹配（ValueError: Shape mismatch）：
+   ```python
+   # 错误！严禁手动拼接列名
+   num_feature_names = num_cols
+   cat_feature_names = cat_encoder.get_feature_names_out(cat_cols)
+   remainder_cols = [col for col in df.columns if col not in num_cols + cat_cols]
+   all_feature_names = list(num_feature_names) + list(cat_feature_names) + remainder_cols
+   result_df = pd.DataFrame(transformed, columns=all_feature_names)  # 会报错！
+   ```
 3. 算法优选：优先使用 Scikit-Learn, LightGBM, XGBoost 等快速且效果好的树模型。
 4. 【关键版本兼容性 - 必须严格遵守】沙箱中 LightGBM 版本为 4.6.0，与网上旧教程的 API 完全不同。以下参数在 LGBMClassifier.fit() 中**已被移除**，使用会导致代码执行失败：
    - ❌ early_stopping_rounds（已移除）
@@ -297,6 +334,21 @@ def evaluate_model(model, X_val, y_val):
    (e) JSON 序列化 TypeError
    - `json.dumps()` 不能序列化 `numpy.bool_` / `numpy.int64` 等 numpy 标量，会报 `TypeError: Object of type bool_ is not JSON serializable`
    - 正确做法：输出指标前统一转换：`float(val)`, `bool(val)`, `int(val)`。严禁直接 `print(json.dumps({"ok": np.bool_(True)}))`
+   
+   (f) ColumnTransformer 列名不匹配 ValueError
+   - 错误：`pd.DataFrame(transformed, columns=all_feature_names)` 中 `all_feature_names` 的长度与 `transformed.shape[1]` 不一致。
+   - 根因：手动拼接 `num_feature_names + cat_feature_names + remainder_cols` 极易出错，ColumnTransformer 实际输出列数与手动计算不一致。
+   - 正确做法：**必须使用 `preprocessor.get_feature_names_out()`**，它会返回与 `transformed` 完全匹配的列名列表。
+   - 错误示例：
+     ```python
+     all_feature_names = list(num_cols) + list(cat_encoder.get_feature_names_out(cat_cols)) + remainder_cols
+     result_df = pd.DataFrame(transformed, columns=all_feature_names)  # ValueError!
+     ```
+   - 正确示例：
+     ```python
+     all_feature_names = preprocessor.get_feature_names_out()
+     result_df = pd.DataFrame(transformed, columns=all_feature_names)  # 正确
+     ```
    
    (f) 未闭合字符串语法错误预防
    - **严禁在 f-string / print 语句中嵌入过长文本、多行字符串或复杂嵌套表达式**。长文本应赋值给变量，再引用变量。

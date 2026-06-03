@@ -113,6 +113,36 @@ class FastEngine:
         
         # 数据集路径（由 _prepare_data 填充）
         self.datasets: Optional[dict] = None
+    
+    @staticmethod
+    def _fix_common_code_bugs(code: str) -> str:
+        """
+        自动修复 LLM 生成代码中的常见 bug。
+        在沙箱执行前调用，提高代码一次性执行成功率。
+        """
+        if not code:
+            return code
+        
+        # 修复1: ColumnTransformer 手动拼接列名 → 使用 get_feature_names_out()
+        # 检测模式：代码中使用了 ColumnTransformer，且手动构建 all_feature_names
+        has_column_transformer = 'ColumnTransformer' in code
+        has_manual_columns = 'pd.DataFrame(transformed, columns=all_feature_names)' in code
+        has_get_feature_names = 'get_feature_names_out()' in code
+        
+        if has_column_transformer and has_manual_columns and not has_get_feature_names:
+            # 尝试自动修复：找到 ColumnTransformer 的变量名
+            import re
+            preprocessor_match = re.search(r'(\w+)\s*=\s*ColumnTransformer', code)
+            if preprocessor_match:
+                preprocessor_var = preprocessor_match.group(1)
+                # 在 pd.DataFrame(transformed, columns=all_feature_names) 之前插入正确的列名获取
+                code = code.replace(
+                    'pd.DataFrame(transformed, columns=all_feature_names)',
+                    f'pd.DataFrame(transformed, columns={preprocessor_var}.get_feature_names_out())'
+                )
+                logger.info(f"[FastEngine] 自动修复 ColumnTransformer 列名不匹配问题，变量名: {preprocessor_var}")
+        
+        return code
         
         # 各阶段耗时记录（供评测系统使用）
         self.timings: Dict[str, float] = {
@@ -491,7 +521,7 @@ class FastEngine:
                 logger.info(f"[FastEngine] 开始沙箱执行产物代码, data_dir={data_dir}")
                 
                 result = self.sandbox.execute(
-                    code=code_output.code,
+                    code=self._fix_common_code_bugs(code_output.code),
                     data_dir=data_dir,
                     task_type=tc.extracted_slots.task_type or "binary_classification",
                     artifact_mode=True,
@@ -1004,7 +1034,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             
             self._start_timing("sandbox_execution_seconds")
             result = self.sandbox.execute(
-                code=self.state.code,
+                code=self._fix_common_code_bugs(self.state.code),
                 data_dir=data_dir,
                 task_type=tc.extracted_slots.task_type or "binary_classification"
             )
@@ -1453,7 +1483,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             
             data_dir = self.datasets["train"].parent if self.datasets else settings.OUTPUT_DIR / self.task_id / "data"
             result = self.sandbox.execute(
-                code=self.state.code,
+                code=self._fix_common_code_bugs(self.state.code),
                 data_dir=data_dir,
                 task_type=tc.extracted_slots.task_type or "binary_classification"
             )
@@ -1520,7 +1550,7 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             self.state.code = self.state.best_code
             data_dir = self.datasets["train"].parent if self.datasets else settings.OUTPUT_DIR / self.task_id / "data"
             result = self.sandbox.execute(
-                code=self.state.code,
+                code=self._fix_common_code_bugs(self.state.code),
                 data_dir=data_dir,
                 task_type=tc.extracted_slots.task_type or "binary_classification"
             )

@@ -99,7 +99,7 @@ def run_benchmark(batch_dir: Path, num_runs: int = 3, max_wait: int = 1800, outp
     python_exe = settings.PYTHON_EXECUTABLE
     
     cmd = [
-        python_exe, "-m", "scripts.run_benchmark",
+        python_exe, "scripts/run_benchmark.py",
         "--benchmark-dir", str(batch_dir),
         "--num-runs", str(num_runs),
         "--max-wait", str(max_wait),
@@ -149,7 +149,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"批量 Benchmark 测试 - {batch_name}")
     logger.info(f"任务数: {len(tasks)}, 每任务运行: {args.num_runs} 次")
-    logger.info(f"并发: 3 任务并行")
+    logger.info(f"执行方式: 串行（任务间串行，每任务内多轮次串行）")
     logger.info("=" * 60)
     
     # 创建临时目录
