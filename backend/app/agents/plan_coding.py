@@ -597,7 +597,8 @@ class PlanCodingAgent(BaseAgent):
         evaluation_history: Optional[List[Dict[str, Any]]] = None,
         best_evaluation: Optional[Any] = None,
         best_metrics: Optional[Any] = None,
-        optimization_history: Optional[List[Dict[str, Any]]] = None
+        optimization_history: Optional[List[Dict[str, Any]]] = None,
+        force_max_tokens: Optional[int] = None,
     ) -> CodeOutput:
         """
         生成建模计划与代码
@@ -619,11 +620,11 @@ class PlanCodingAgent(BaseAgent):
         if is_complex:
             result = self._generate_complex(
                 task_config, run_state, context_payload, previous_code, evaluation_history,
-                best_evaluation, best_metrics, optimization_history
+                best_evaluation, best_metrics, optimization_history, force_max_tokens
             )
         else:
             result = self._generate_simple(
-                task_config, run_state, context_payload, previous_code
+                task_config, run_state, context_payload, previous_code, force_max_tokens
             )
         
         # 【统一后处理】对所有生成的训练代码做 sanitize 和语法检查
@@ -638,7 +639,8 @@ class PlanCodingAgent(BaseAgent):
         task_config: TaskConfig,
         run_state: str,
         context_payload: str,
-        previous_code: str
+        previous_code: str,
+        force_max_tokens: Optional[int] = None,
     ) -> CodeOutput:
         """简单任务：单步 Plan + Coding（使用 _simple_llm）"""
         user_prompt = self._build_user_prompt(
@@ -651,10 +653,19 @@ class PlanCodingAgent(BaseAgent):
         original_llm = self.llm
         if self._unified_llm is not original_llm:
             self.llm = self._unified_llm
+        
+        # 【修复】支持外部强制指定 max_tokens
+        original_max_tokens = self.llm.max_tokens
+        if force_max_tokens:
+            self.llm.max_tokens = max(force_max_tokens, original_max_tokens)
+        
         try:
             response = self._call_llm(PLAN_CODING_SYSTEM_PROMPT, user_prompt)
         finally:
             self.llm = original_llm
+            # 恢复 max_tokens
+            if self.llm is not None:
+                self.llm.max_tokens = original_max_tokens
         
         plan, code = self._parse_response(response)
         
@@ -679,7 +690,8 @@ class PlanCodingAgent(BaseAgent):
         evaluation_history: Optional[List[Dict[str, Any]]] = None,
         best_evaluation: Optional[Any] = None,
         best_metrics: Optional[Any] = None,
-        optimization_history: Optional[List[Dict[str, Any]]] = None
+        optimization_history: Optional[List[Dict[str, Any]]] = None,
+        force_max_tokens: Optional[int] = None,
     ) -> CodeOutput:
         """复杂任务：Plan + Coding 分离"""
         
@@ -699,7 +711,8 @@ class PlanCodingAgent(BaseAgent):
                 structured_plan=formatted_plan,
                 run_state=run_state,
                 context_payload=context_payload,
-                previous_code=previous_code
+                previous_code=previous_code,
+                force_max_tokens=force_max_tokens,
             )
             # 合并 plan（结构化计划）和 coding plan
             combined_plan = f"{formatted_plan}\n\n{'='*60}\n【Coding Agent 实现计划】\n{'='*60}\n{code_output.plan}"
@@ -720,7 +733,8 @@ class PlanCodingAgent(BaseAgent):
                 structured_plan=formatted_plan,
                 run_state=run_state,
                 context_payload=context_payload,
-                previous_code=previous_code
+                previous_code=previous_code,
+                force_max_tokens=force_max_tokens,
             )
             
             combined_plan = f"{formatted_plan}\n\n{'='*60}\n【Coding Agent DEBUG 计划】\n{'='*60}\n{code_output.plan}"
@@ -749,7 +763,8 @@ class PlanCodingAgent(BaseAgent):
                 structured_plan=formatted_plan,
                 run_state=run_state,
                 context_payload="",  # 优化计划已包含所有方向
-                previous_code=previous_code
+                previous_code=previous_code,
+                force_max_tokens=force_max_tokens,
             )
             
             combined_plan = f"{formatted_plan}\n\n{'='*60}\n【Coding Agent OPTIMIZE 计划】\n{'='*60}\n{code_output.plan}"
@@ -767,7 +782,8 @@ class PlanCodingAgent(BaseAgent):
             structured_plan=formatted_plan,
             run_state=run_state,
             context_payload=context_payload,
-            previous_code=previous_code
+            previous_code=previous_code,
+            force_max_tokens=force_max_tokens,
         )
         combined_plan = f"{formatted_plan}\n\n{'='*60}\n【Coding Agent {run_state} 计划】\n{'='*60}\n{code_output.plan}"
         return CodeOutput(plan=combined_plan, code=code_output.code, raw_response=code_output.raw_response)
@@ -1387,15 +1403,17 @@ class PlanCodingAgent(BaseAgent):
     
     def _fix_unterminated_strings(self, code: str) -> str:
         """
-        修复产物代码中未闭合的字符串（常见于 LLM 输出被截断时）
+        修复产物代码中未闭合的字符串和括号（常见于 LLM 输出被截断时）
         
         主要场景：
         - HTML 报告使用 f'''...'''，但闭合在代码末尾被截断
         - 代码中的多行注释/文档字符串未闭合
         - 代码末尾的单行字符串（如 print 参数）被截断
         - f-string 嵌套复杂表达式导致未闭合
+        - 括号未闭合（()、[]、{}）
         """
         import re
+        import ast
         
         lines = code.split('\n')
         if not lines:
@@ -1501,6 +1519,62 @@ class PlanCodingAgent(BaseAgent):
                 code = '\n'.join(lines)
                 return code
         
+        # ========== 策略4: 修复括号不平衡 ==========
+        def _count_brackets(text: str) -> dict:
+            counts = {'(': 0, ')': 0, '[': 0, ']': 0, '{': 0, '}': 0}
+            in_string = None
+            i = 0
+            while i < len(text):
+                if text[i] == '\\' and i + 1 < len(text):
+                    i += 2
+                    continue
+                if text[i:i+3] in ('"""', "'''"):
+                    if in_string == text[i:i+3]:
+                        in_string = None
+                    elif in_string is None:
+                        in_string = text[i:i+3]
+                    i += 3
+                    continue
+                if in_string is None:
+                    if text[i] in ('"', "'"):
+                        in_string = text[i]
+                    elif text[i] in counts:
+                        counts[text[i]] += 1
+                else:
+                    if text[i] == in_string:
+                        in_string = None
+                i += 1
+            return counts
+        
+        counts = _count_brackets(code)
+        if counts['('] != counts[')'] or counts['['] != counts[']'] or counts['{'] != counts['}']:
+            logger.info(f"[PlanCodingAgent] 检测到括号不平衡，尝试截断到最后一行完整语句")
+            lines = code.split('\n')
+            for cut_idx in range(len(lines) - 1, 0, -1):
+                test_code = '\n'.join(lines[:cut_idx])
+                c = _count_brackets(test_code)
+                if c['('] == c[')'] and c['['] == c[']'] and c['{'] == c['}']:
+                    try:
+                        ast.parse(test_code)
+                        logger.info(f"[PlanCodingAgent] 截断到第 {cut_idx} 行后语法通过")
+                        return test_code
+                    except SyntaxError:
+                        continue
+            
+            # 尝试补全括号
+            extra = []
+            extra.extend([')'] * (counts['('] - counts[')']))
+            extra.extend([']'] * (counts['['] - counts[']']))
+            extra.extend(['}'] * (counts['{'] - counts['}']))
+            if extra:
+                fixed = code.rstrip() + '\n' + ''.join(extra)
+                try:
+                    ast.parse(fixed)
+                    logger.info(f"[PlanCodingAgent] 自动补全括号后语法通过")
+                    return fixed
+                except SyntaxError:
+                    pass
+        
         return code
     
     def _sanitize_training_code(self, code: str) -> str:
@@ -1529,7 +1603,7 @@ class PlanCodingAgent(BaseAgent):
     def _ensure_code_valid(self, code: str, label: str = "代码") -> str:
         """
         确保代码语法有效。先尝试 ast.parse，失败则尝试 _fix_unterminated_strings。
-        返回修复后的代码（或原始代码如果无法修复）。
+        返回修复后的代码；若无法修复，返回空字符串以阻止错误代码继续流转。
         """
         if not code:
             return code
@@ -1547,7 +1621,8 @@ class PlanCodingAgent(BaseAgent):
                 return fixed
             except SyntaxError as e2:
                 logger.error(f"[PlanCodingAgent] {label} 自动修复失败，仍有语法错误: {e2}")
-                return code
+                # 【关键修复】返回空字符串，阻止错误代码流入下游
+                return ""
 
 
 import json

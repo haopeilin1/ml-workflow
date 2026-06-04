@@ -585,7 +585,8 @@ class CodingAgent(BaseAgent):
         structured_plan: str,
         run_state: str = "INIT",
         context_payload: str = "",
-        previous_code: str = ""
+        previous_code: str = "",
+        force_max_tokens: Optional[int] = None,
     ) -> CodeOutput:
         """
         生成代码
@@ -614,8 +615,12 @@ class CodingAgent(BaseAgent):
             system_prompt = CODING_AGENT_SYSTEM_PROMPT
         
         # 训练代码通常很长（300+ 行，10k-15k 字符），临时增加 max_tokens
+        # 【修复】支持外部强制指定 max_tokens（用于连续语法错误时提升 token 预算）
         original_max_tokens = self.llm.max_tokens
-        self.llm.max_tokens = max(original_max_tokens, 16384)
+        if force_max_tokens:
+            self.llm.max_tokens = max(force_max_tokens, original_max_tokens)
+        else:
+            self.llm.max_tokens = max(original_max_tokens, 16384)
         try:
             response = self._call_llm(system_prompt, user_prompt)
         finally:

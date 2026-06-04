@@ -113,6 +113,33 @@ class FastEngine:
         
         # 数据集路径（由 _prepare_data 填充）
         self.datasets: Optional[dict] = None
+        
+        # 连续语法错误计数器（用于 max_tokens 兜底策略）
+        self._syntax_error_count = 0
+        
+        # 各阶段耗时记录（供评测系统使用）
+        self.timings: Dict[str, float] = {
+            "code_generation_seconds": 0.0,
+            "sandbox_execution_seconds": 0.0,
+            "evaluation_seconds": 0.0,
+            "artifact_generation_seconds": 0.0,
+        }
+        self._timing_stack: List[tuple] = []  # 嵌套计时栈
+        
+        # 【新增】评估历史记录，用于避免重复犯错，传给 EvaluationAgent
+        self._evaluation_history: List[Dict[str, Any]] = []
+        
+        # 【新增】优化/调试历史记录，传给 PlanAgent 避雷
+        # 从持久化状态加载，确保任务重启后历史不丢失
+        self._optimization_history: List[Dict[str, Any]] = []
+        if self.state and self.state.optimization_history:
+            for rec in self.state.optimization_history:
+                if isinstance(rec, dict):
+                    self._optimization_history.append(rec)
+                elif hasattr(rec, 'model_dump'):
+                    self._optimization_history.append(rec.model_dump())
+                else:
+                    self._optimization_history.append(dict(rec))
     
     @staticmethod
     def _fix_common_code_bugs(code: str) -> str:
@@ -143,30 +170,6 @@ class FastEngine:
                 logger.info(f"[FastEngine] 自动修复 ColumnTransformer 列名不匹配问题，变量名: {preprocessor_var}")
         
         return code
-        
-        # 各阶段耗时记录（供评测系统使用）
-        self.timings: Dict[str, float] = {
-            "code_generation_seconds": 0.0,
-            "sandbox_execution_seconds": 0.0,
-            "evaluation_seconds": 0.0,
-            "artifact_generation_seconds": 0.0,
-        }
-        self._timing_stack: List[tuple] = []  # 嵌套计时栈
-        
-        # 【新增】评估历史记录，用于避免重复犯错，传给 EvaluationAgent
-        self._evaluation_history: List[Dict[str, Any]] = []
-        
-        # 【新增】优化/调试历史记录，传给 PlanAgent 避雷
-        # 从持久化状态加载，确保任务重启后历史不丢失
-        self._optimization_history: List[Dict[str, Any]] = []
-        if self.state and self.state.optimization_history:
-            for rec in self.state.optimization_history:
-                if isinstance(rec, dict):
-                    self._optimization_history.append(rec)
-                elif hasattr(rec, 'model_dump'):
-                    self._optimization_history.append(rec.model_dump())
-                else:
-                    self._optimization_history.append(dict(rec))
     
     def _build_llm_client(self, llm_config: Optional[LLMConfig]):
         """根据配置构建 LLM 客户端"""
@@ -981,6 +984,29 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
         # 2. 获取系统骨架代码
         skeleton = self._get_train_skeleton(tc)
         
+        # 【新增】拦截 PlanCodingAgent 语法检查失败返回的空代码，直接进入 debug 闭环
+        if not code_output.code:
+            self._syntax_error_count += 1
+            init_error = "初始代码生成失败：LLM 返回的代码存在语法错误且无法自动修复"
+            logger.error(f"[FastEngine] {init_error}")
+            self._append_log(f"[ERROR] {init_error}")
+            fake_result = SandboxResult(
+                success=False,
+                stdout="",
+                stderr="",
+                returncode=1,
+                execution_time=0.0,
+                metrics=None,
+                error_message=f"{init_error}。请检查代码末尾是否被截断，或括号/引号/缩进是否完整。"
+            )
+            if not self._debug_loop(fake_result, tc):
+                return  # debug 失败，任务结束
+            # debug 成功：_debug_loop 已更新 self.state.code，跳过后续初始化逻辑
+            return
+        
+        # 代码生成成功，重置语法错误计数
+        self._syntax_error_count = 0
+        
         # 3. 将 LLM 生成的函数注入到骨架中（先验证语义完整性）
         validated_code = self._validate_llm_code(code_output.code, "初始代码")
         full_code = skeleton.replace("{USER_CODE}", validated_code)
@@ -1313,6 +1339,14 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                     
                     # 【框架对齐】OPTIMIZE 阶段传完整的 best_code，让 LLM 基于完整上下文做最小改动
                     optimize_previous_code = self.state.best_code or self.state.code
+                    
+                    # 【修复】连续语法错误时临时提升 max_tokens
+                    force_tokens = None
+                    if self._syntax_error_count >= 2:
+                        force_tokens = 24576
+                        logger.warning(f"[FastEngine] 连续 {self._syntax_error_count} 次语法错误，临时提升 max_tokens 到 {force_tokens}")
+                        self._append_log(f"[WARN] 连续 {self._syntax_error_count} 次语法错误，临时提升 max_tokens 到 {force_tokens}")
+                    
                     code_output = self.plan_coding_agent.generate(
                         task_config=tc,
                         run_state="OPTIMIZE",
@@ -1321,7 +1355,8 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                         evaluation_history=self._evaluation_history,
                         best_evaluation=best_eval,
                         best_metrics=best_metr,
-                        optimization_history=self._optimization_history
+                        optimization_history=self._optimization_history,
+                        force_max_tokens=force_tokens,
                     )
                     
                     # 【框架对齐】OPTIMIZE 阶段：将优化后的函数合并到 best_code 本身（不再是注入系统骨架）
@@ -1330,9 +1365,11 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                     try:
                         validated_code = self._validate_llm_code(merged_code, f"第{self.state.optimize_round}轮优化代码")
                     except ValueError as ve:
+                        self._syntax_error_count += 1
                         logger.error(f"[FastEngine] 优化代码验证失败: {ve}")
                         self._append_log(f"[ERROR] 优化代码验证失败: {ve}")
-                        # 【框架对齐】记录优化验证失败历史
+                        
+                        # 【框架对齐】记录原始失败
                         opt_fail_record = {
                             "round": self.state.optimize_round,
                             "run_type": "optimize",
@@ -1346,13 +1383,75 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                             "is_best": False
                         }
                         self._optimization_history.append(opt_fail_record)
-                        # 同步到持久化状态
+                        
+                        # 【关键修复】将语法错误立即反馈给 LLM，请求重新生成，而不是直接丢弃
+                        retry_context = (
+                            f"【重要：你刚才生成的优化代码存在语法错误，未能通过静态检查】\n"
+                            f"错误信息: {ve}\n"
+                            f"请修复语法错误后重新生成优化代码。特别注意：\n"
+                            f"1. 代码末尾是否被截断（字符串/括号未闭合）\n"
+                            f"2. 缩进是否正确\n"
+                            f"3. 不要改变原有算法逻辑，仅修复语法问题"
+                        )
+                        original_suggestions = evaluation.suggestions_for_coding_agent or ""
+                        if original_suggestions:
+                            retry_context = f"{original_suggestions}\n\n{retry_context}"
+                        
+                        logger.info("[FastEngine] 优化代码语法错误，立即请求 LLM 重新生成...")
+                        self._append_log("[INFO] 优化代码语法错误，立即请求 LLM 重新生成...")
+                        
+                        code_output_retry = self.plan_coding_agent.generate(
+                            task_config=tc,
+                            run_state="OPTIMIZE",
+                            context_payload=retry_context,
+                            previous_code=optimize_previous_code,
+                            evaluation_history=self._evaluation_history,
+                            best_evaluation=best_eval,
+                            best_metrics=best_metr,
+                            optimization_history=self._optimization_history
+                        )
+                        
+                        merged_code_retry = self._replace_functions_in_code(base_code, code_output_retry.code)
+                        try:
+                            validated_code = self._validate_llm_code(merged_code_retry, f"第{self.state.optimize_round}轮优化代码(语法修复)")
+                            logger.info("[FastEngine] 优化代码语法修复成功")
+                            self._append_log("[INFO] 优化代码语法修复成功")
+                        except ValueError as ve2:
+                            logger.error(f"[FastEngine] 优化代码语法修复重试仍失败: {ve2}")
+                            self._append_log(f"[ERROR] 优化代码语法修复重试仍失败: {ve2}")
+                            
+                            # 记录重试失败
+                            opt_fail_record2 = {
+                                "round": self.state.optimize_round,
+                                "run_type": "optimize_retry",
+                                "code": code_output_retry.code or "",
+                                "plan": None,
+                                "success": False,
+                                "metrics": None,
+                                "evaluation": None,
+                                "error_message": f"语法修复重试失败: {ve2}",
+                                "score": None,
+                                "is_best": False
+                            }
+                            self._optimization_history.append(opt_fail_record2)
+                            self.state.optimization_history = [
+                                OptimizationRecord(**r) for r in self._optimization_history
+                            ]
+                            task_manager.update_task(self.task_id, optimization_history=self.state.optimization_history)
+                            continue
+                        
+                        # 同步成功后的状态
                         self.state.optimization_history = [
                             OptimizationRecord(**r) for r in self._optimization_history
                         ]
                         task_manager.update_task(self.task_id, optimization_history=self.state.optimization_history)
-                        continue
+                        # 语法修复成功，重置计数
+                        self._syntax_error_count = 0
+                        # 不 continue，让控制流继续到 full_code = validated_code
+                    
                     full_code = validated_code
+                    # 验证通过，重置语法错误计数
+                    self._syntax_error_count = 0
                     
                     self.state.code = full_code
                     self.state.code_history.append({
@@ -1423,11 +1522,20 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             self._start_timing("code_generation_seconds")
             # 【框架对齐】DEBUG 阶段传完整的 best_code，让 LLM 从全局视角找 bug
             debug_previous_code = self.state.best_code or self.state.code
+            
+            # 【修复】连续语法错误时临时提升 max_tokens
+            force_tokens = None
+            if self._syntax_error_count >= 2:
+                force_tokens = 24576
+                logger.warning(f"[FastEngine] 连续 {self._syntax_error_count} 次语法错误，临时提升 max_tokens 到 {force_tokens}")
+                self._append_log(f"[WARN] 连续 {self._syntax_error_count} 次语法错误，临时提升 max_tokens 到 {force_tokens}")
+            
             code_output = self.plan_coding_agent.generate(
                 task_config=tc,
                 run_state="DEBUG",
                 context_payload=all_errors,
-                previous_code=debug_previous_code
+                previous_code=debug_previous_code,
+                force_max_tokens=force_tokens,
             )
             self._end_timing("code_generation_seconds")
             
@@ -1439,11 +1547,24 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                 try:
                     validated_code = self._validate_llm_code(code_output.code, f"第{local_round}次Debug完整脚本", require_functions=False)
                 except ValueError as ve:
+                    self._syntax_error_count += 1
                     logger.error(f"[FastEngine] Debug 完整脚本验证失败: {ve}")
                     self._append_log(f"[ERROR] Debug 完整脚本验证失败: {ve}")
                     retry_error = f"完整脚本验证失败: {ve}"
                     logger.error(f"[FastEngine] 第 {local_round} 次修复仍失败: {retry_error}")
                     self._append_log(f"[ERROR] 第 {local_round} 次修复后执行仍失败:\n{retry_error}")
+                    # 【关键修复】更新 result，让 LLM 在下一轮收到明确的语法错误反馈
+                    result = SandboxResult(
+                        success=False,
+                        stdout="",
+                        stderr="",
+                        returncode=1,
+                        execution_time=0.0,
+                        metrics=None,
+                        error_message=f"[语法错误 - 代码未通过静态检查] {retry_error}\n"
+                                      f"注意：这不是运行时错误，而是你生成的代码本身存在语法问题（如括号未闭合、缩进错误、字符串未闭合）。"
+                                      f"请确保生成的代码是合法的 Python 语法，特别是检查代码末尾是否被截断。"
+                    )
                     continue
                 full_code = validated_code
             else:
@@ -1454,11 +1575,24 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
                 try:
                     validated_code = self._validate_llm_code(merged_code, f"第{local_round}次Debug修复代码")
                 except ValueError as ve:
+                    self._syntax_error_count += 1
                     logger.error(f"[FastEngine] Debug 代码验证失败: {ve}")
                     self._append_log(f"[ERROR] Debug 代码验证失败: {ve}")
                     retry_error = f"代码验证失败: {ve}"
                     logger.error(f"[FastEngine] 第 {local_round} 次修复仍失败: {retry_error}")
                     self._append_log(f"[ERROR] 第 {local_round} 次修复后执行仍失败:\n{retry_error}")
+                    # 【关键修复】更新 result，让 LLM 在下一轮收到明确的语法错误反馈
+                    result = SandboxResult(
+                        success=False,
+                        stdout="",
+                        stderr="",
+                        returncode=1,
+                        execution_time=0.0,
+                        metrics=None,
+                        error_message=f"[语法错误 - 代码未通过静态检查] {retry_error}\n"
+                                      f"注意：这不是运行时错误，而是你生成的代码本身存在语法问题（如括号未闭合、缩进错误、字符串未闭合）。"
+                                      f"请确保生成的代码是合法的 Python 语法，特别是检查代码末尾是否被截断。"
+                    )
                     continue
                 full_code = validated_code
             
@@ -1489,7 +1623,8 @@ h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}
             )
             
             if result.success:
-                # 修复成功
+                # 修复成功，重置语法错误计数
+                self._syntax_error_count = 0
                 self.state.execution_output = result.stdout
                 self.state.metrics = result.metrics
                 logger.info(f"[FastEngine] 第 {local_round} 次修复成功")
